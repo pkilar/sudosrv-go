@@ -8,10 +8,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sync"
-	"syscall"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
+	"sync"
+	"syscall"
 )
 
 // Server manages listeners and handles graceful shutdown.
@@ -33,7 +33,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 // Start initializes listeners and begins accepting connections.
 func (s *Server) Start() error {
-//	var err error
+	//	var err error
 
 	// Start plaintext listener if configured
 	if s.config.Server.ListenAddress != "" {

@@ -15,10 +15,9 @@ import (
 )
 
 const (
-	maxReconnectInterval = time.Minute
+	maxReconnectInterval     = time.Minute
 	initialReconnectInterval = time.Second
 )
-
 
 // Session handles relaying I/O logs for one session to an upstream server.
 type Session struct {
@@ -54,7 +53,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConf
 // manager is the core goroutine that manages the connection lifecycle.
 func (s *Session) manager() {
 	defer s.wg.Done()
-	
+
 	reconnectAttempts := 0
 	for {
 		slog.Info("Attempting to connect to upstream server", "log_id", s.logID, "attempt", reconnectAttempts+1)
@@ -78,7 +77,7 @@ func (s *Session) manager() {
 		// Start reader and writer for the new connection
 		var localWg sync.WaitGroup
 		localWg.Add(2)
-		
+
 		connDone := make(chan struct{})
 
 		go func() {
@@ -114,7 +113,6 @@ func (s *Session) calculateBackoff(attempts int) time.Duration {
 	}
 	return time.Duration(backoff)
 }
-
 
 // connectToUpstream dials the upstream server and performs the initial handshake.
 func (s *Session) connectToUpstream() error {
@@ -189,7 +187,6 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		}
 	}
 
-
 	// Wait for a response from the reader goroutine
 	select {
 	case serverMsg, ok := <-s.toClientChan:
@@ -244,7 +241,7 @@ func (s *Session) upstreamWriter(connDone chan struct{}) {
 				slog.Warn("Upstream writer has message but no connection, message may be delayed.", "log_id", s.logID)
 				// Re-queue the message, this is not ideal. A better queue is needed for production.
 				// For now, this will likely block until a reconnect happens, which is acceptable.
-				s.fromClientChan <- clientMsg 
+				s.fromClientChan <- clientMsg
 				time.Sleep(time.Second)
 				continue
 			}
@@ -272,7 +269,6 @@ func (s *Session) closeCurrentConnection() {
 		s.upstreamProc = nil
 	}
 }
-
 
 // Close terminates the relay session permanently.
 func (s *Session) Close() error {

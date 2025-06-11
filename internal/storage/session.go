@@ -39,7 +39,7 @@ var streamMap = map[string]struct {
 
 // NewSession creates a new local storage session handler.
 func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
-    // Create a simplified session ID for the directory name, like sudo does.
+	// Create a simplified session ID for the directory name, like sudo does.
 	sessID := logID[:6]
 	// Construct directory path, creating subdirectories based on sessID for better organization.
 	// e.g., for sessID "a1b2c3", path becomes /base/dir/a1/b2/c3
@@ -152,7 +152,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	if !ok {
 		return nil, fmt.Errorf("unknown stream name: %s", streamName)
 	}
-	
+
 	ioFile := s.files[streamName]
 
 	// Write data
@@ -183,7 +183,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
-    delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
+	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 	timingRecord := fmt.Sprintf("w %.6f %d %d\n", delay.Seconds(), event.Rows, event.Cols)
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -192,14 +192,13 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 }
 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
-    delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
+	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 	timingRecord := fmt.Sprintf("s %.6f %s\n", delay.Seconds(), event.Signal)
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
-    return nil, nil // No commit point for suspend
+	return nil, nil // No commit point for suspend
 }
-
 
 // finalize cleans up and closes files, marking the log as complete.
 func (s *Session) finalize(exitMsg *pb.ExitMessage) {

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/config"
 	pb "sudosrv/pkg/sudosrv_proto"
-	"strings"
 	"testing"
 	"time"
 )

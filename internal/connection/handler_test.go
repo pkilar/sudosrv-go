@@ -74,7 +74,7 @@ func TestConnectionHandler(t *testing.T) {
 		} else if serverHello.GetServerId() != cfg.Server.ServerID {
 			t.Errorf("Expected server ID '%s', got '%s'", cfg.Server.ServerID, serverHello.GetServerId())
 		}
-		
+
 		serverConn.Close() // Close connection to stop the handler
 		wg.Wait()
 	})
@@ -106,13 +106,12 @@ func TestConnectionHandler(t *testing.T) {
 				},
 			}, nil
 		}
-		
+
 		handler := NewHandler(serverConn, cfg)
 		go handler.Handle()
 
-
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
-		
+
 		// Client sends Accept
 		acceptMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
 		if err := clientProc.WriteClientMessage(acceptMsg); err != nil {
@@ -128,7 +127,7 @@ func TestConnectionHandler(t *testing.T) {
 		if response.GetLogId() == "" {
 			t.Fatal("Expected log_id response, got something else")
 		}
-		
+
 		// Closing the connection should trigger the session's Close() method
 		serverConn.Close()
 

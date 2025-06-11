@@ -5,8 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
 	pb "sudosrv/pkg/sudosrv_proto"
+	"sync"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -85,7 +85,6 @@ func (p *processor) ReadServerMessage() (*pb.ServerMessage, error) {
 	return serverMsg, nil
 }
 
-
 // writeMessage is a generic helper to write a length-prefixed message.
 func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 	outBytes, err := proto.Marshal(msg)
@@ -105,7 +104,6 @@ func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 	}
 	return nil
 }
-
 
 // WriteServerMessage marshals a ServerMessage and writes it to the writer with a length prefix.
 func (p *processor) WriteServerMessage(msg *pb.ServerMessage) error {
