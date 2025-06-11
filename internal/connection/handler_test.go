@@ -41,6 +41,7 @@ func TestConnectionHandler(t *testing.T) {
 			IdleTimeout: 1 * time.Second,
 			ServerID:    "TestSrv",
 		},
+		LocalStorage: config.LocalStorageConfig{}, // Needed for function signature
 	}
 
 	t.Run("ClientHelloFlow", func(t *testing.T) {
@@ -83,13 +84,11 @@ func TestConnectionHandler(t *testing.T) {
 		clientConn, serverConn := net.Pipe()
 		defer clientConn.Close()
 
-		// Override NewSession to inject our mock
-		originalNewSession := storage.NewSession
-		defer func() { storage.NewSession = originalNewSession }()
-
+		handler := NewHandler(serverConn, cfg)
 		sessionClosed := make(chan bool, 1)
 
-		storage.NewSession = func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (storage.SessionHandler, error) {
+		// Override the session factory on the handler instance to return our mock
+		handler.sessionFactories.newLocalStorageSession = func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
 			return &mockSessionHandler{
 				t: t,
 				HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
@@ -107,7 +106,6 @@ func TestConnectionHandler(t *testing.T) {
 			}, nil
 		}
 
-		handler := NewHandler(serverConn, cfg)
 		go handler.Handle()
 
 		clientProc := protocol.NewProcessor(clientConn, clientConn)

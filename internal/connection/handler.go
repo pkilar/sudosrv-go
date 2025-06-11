@@ -24,6 +24,11 @@ type Handler struct {
 	logID     string
 	session   SessionHandler
 	isTLS     bool
+	// sessionFactories allows for injecting mock session creators during tests.
+	sessionFactories struct {
+		newLocalStorageSession func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
+		newRelaySession        func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
+	}
 }
 
 // SessionHandler defines the interface for handling session data (either locally or by relay).
@@ -35,12 +40,21 @@ type SessionHandler interface {
 // NewHandler creates a new handler for a connection.
 func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 	_, isTLS := conn.(*tls.Conn)
-	return &Handler{
+	h := &Handler{
 		conn:      conn,
 		config:    cfg,
 		processor: protocol.NewProcessor(conn, conn),
 		isTLS:     isTLS,
 	}
+
+	// Initialize factories to point to the real session creation functions.
+	h.sessionFactories.newLocalStorageSession = func(logID string, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+		return storage.NewSession(logID, acceptMsg, localCfg)
+	}
+	h.sessionFactories.newRelaySession = func(logID string, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
+		return relay.NewSession(logID, acceptMsg, relayCfg)
+	}
+	return h
 }
 
 // Handle runs the message processing loop for the connection.
@@ -142,14 +156,14 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	// Initialize the correct session handler based on server mode
 	switch h.config.Server.Mode {
 	case "local":
-		h.session, err = storage.NewSession(h.logID, acceptMsg, &h.config.LocalStorage)
+		h.session, err = h.sessionFactories.newLocalStorageSession(h.logID, acceptMsg, &h.config.LocalStorage)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local storage session: %w", err)
 		}
 		slog.Info("Started local storage session", "log_id", h.logID)
 
 	case "relay":
-		h.session, err = relay.NewSession(h.logID, acceptMsg, &h.config.Relay)
+		h.session, err = h.sessionFactories.newRelaySession(h.logID, acceptMsg, &h.config.Relay)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
