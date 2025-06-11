@@ -1,0 +1,134 @@
+// Filename: pkg/sudosrv_proto/sudo_logsrv.proto
+syntax = "proto3";
+
+package sudosrv_proto;
+
+option go_package = "sudosrv/pkg/sudosrv_proto";
+
+// From sudo_logsrv.proto - used for marshaling/unmarshaling
+// See https://www.sudo.ws/man/1.9.0/sudo_logsrv.proto.man.html
+
+// Wrapper for all messages sent from client to server.
+message ClientMessage {
+    oneof event {
+        ClientHello hello_msg = 1;
+        AcceptMessage accept_msg = 2;
+        RejectMessage reject_msg = 3;
+        ExitMessage exit_msg = 4;
+        RestartMessage restart_msg = 5;
+        AlertMessage alert_msg = 6;
+        IoBuffer ttyin_buf = 7;
+        IoBuffer ttyout_buf = 8;
+        IoBuffer stdin_buf = 9;
+        IoBuffer stdout_buf = 10;
+        IoBuffer stderr_buf = 11;
+        ChangeWindowSize winsize_event = 12;
+        CommandSuspend suspend_event = 13;
+    }
+}
+
+// Wrapper for all messages sent from server to client.
+message ServerMessage {
+    oneof event {
+        ServerHello hello = 1;
+        TimeSpec commit_point = 2;
+        string log_id = 3;
+        string error = 4;
+        string abort = 5;
+    }
+}
+
+// Time specification, matches struct timespec
+message TimeSpec {
+    int64 tv_sec = 1;
+    int32 tv_nsec = 2;
+}
+
+// Key-value pairs used in other messages.
+message InfoMessage {
+    string key = 1;
+    oneof value {
+        int64 numval = 2;
+        string strval = 3;
+        StringList strlistval = 4;
+        NumberList numlistval = 5;
+    }
+}
+
+// A list of strings
+message StringList {
+    repeated string strings = 1;
+}
+
+// A list of numbers
+message NumberList {
+    repeated int64 numbers = 1;
+}
+
+// Initial client handshake.
+message ClientHello {
+    string client_id = 1;
+}
+
+// Initial server handshake.
+message ServerHello {
+    string server_id = 1;
+    string redirect = 2;
+    repeated string servers = 3;
+    bool subcommands = 4;
+}
+
+// Command accepted by the security policy.
+message AcceptMessage {
+    TimeSpec submit_time = 1;
+    bool expect_iobufs = 2;
+    repeated InfoMessage info_msgs = 3;
+}
+
+// Command rejected by the security policy.
+message RejectMessage {
+    TimeSpec submit_time = 1;
+    string reason = 2;
+    repeated InfoMessage info_msgs = 3;
+}
+
+// Command exit status.
+message ExitMessage {
+    TimeSpec run_time = 1;
+    uint32 exit_value = 2;
+    bool dumped_core = 3;
+    string signal = 4;
+    string error = 5;
+}
+
+// Request to resume a pre-existing I/O log session.
+message RestartMessage {
+    string log_id = 1;
+    TimeSpec resume_point = 2;
+}
+
+// Security alert from the security policy plugin.
+message AlertMessage {
+    TimeSpec alert_time = 1;
+    string reason = 2;
+    repeated InfoMessage info_msgs = 3;
+}
+
+// An I/O buffer.
+message IoBuffer {
+    TimeSpec delay = 1;
+    bytes data = 2;
+}
+
+// New window size from client.
+message ChangeWindowSize {
+    TimeSpec delay = 1;
+    uint32 rows = 2;
+    uint32 cols = 3;
+}
+
+// Command suspended or continued.
+message CommandSuspend {
+    TimeSpec delay = 1;
+    string signal = 2;
+}

@@ -1,0 +1,39 @@
+# Go Sudo I/O Log Server .gitignore
+
+# Compiled binary
+sudosrv
+sudosrv.exe
+
+# Local configuration files
+# These often contain secrets or local paths and should not be committed.
+# A template or example file (e.g., config.example.yaml) should be committed instead.
+config.yaml
+*.key
+*.crt
+*.pem
+
+# Log files and directories
+# The server's own operational logs and the sudo I/O logs it stores.
+*.log
+local-logs/
+/var/log/gosudo-io/
+
+# Go build cache and dependencies
+bin/
+pkg/
+vendor/
+*.test
+*.prof
+cover.out
+test.coverprofile
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+._*
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+*~
