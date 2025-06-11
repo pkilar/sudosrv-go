@@ -18,7 +18,7 @@ func TestProcessor(t *testing.T) {
 		// Create a test message
 		clientHello := &sudosrv_proto.ClientHello{ClientId: "test-client/1.0"}
 		clientMsg := &sudosrv_proto.ClientMessage{
-			Event: &sudosrv_proto.ClientMessage_HelloMsg{HelloMsg: clientHello},
+			Type: &sudosrv_proto.ClientMessage_HelloMsg{HelloMsg: clientHello},
 		}
 
 		// Write the message (client -> server)
@@ -50,7 +50,7 @@ func TestProcessor(t *testing.T) {
 		// Create a test message
 		serverHello := &sudosrv_proto.ServerHello{ServerId: "test-server/1.0"}
 		serverMsg := &sudosrv_proto.ServerMessage{
-			Event: &sudosrv_proto.ServerMessage_Hello{Hello: serverHello},
+			Type: &sudosrv_proto.ServerMessage_Hello{Hello: serverHello},
 		}
 
 		// Write the message (server -> client)

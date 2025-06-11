@@ -59,7 +59,7 @@ func TestConnectionHandler(t *testing.T) {
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
 
 		// Client sends Hello
-		helloMsg := &pb.ClientMessage{Event: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "test-harness"}}}
+		helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "test-harness"}}}
 		if err := clientProc.WriteClientMessage(helloMsg); err != nil {
 			t.Fatalf("Client failed to write Hello: %v", err)
 		}
@@ -97,7 +97,7 @@ func TestConnectionHandler(t *testing.T) {
 						t.Error("First message to session should be AcceptMsg")
 					}
 					// Respond with log_id
-					return &pb.ServerMessage{Event: &pb.ServerMessage_LogId{LogId: logID}}, nil
+					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: logID}}, nil
 				},
 				CloseFn: func() error {
 					sessionClosed <- true
@@ -111,7 +111,7 @@ func TestConnectionHandler(t *testing.T) {
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
 
 		// Client sends Accept
-		acceptMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
+		acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
 		if err := clientProc.WriteClientMessage(acceptMsg); err != nil {
 			t.Fatalf("Client failed to write Accept: %v", err)
 		}

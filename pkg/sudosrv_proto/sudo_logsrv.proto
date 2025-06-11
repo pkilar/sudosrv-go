@@ -10,26 +10,26 @@ option go_package = "sudosrv/pkg/sudosrv_proto";
 
 // Wrapper for all messages sent from client to server.
 message ClientMessage {
-    oneof event {
-        ClientHello hello_msg = 1;
-        AcceptMessage accept_msg = 2;
-        RejectMessage reject_msg = 3;
-        ExitMessage exit_msg = 4;
-        RestartMessage restart_msg = 5;
-        AlertMessage alert_msg = 6;
-        IoBuffer ttyin_buf = 7;
-        IoBuffer ttyout_buf = 8;
-        IoBuffer stdin_buf = 9;
-        IoBuffer stdout_buf = 10;
-        IoBuffer stderr_buf = 11;
-        ChangeWindowSize winsize_event = 12;
-        CommandSuspend suspend_event = 13;
+    oneof type {
+        AcceptMessage accept_msg = 1;
+        RejectMessage reject_msg = 2;
+        ExitMessage exit_msg = 3;
+        RestartMessage restart_msg = 4;
+        AlertMessage alert_msg = 5;
+        IoBuffer ttyin_buf = 6;
+        IoBuffer ttyout_buf = 7;
+        IoBuffer stdin_buf = 8;
+        IoBuffer stdout_buf = 9;
+        IoBuffer stderr_buf = 10;
+        ChangeWindowSize winsize_event = 11;
+        CommandSuspend suspend_event = 12;
+        ClientHello hello_msg = 13;
     }
 }
 
 // Wrapper for all messages sent from server to client.
 message ServerMessage {
-    oneof event {
+    oneof type {
         ServerHello hello = 1;
         TimeSpec commit_point = 2;
         string log_id = 3;
@@ -46,6 +46,12 @@ message TimeSpec {
 
 // Key-value pairs used in other messages.
 message InfoMessage {
+    message StringList {
+        repeated string strings = 1;
+    }
+    message NumberList {
+        repeated int64 numbers = 1;
+    }
     string key = 1;
     oneof value {
         int64 numval = 2;
@@ -81,8 +87,8 @@ message ServerHello {
 // Command accepted by the security policy.
 message AcceptMessage {
     TimeSpec submit_time = 1;
-    bool expect_iobufs = 2;
-    repeated InfoMessage info_msgs = 3;
+    repeated InfoMessage info_msgs = 2;
+    bool expect_iobufs = 3;
 }
 
 // Command rejected by the security policy.
@@ -95,7 +101,7 @@ message RejectMessage {
 // Command exit status.
 message ExitMessage {
     TimeSpec run_time = 1;
-    uint32 exit_value = 2;
+    int32 exit_value = 2;
     bool dumped_core = 3;
     string signal = 4;
     string error = 5;
@@ -123,8 +129,8 @@ message IoBuffer {
 // New window size from client.
 message ChangeWindowSize {
     TimeSpec delay = 1;
-    uint32 rows = 2;
-    uint32 cols = 3;
+    int32 rows = 2;
+    int32 cols = 3;
 }
 
 // Command suspended or continued.

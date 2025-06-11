@@ -138,7 +138,7 @@ func (s *Session) connectToUpstream() error {
 
 	// Perform handshake
 	// 1. Send ClientHello
-	helloMsg := &pb.ClientMessage{Event: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
+	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
 	if err := s.upstreamProc.WriteClientMessage(helloMsg); err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to send ClientHello to upstream: %w", err)
@@ -152,7 +152,7 @@ func (s *Session) connectToUpstream() error {
 	}
 
 	// 3. Send the original AcceptMessage to start the log session
-	acceptMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}
+	acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}
 	if err := s.upstreamProc.WriteClientMessage(acceptMsg); err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to send AcceptMessage to upstream: %w", err)
@@ -175,7 +175,7 @@ func (s *Session) connectToUpstream() error {
 // HandleClientMessage queues a message to be sent to the upstream server.
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
 	// Don't forward the initial AcceptMsg as it's handled by the connect logic.
-	if _, ok := msg.Event.(*pb.ClientMessage_AcceptMsg); ok {
+	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
 		// We expect the first response to be the log_id from the handshake.
 		// This is a bit of a simplification; a more robust implementation might
 		// use a different channel for the very first response.

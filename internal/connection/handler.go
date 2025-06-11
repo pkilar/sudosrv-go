@@ -84,7 +84,7 @@ func (h *Handler) Handle() {
 		if err != nil {
 			slog.Error("Error processing message", "error", err, "remote_addr", h.conn.RemoteAddr())
 			// Attempt to send a fatal error to the client
-			errMsg := &pb.ServerMessage{Event: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
+			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
 			_ = h.processor.WriteServerMessage(errMsg)
 			return
 		}
@@ -106,7 +106,7 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 	}
 
 	// Handle pre-session messages
-	switch event := clientMsg.Event.(type) {
+	switch event := clientMsg.Type.(type) {
 	case *pb.ClientMessage_HelloMsg:
 		slog.Info("Received ClientHello", "client_id", event.HelloMsg.ClientId, "remote_addr", h.conn.RemoteAddr())
 		return h.handleHello()
@@ -130,7 +130,7 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		// If we have a session handler, it will take care of other message types.
 		// If not, it's a protocol error to receive other messages.
 		slog.Warn("Received unexpected message before session start", "type", fmt.Sprintf("%T", event), "remote_addr", h.conn.RemoteAddr())
-		return &pb.ServerMessage{Event: &pb.ServerMessage_Error{Error: "Protocol error: unexpected message"}}, nil
+		return &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Protocol error: unexpected message"}}, nil
 	}
 }
 
@@ -139,7 +139,7 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	helloResponse := &pb.ServerHello{
 		ServerId: h.config.Server.ServerID,
 	}
-	return &pb.ServerMessage{Event: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
+	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
 
 // handleAccept sets up a session for an accepted command.
@@ -175,5 +175,5 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 
 	// The first message to the session handler is the AcceptMessage itself
 	// to allow it to initialize and send back the initial log_id.
-	return h.session.HandleClientMessage(&pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}})
+	return h.session.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}})
 }

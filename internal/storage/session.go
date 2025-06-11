@@ -73,10 +73,10 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		}
 		s.isInitialized = true
 		// Respond with the log_id
-		return &pb.ServerMessage{Event: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
+		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
 	}
 
-	switch event := msg.Event.(type) {
+	switch event := msg.Type.(type) {
 	case *pb.ClientMessage_TtyinBuf:
 		return s.writeIoEntry("ttyin", event.TtyinBuf.Delay, event.TtyinBuf.Data)
 	case *pb.ClientMessage_TtyoutBuf:
@@ -174,7 +174,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 
 	// Send commit point
 	commitPoint := s.cumulativeDelay[streamName]
-	return &pb.ServerMessage{Event: &pb.ServerMessage_CommitPoint{
+	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
 		CommitPoint: &pb.TimeSpec{
 			TvSec:  int64(commitPoint.Seconds()),
 			TvNsec: int32(commitPoint.Nanoseconds() % 1e9),

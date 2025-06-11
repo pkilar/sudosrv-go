@@ -40,7 +40,7 @@ func TestStorageSession(t *testing.T) {
 		}
 
 		// First message must be the AcceptMessage to initialize
-		acceptClientMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
 		serverResponse, err := session.HandleClientMessage(acceptClientMsg)
 		if err != nil {
 			t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
@@ -85,13 +85,13 @@ func TestStorageSession(t *testing.T) {
 		defer session.Close()
 
 		// Initialize session
-		acceptClientMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
 		_, _ = session.HandleClientMessage(acceptClientMsg)
 
 		// Send a TTY Out buffer
 		ttyoutData := []byte("hello world")
 		ttyoutMsg := &pb.ClientMessage{
-			Event: &pb.ClientMessage_TtyoutBuf{
+			Type: &pb.ClientMessage_TtyoutBuf{
 				TtyoutBuf: &pb.IoBuffer{
 					Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 500000000}, // 1.5s
 					Data:  ttyoutData,
@@ -134,12 +134,12 @@ func TestStorageSession(t *testing.T) {
 		defer session.Close()
 
 		// Initialize session
-		acceptClientMsg := &pb.ClientMessage{Event: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
 		_, _ = session.HandleClientMessage(acceptClientMsg)
 
 		// Send Exit message
 		exitMsg := &pb.ClientMessage{
-			Event: &pb.ClientMessage_ExitMsg{
+			Type: &pb.ClientMessage_ExitMsg{
 				ExitMsg: &pb.ExitMessage{ExitValue: 0},
 			},
 		}
