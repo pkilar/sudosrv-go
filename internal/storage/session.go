@@ -2,11 +2,13 @@
 package storage
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +45,8 @@ var streamMap = map[string]struct {
 // Global mutex for sequence file access
 var seqMutex sync.Mutex
 
+const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
 // NewSession creates a new local storage session handler.
 func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
 	sessionDir, err := buildSessionPath(logID, cfg, acceptMsg)
@@ -62,6 +66,19 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		files:           make(map[string]*os.File),
 		cumulativeDelay: make(map[string]time.Duration),
 	}, nil
+}
+
+// randomAlphanumericString generates a cryptographically secure random alphanumeric string of length n.
+func randomAlphanumericString(n int) (string, error) {
+	b := make([]byte, n)
+	for i := range b {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphanumericChars))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = alphanumericChars[num.Int64()]
+	}
+	return string(b), nil
 }
 
 // buildSessionPath constructs the full path to the log directory based on config settings.
@@ -84,14 +101,17 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 		}
 	}
 
-	// Get the next sequence number
+	// Get values for dynamic escapes
 	seq, err := getNextSeq(cfg.LogDirectory)
 	if err != nil {
 		return "", err
 	}
-
-	// Get current time for time-based escapes
+	randStr, err := randomAlphanumericString(6)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate random string: %w", err)
+	}
 	now := time.Now()
+	epochStr := fmt.Sprintf("%d", now.Unix())
 
 	// Replacer for sudoers-style escape sequences.
 	replacer := strings.NewReplacer(
@@ -108,8 +128,9 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 		"%{hostname}", infoMap["submithost"],
 		"%{command_path}", infoMap["command"],
 		"%{command}", filepath.Base(infoMap["command"]),
-		// Sequence escape
+		// Sequence and Random escapes
 		"%{seq}", seq,
+		"%{rand}", randStr,
 		// Time/Date escapes
 		"%{year}", fmt.Sprintf("%04d", now.Year()),
 		"%{month}", fmt.Sprintf("%02d", now.Month()),
@@ -117,8 +138,9 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 		"%{hour}", fmt.Sprintf("%02d", now.Hour()),
 		"%{minute}", fmt.Sprintf("%02d", now.Minute()),
 		"%{second}", fmt.Sprintf("%02d", now.Second()),
+		"%{epoch}", epochStr,
 		// Path escapes
-		"%{LIVEDIR}", cfg.LogDirectory, // Custom replacement for our config, like iolog_path
+		"%{LIVEDIR}", cfg.LogDirectory,
 		// Literal percent escape
 		"%%", "%",
 	)

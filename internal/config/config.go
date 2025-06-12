@@ -106,11 +106,11 @@ local_storage:
   #   User: %{user}, %{uid}, %{group}, %{gid}
   #   RunAs User: %{runuser}, %{runuid}, %{rungroup}, %{rungid}
   #   Host/Command: %{hostname}, %{command} (basename), %{command_path} (full path)
-  #   Date/Time: %{year}, %{month}, %{day}, %{hour}, %{minute}, %{second}
-  #   Misc: %{seq} (6-digit sequence), %{LIVEDIR} (log_directory above), %% (literal %)
+  #   Date/Time: %{year}, %{month}, %{day}, %{hour}, %{minute}, %{second}, %{epoch}
+  #   Misc: %{seq}, %{rand}, %{LIVEDIR}, %% (literal %)
   iolog_dir: "%{LIVEDIR}/%{year}-%{month}/%{user}"
 
   # File name for the session log directory, with support for the same escapes.
-  iolog_file: "%{seq}-%{command}"
+  iolog_file: "%{epoch}-%{rand}-%{command}"
 
 */
