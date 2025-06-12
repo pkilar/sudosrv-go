@@ -36,7 +36,9 @@ type RelayConfig struct {
 
 // LocalStorageConfig holds settings for local storage mode.
 type LocalStorageConfig struct {
-	LogDirectory string `yaml:"log_directory"`
+	LogDirectory string `yaml:"log_directory"` // Base directory, used if iolog_dir is not set
+	IologDir     string `yaml:"iolog_dir"`     // sudoers-style I/O log directory path
+	IologFile    string `yaml:"iolog_file"`    // sudoers-style I/O log session file name
 }
 
 // LoadConfig reads the configuration from a YAML file.
@@ -54,13 +56,13 @@ func LoadConfig(path string) (*Config, error) {
 		},
 		LocalStorage: LocalStorageConfig{
 			LogDirectory: "/var/log/gosudo-io",
+			IologDir:     "%{LIVEDIR}/%{user}", // Default sudoers-style path
+			IologFile:    "%{seq}",             // Default sudoers-style file name
 		},
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// If config file not found, we can proceed with defaults.
-		// For other errors, we should fail.
 		if os.IsNotExist(err) {
 			fmt.Printf("Warning: Config file not found at %s. Using default values.\n", path)
 			return config, nil
@@ -82,8 +84,8 @@ server:
   mode: "local"  # or "relay"
   listen_address: "0.0.0.0:30343"
   listen_address_tls: "0.0.0.0:30344"
-  tls_cert_file: "server.crt" # Required if listen_address_tls is set
-  tls_key_file: "server.key"  # Required if listen_address_tls is set
+  tls_cert_file: "server.crt"
+  tls_key_file: "server.key"
   server_id: "GoSudoLogSrv/1.0"
   idle_timeout: 30m
 
@@ -95,6 +97,13 @@ relay:
 
 # Settings for when server.mode is "local"
 local_storage:
+  # Base directory if iolog_dir is not specified.
   log_directory: "/var/log/gosudo-io"
+  # Directory path for session logs, with support for sudoers-style escape sequences.
+  # If specified, this overrides the simpler 'log_directory' setting.
+  # LIVEDIR will be replaced with 'log_directory'.
+  iolog_dir: "%{LIVEDIR}/%{user}"
+  # File name for the session log directory, with support for escape sequences.
+  iolog_file: "%{seq}"
 
 */

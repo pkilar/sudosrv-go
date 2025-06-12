@@ -2,11 +2,14 @@
 package storage
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/config"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
@@ -37,13 +40,15 @@ var streamMap = map[string]struct {
 	"stderr": {filename: "stderr", marker: '2'},
 }
 
+// Global mutex for sequence file access
+var seqMutex sync.Mutex
+
 // NewSession creates a new local storage session handler.
 func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
-	// Create a simplified session ID for the directory name, like sudo does.
-	sessID := logID[:6]
-	// Construct directory path, creating subdirectories based on sessID for better organization.
-	// e.g., for sessID "a1b2c3", path becomes /base/dir/a1/b2/c3
-	sessionDir := filepath.Join(cfg.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6])
+	sessionDir, err := buildSessionPath(cfg, acceptMsg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build session path: %w", err)
+	}
 
 	if err := os.MkdirAll(sessionDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
@@ -56,6 +61,94 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		files:           make(map[string]*os.File),
 		cumulativeDelay: make(map[string]time.Duration),
 	}, nil
+}
+
+// buildSessionPath constructs the full path to the log directory based on config settings.
+func buildSessionPath(cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
+	// If iolog_dir is not configured, use the old default behavior
+	if cfg.IologDir == "" || cfg.IologFile == "" {
+		sessID := acceptMsg.InfoMsgs[0].GetStrval()[:6]
+		return filepath.Join(cfg.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6]), nil
+	}
+
+	// Create a map of info messages for easy lookup
+	infoMap := make(map[string]string)
+	for _, info := range acceptMsg.InfoMsgs {
+		infoMap[info.Key] = info.GetStrval()
+	}
+
+	// Get the next sequence number
+	seq, err := getNextSeq(cfg.LogDirectory)
+	if err != nil {
+		return "", err
+	}
+
+	// Replacer for escape sequences
+	r := strings.NewReplacer(
+		"%{user}", infoMap["submituser"],
+		"%{uid}", infoMap["submituid"],
+		"%{group}", infoMap["submitgroup"],
+		"%{gid}", infoMap["submitgid"],
+		"%{runuser}", infoMap["runuser"],
+		"%{runuid}", infoMap["runuid"],
+		"%{rungroup}", infoMap["rungroup"],
+		"%{rungid}", infoMap["rungid"],
+		"%{hostname}", infoMap["submithost"],
+		"%{command}", filepath.Base(infoMap["command"]),
+		"%{seq}", seq,
+		"%{LIVEDIR}", cfg.LogDirectory, // Custom replacement for our config
+	)
+
+	iologDir := r.Replace(cfg.IologDir)
+	iologFile := r.Replace(cfg.IologFile)
+
+	return filepath.Join(iologDir, iologFile), nil
+}
+
+// getNextSeq generates a sudo-compatible 6-character sequence number.
+func getNextSeq(baseDir string) (string, error) {
+	seqMutex.Lock()
+	defer seqMutex.Unlock()
+
+	// The sequence file is stored in the base log directory
+	seqFile := filepath.Join(baseDir, "seq")
+	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, 0640)
+	if err != nil {
+		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
+	}
+	defer f.Close()
+
+	// Read the current sequence number
+	data := make([]byte, 4)
+	n, err := f.Read(data)
+	if err != nil && err != io.EOF {
+		return "", fmt.Errorf("could not read sequence file: %w", err)
+	}
+
+	var currentSeq uint32
+	if n == 4 {
+		currentSeq = binary.BigEndian.Uint32(data)
+	}
+
+	// Increment and wrap if necessary (sudo uses a base36 encoding)
+	nextSeq := currentSeq + 1
+
+	// Write the new sequence number back to the file
+	binary.BigEndian.PutUint32(data, nextSeq)
+	if _, err := f.WriteAt(data, 0); err != nil {
+		return "", fmt.Errorf("could not write to sequence file: %w", err)
+	}
+
+	// Convert the number to a 6-character, zero-padded, base36 string
+	const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+	seqStr := ""
+	val := nextSeq
+	for i := 0; i < 6; i++ {
+		seqStr = string(base36[val%36]) + seqStr
+		val /= 36
+	}
+
+	return seqStr, nil
 }
 
 // HandleClientMessage processes a message from the client.
@@ -117,7 +210,8 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	logMeta["log_id"] = s.logID
 	logMeta["submit_time"] = time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec)).UTC().Format(time.RFC3339Nano)
 
-	logFile, err := os.Create(filepath.Join(s.sessionDir, "log.json"))
+	logFilePath := filepath.Join(s.sessionDir, "log") // Note: sudo names this file 'log', not 'log.json'
+	logFile, err := os.Create(logFilePath)
 	if err != nil {
 		return err
 	}
@@ -127,6 +221,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	if err := encoder.Encode(logMeta); err != nil {
 		return err
 	}
+	slog.Debug("Created log metadata file for session", "log_id", s.logID, "path", logFilePath)
 
 	// Create timing file
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
@@ -134,13 +229,16 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	if err != nil {
 		return err
 	}
+	slog.Debug("Opened timing file for session", "log_id", s.logID, "path", timingFilePath)
 
 	// Create I/O stream files
 	for streamName, streamInfo := range streamMap {
-		f, err := os.Create(filepath.Join(s.sessionDir, streamInfo.filename))
+		filePath := filepath.Join(s.sessionDir, streamInfo.filename)
+		f, err := os.Create(filePath)
 		if err != nil {
 			return err
 		}
+		slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath)
 		s.files[streamName] = f
 	}
 	return nil
@@ -168,6 +266,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		streamInfo.marker,
 		delayDur.Seconds(),
 		len(data))
+	slog.Debug("Writing timing entry", "log_id", s.logID, "stream", streamName, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
@@ -185,6 +284,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 	timingRecord := fmt.Sprintf("w %.6f %d %d\n", delay.Seconds(), event.Rows, event.Cols)
+	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
@@ -194,6 +294,7 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 	timingRecord := fmt.Sprintf("s %.6f %s\n", delay.Seconds(), event.Signal)
+	slog.Debug("Writing suspend entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
@@ -208,6 +309,7 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 
 	// Mark timing file as read-only to indicate completion, per sudo spec.
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
+	slog.Debug("Setting timing file to read-only", "log_id", s.logID, "path", timingFilePath)
 	if err := os.Chmod(timingFilePath, 0440); err != nil {
 		slog.Error("Failed to make timing file read-only", "log_id", s.logID, "error", err)
 	}
@@ -215,10 +317,12 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 
 // Close closes all open file handles for the session.
 func (s *Session) Close() error {
-	for _, f := range s.files {
+	for name, f := range s.files {
+		slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
 		f.Close()
 	}
 	if s.timingFile != nil {
+		slog.Debug("Closing timing file", "log_id", s.logID)
 		s.timingFile.Close()
 	}
 	slog.Info("Closed all log files for session", "log_id", s.logID)

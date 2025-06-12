@@ -33,7 +33,6 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 // Start initializes listeners and begins accepting connections.
 func (s *Server) Start() error {
-	//	var err error
 
 	// Start plaintext listener if configured
 	if s.config.Server.ListenAddress != "" {
@@ -102,8 +101,10 @@ func (s *Server) acceptLoop(listener net.Listener) {
 		s.waitGroup.Add(1)
 		go func() {
 			defer s.waitGroup.Done()
+			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
 			handler := connection.NewHandler(conn, s.config)
 			handler.Handle()
+			slog.Debug("Connection handler finished", "remote_addr", conn.RemoteAddr())
 		}()
 	}
 }
