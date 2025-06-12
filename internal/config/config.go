@@ -97,13 +97,20 @@ relay:
 
 # Settings for when server.mode is "local"
 local_storage:
-  # Base directory if iolog_dir is not specified.
+  # Base directory used for the %{LIVEDIR} escape and the sequence file.
   log_directory: "/var/log/gosudo-io"
+
   # Directory path for session logs, with support for sudoers-style escape sequences.
-  # If specified, this overrides the simpler 'log_directory' setting.
-  # LIVEDIR will be replaced with 'log_directory'.
-  iolog_dir: "%{LIVEDIR}/%{user}"
-  # File name for the session log directory, with support for escape sequences.
-  iolog_file: "%{seq}"
+  # If specified, this overrides the simpler default behavior.
+  # Supported escapes:
+  #   User: %{user}, %{uid}, %{group}, %{gid}
+  #   RunAs User: %{runuser}, %{runuid}, %{rungroup}, %{rungid}
+  #   Host/Command: %{hostname}, %{command} (basename), %{command_path} (full path)
+  #   Date/Time: %{year}, %{month}, %{day}, %{hour}, %{minute}, %{second}
+  #   Misc: %{seq} (6-digit sequence), %{LIVEDIR} (log_directory above), %% (literal %)
+  iolog_dir: "%{LIVEDIR}/%{year}-%{month}/%{user}"
+
+  # File name for the session log directory, with support for the same escapes.
+  iolog_file: "%{seq}-%{command}"
 
 */

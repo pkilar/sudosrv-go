@@ -45,11 +45,12 @@ var seqMutex sync.Mutex
 
 // NewSession creates a new local storage session handler.
 func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
-	sessionDir, err := buildSessionPath(cfg, acceptMsg)
+	sessionDir, err := buildSessionPath(logID, cfg, acceptMsg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build session path: %w", err)
 	}
 
+	slog.Debug("Resolved session log path", "log_id", logID, "path", sessionDir)
 	if err := os.MkdirAll(sessionDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
 	}
@@ -64,17 +65,23 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 }
 
 // buildSessionPath constructs the full path to the log directory based on config settings.
-func buildSessionPath(cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
-	// If iolog_dir is not configured, use the old default behavior
+func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
+	// If iolog_dir is not configured, use a simple default behavior.
 	if cfg.IologDir == "" || cfg.IologFile == "" {
-		sessID := acceptMsg.InfoMsgs[0].GetStrval()[:6]
+		sessID := logID[:6] // Use the passed-in UUID for uniqueness
 		return filepath.Join(cfg.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6]), nil
 	}
 
-	// Create a map of info messages for easy lookup
+	// Create a map of info messages for easy lookup.
 	infoMap := make(map[string]string)
 	for _, info := range acceptMsg.InfoMsgs {
-		infoMap[info.Key] = info.GetStrval()
+		key := info.GetKey()
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			infoMap[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			infoMap[key] = fmt.Sprintf("%d", v.Numval)
+		}
 	}
 
 	// Get the next sequence number
@@ -83,8 +90,12 @@ func buildSessionPath(cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessag
 		return "", err
 	}
 
-	// Replacer for escape sequences
-	r := strings.NewReplacer(
+	// Get current time for time-based escapes
+	now := time.Now()
+
+	// Replacer for sudoers-style escape sequences.
+	replacer := strings.NewReplacer(
+		// User/Group escapes
 		"%{user}", infoMap["submituser"],
 		"%{uid}", infoMap["submituid"],
 		"%{group}", infoMap["submitgroup"],
@@ -93,14 +104,27 @@ func buildSessionPath(cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessag
 		"%{runuid}", infoMap["runuid"],
 		"%{rungroup}", infoMap["rungroup"],
 		"%{rungid}", infoMap["rungid"],
+		// Host/Command escapes
 		"%{hostname}", infoMap["submithost"],
+		"%{command_path}", infoMap["command"],
 		"%{command}", filepath.Base(infoMap["command"]),
+		// Sequence escape
 		"%{seq}", seq,
-		"%{LIVEDIR}", cfg.LogDirectory, // Custom replacement for our config
+		// Time/Date escapes
+		"%{year}", fmt.Sprintf("%04d", now.Year()),
+		"%{month}", fmt.Sprintf("%02d", now.Month()),
+		"%{day}", fmt.Sprintf("%02d", now.Day()),
+		"%{hour}", fmt.Sprintf("%02d", now.Hour()),
+		"%{minute}", fmt.Sprintf("%02d", now.Minute()),
+		"%{second}", fmt.Sprintf("%02d", now.Second()),
+		// Path escapes
+		"%{LIVEDIR}", cfg.LogDirectory, // Custom replacement for our config, like iolog_path
+		// Literal percent escape
+		"%%", "%",
 	)
 
-	iologDir := r.Replace(cfg.IologDir)
-	iologFile := r.Replace(cfg.IologFile)
+	iologDir := replacer.Replace(cfg.IologDir)
+	iologFile := replacer.Replace(cfg.IologFile)
 
 	return filepath.Join(iologDir, iologFile), nil
 }
@@ -195,7 +219,7 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 
 // initialize sets up all the files for the session log.
 func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
-	// Create log.json with metadata
+	// Create log metadata file
 	logMeta := make(map[string]interface{})
 	for _, info := range acceptMsg.InfoMsgs {
 		switch v := info.Value.(type) {
@@ -210,7 +234,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	logMeta["log_id"] = s.logID
 	logMeta["submit_time"] = time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec)).UTC().Format(time.RFC3339Nano)
 
-	logFilePath := filepath.Join(s.sessionDir, "log") // Note: sudo names this file 'log', not 'log.json'
+	logFilePath := filepath.Join(s.sessionDir, "log")
 	logFile, err := os.Create(logFilePath)
 	if err != nil {
 		return err
