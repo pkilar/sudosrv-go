@@ -241,7 +241,7 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 
 // initialize sets up all the files for the session log.
 func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
-	// Create log metadata file
+	// Create log metadata
 	logMeta := make(map[string]interface{})
 	for _, info := range acceptMsg.InfoMsgs {
 		switch v := info.Value.(type) {
@@ -256,21 +256,34 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	logMeta["log_id"] = s.logID
 	logMeta["submit_time"] = time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec)).UTC().Format(time.RFC3339Nano)
 
-	logFilePath := filepath.Join(s.sessionDir, "log")
-	logFile, err := os.Create(logFilePath)
-	if err != nil {
-		return err
+	// Helper to write the metadata to a file in JSON format
+	writeMetaFile := func(fileName string) error {
+		filePath := filepath.Join(s.sessionDir, fileName)
+		file, err := os.Create(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(logMeta); err != nil {
+			return err
+		}
+		slog.Debug("Created log metadata file for session", "log_id", s.logID, "path", filePath)
+		return nil
 	}
-	defer logFile.Close()
-	encoder := json.NewEncoder(logFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(logMeta); err != nil {
-		return err
+
+	// Create both 'log' and 'log.json' files for compatibility
+	if err := writeMetaFile("log"); err != nil {
+		return fmt.Errorf("failed to create 'log' metadata file: %w", err)
 	}
-	slog.Debug("Created log metadata file for session", "log_id", s.logID, "path", logFilePath)
+	if err := writeMetaFile("log.json"); err != nil {
+		return fmt.Errorf("failed to create 'log.json' metadata file: %w", err)
+	}
 
 	// Create timing file
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
+	var err error
 	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
