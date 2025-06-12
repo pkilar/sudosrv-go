@@ -30,16 +30,28 @@ type Session struct {
 	isInitialized   bool
 }
 
+// IO event types for the timing file, matching native sudo implementation.
+const (
+	IO_EVENT_STDIN   = 0
+	IO_EVENT_STDOUT  = 1
+	IO_EVENT_STDERR  = 2
+	IO_EVENT_TTYIN   = 3
+	IO_EVENT_TTYOUT  = 4
+	IO_EVENT_WINSIZE = 5
+	IO_EVENT_SUSPEND = 6
+	IO_EVENT_RESUME  = 7
+)
+
 // Map stream names to filenames and timing file markers
 var streamMap = map[string]struct {
 	filename string
 	marker   byte
 }{
-	"ttyin":  {filename: "ttyin", marker: 'i'},
-	"ttyout": {filename: "ttyout", marker: 'o'},
-	"stdin":  {filename: "stdin", marker: '0'},
-	"stdout": {filename: "stdout", marker: '1'},
-	"stderr": {filename: "stderr", marker: '2'},
+	"stdin":  {filename: "stdin", marker: IO_EVENT_STDIN},
+	"stdout": {filename: "stdout", marker: IO_EVENT_STDOUT},
+	"stderr": {filename: "stderr", marker: IO_EVENT_STDERR},
+	"ttyin":  {filename: "ttyin", marker: IO_EVENT_TTYIN},
+	"ttyout": {filename: "ttyout", marker: IO_EVENT_TTYOUT},
 }
 
 // Global mutex for sequence file access
@@ -241,49 +253,60 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 
 // initialize sets up all the files for the session log.
 func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
-	// Create log metadata
+	// Create a map of info messages for easy lookup of string values.
+	infoMap := make(map[string]string)
+	// Create a map for all metadata for JSON serialization.
 	logMeta := make(map[string]interface{})
+
 	for _, info := range acceptMsg.InfoMsgs {
+		key := info.GetKey()
 		switch v := info.Value.(type) {
 		case *pb.InfoMessage_Strval:
-			logMeta[info.Key] = v.Strval
+			infoMap[key] = v.Strval
+			logMeta[key] = v.Strval
 		case *pb.InfoMessage_Numval:
-			logMeta[info.Key] = v.Numval
+			// Store as string in infoMap for consistent use in summary line
+			infoMap[key] = fmt.Sprintf("%d", v.Numval)
+			logMeta[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
-			logMeta[info.Key] = v.Strlistval.Strings
+			logMeta[key] = v.Strlistval.Strings
 		}
 	}
 	logMeta["log_id"] = s.logID
-	logMeta["submit_time"] = time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec)).UTC().Format(time.RFC3339Nano)
+	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
+	logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
-	// Helper to write the metadata to a file in JSON format
-	writeMetaFile := func(fileName string) error {
-		filePath := filepath.Join(s.sessionDir, fileName)
-		file, err := os.Create(filePath)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		encoder := json.NewEncoder(file)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(logMeta); err != nil {
-			return err
-		}
-		slog.Debug("Created log metadata file for session", "log_id", s.logID, "path", filePath)
-		return nil
+	// --- Write the plain text `log` file ---
+	logSummaryPath := filepath.Join(s.sessionDir, "log")
+	summaryLine := fmt.Sprintf("%s : %s : TTY=%s ; CWD=%s ; USER=%s ; COMMAND=%s\n",
+		submitTime.Format("Jan  2 15:04:05"),
+		infoMap["submituser"],
+		infoMap["ttyname"],
+		infoMap["cwd"],
+		infoMap["runuser"],
+		infoMap["command"],
+	)
+	if err := os.WriteFile(logSummaryPath, []byte(summaryLine), 0640); err != nil {
+		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
+	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
 
-	// Create both 'log' and 'log.json' files for compatibility
-	if err := writeMetaFile("log"); err != nil {
-		return fmt.Errorf("failed to create 'log' metadata file: %w", err)
+	// --- Write the structured `log.json` file ---
+	logJSONPath := filepath.Join(s.sessionDir, "log.json")
+	jsonFile, err := os.Create(logJSONPath)
+	if err != nil {
+		return fmt.Errorf("failed to create 'log.json' file: %w", err)
 	}
-	if err := writeMetaFile("log.json"); err != nil {
-		return fmt.Errorf("failed to create 'log.json' metadata file: %w", err)
+	defer jsonFile.Close()
+	encoder := json.NewEncoder(jsonFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(logMeta); err != nil {
+		return fmt.Errorf("failed to encode JSON for 'log.json': %w", err)
 	}
+	slog.Debug("Created log JSON metadata file", "log_id", s.logID, "path", logJSONPath)
 
-	// Create timing file
+	// --- Create timing and I/O stream files ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
-	var err error
 	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
@@ -321,7 +344,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
 	s.cumulativeDelay[streamName] += delayDur
 
-	timingRecord := fmt.Sprintf("%c %.6f %d\n",
+	timingRecord := fmt.Sprintf("%d %.6f %d\n",
 		streamInfo.marker,
 		delayDur.Seconds(),
 		len(data))
@@ -342,7 +365,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
-	timingRecord := fmt.Sprintf("w %.6f %d %d\n", delay.Seconds(), event.Rows, event.Cols)
+	timingRecord := fmt.Sprintf("%d %.6f %d %d\n", IO_EVENT_WINSIZE, delay.Seconds(), event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -352,8 +375,14 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
-	timingRecord := fmt.Sprintf("s %.6f %s\n", delay.Seconds(), event.Signal)
-	slog.Debug("Writing suspend entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
+
+	eventType := IO_EVENT_SUSPEND
+	if event.Signal == "CONT" {
+		eventType = IO_EVENT_RESUME
+	}
+
+	timingRecord := fmt.Sprintf("%d %.6f %s\n", eventType, delay.Seconds(), event.Signal)
+	slog.Debug("Writing suspend/resume entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
