@@ -26,6 +26,7 @@ type Session struct {
 	files           map[string]*os.File
 	timingFile      *os.File
 	cumulativeDelay map[string]time.Duration
+	logMeta         map[string]interface{}
 	fileMux         sync.Mutex
 	isInitialized   bool
 }
@@ -77,6 +78,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		sessionDir:      sessionDir,
 		files:           make(map[string]*os.File),
 		cumulativeDelay: make(map[string]time.Duration),
+		logMeta:         make(map[string]interface{}),
 	}, nil
 }
 
@@ -255,26 +257,24 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	// Create a map of info messages for easy lookup of string values.
 	infoMap := make(map[string]string)
-	// Create a map for all metadata for JSON serialization.
-	logMeta := make(map[string]interface{})
 
 	for _, info := range acceptMsg.InfoMsgs {
 		key := info.GetKey()
 		switch v := info.Value.(type) {
 		case *pb.InfoMessage_Strval:
 			infoMap[key] = v.Strval
-			logMeta[key] = v.Strval
+			s.logMeta[key] = v.Strval
 		case *pb.InfoMessage_Numval:
 			// Store as string in infoMap for consistent use in summary line
 			infoMap[key] = fmt.Sprintf("%d", v.Numval)
-			logMeta[key] = v.Numval
+			s.logMeta[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
-			logMeta[key] = v.Strlistval.Strings
+			s.logMeta[key] = v.Strlistval.Strings
 		}
 	}
-	logMeta["log_id"] = s.logID
+	s.logMeta["uuid"] = s.logID
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
-	logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
+	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
 	// --- Write the plain text `log` file ---
 	logSummaryPath := filepath.Join(s.sessionDir, "log")
@@ -293,7 +293,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
 
-	// --- Write the structured `log.json` file ---
+	// --- Write the initial structured `log.json` file ---
 	logJSONPath := filepath.Join(s.sessionDir, "log.json")
 	jsonFile, err := os.Create(logJSONPath)
 	if err != nil {
@@ -302,10 +302,10 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	defer jsonFile.Close()
 	encoder := json.NewEncoder(jsonFile)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(logMeta); err != nil {
+	if err := encoder.Encode(s.logMeta); err != nil {
 		return fmt.Errorf("failed to encode JSON for 'log.json': %w", err)
 	}
-	slog.Debug("Created log JSON metadata file", "log_id", s.logID, "path", logJSONPath)
+	slog.Debug("Created initial log JSON metadata file", "log_id", s.logID, "path", logJSONPath)
 
 	// --- Create timing and I/O stream files ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
@@ -346,7 +346,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
 	s.cumulativeDelay[streamName] += delayDur
 
-	timingRecord := fmt.Sprintf("%d %.6f %d\n",
+	timingRecord := fmt.Sprintf("%d %.9f %d\n",
 		streamInfo.marker,
 		delayDur.Seconds(),
 		len(data))
@@ -367,7 +367,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
-	timingRecord := fmt.Sprintf("%d %.6f %d %d\n", IO_EVENT_WINSIZE, delay.Seconds(), event.Rows, event.Cols)
+	timingRecord := fmt.Sprintf("%d %.9f %d %d\n", IO_EVENT_WINSIZE, delay.Seconds(), event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -383,7 +383,7 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 		eventType = IO_EVENT_RESUME
 	}
 
-	timingRecord := fmt.Sprintf("%d %.6f %s\n", eventType, delay.Seconds(), event.Signal)
+	timingRecord := fmt.Sprintf("%d %.9f %s\n", eventType, delay.Seconds(), event.Signal)
 	slog.Debug("Writing suspend/resume entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -394,7 +394,34 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 // finalize cleans up and closes files, marking the log as complete.
 func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 	slog.Info("Finalizing local storage session", "log_id", s.logID, "exit_value", exitMsg.ExitValue)
-	// No lock here as it will be called from HandleClientMessage which holds the lock.
+
+	// Update metadata with exit information
+	s.logMeta["exit_value"] = exitMsg.GetExitValue()
+	s.logMeta["run_time"] = exitMsg.GetRunTime()
+	s.logMeta["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if exitMsg.GetSignal() != "" {
+		s.logMeta["signal"] = exitMsg.GetSignal()
+	}
+	if exitMsg.GetDumpedCore() {
+		s.logMeta["dumped_core"] = true
+	}
+
+	// Overwrite log.json with the complete metadata
+	logJSONPath := filepath.Join(s.sessionDir, "log.json")
+	jsonFile, err := os.Create(logJSONPath)
+	if err != nil {
+		slog.Error("Failed to open 'log.json' for finalization", "log_id", s.logID, "error", err)
+	} else {
+		defer jsonFile.Close()
+		encoder := json.NewEncoder(jsonFile)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(s.logMeta); err != nil {
+			slog.Error("Failed to encode final JSON for 'log.json'", "log_id", s.logID, "error", err)
+		}
+		slog.Debug("Wrote final metadata to log.json", "log_id", s.logID, "path", logJSONPath)
+	}
+
+	// Close all file handles
 	s.Close()
 
 	// Mark timing file as read-only to indicate completion, per sudo spec.
