@@ -397,8 +397,25 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 
 	// Update metadata with exit information
 	s.logMeta["exit_value"] = exitMsg.GetExitValue()
-	s.logMeta["run_time"] = exitMsg.GetRunTime()
-	s.logMeta["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if runTime := exitMsg.GetRunTime(); runTime != nil {
+		s.logMeta["run_time"] = struct {
+			Seconds     int64 `json:"seconds"`
+			Nanoseconds int32 `json:"nanoseconds"`
+		}{
+			Seconds:     runTime.GetTvSec(),
+			Nanoseconds: runTime.GetTvNsec(),
+		}
+	}
+
+	now := time.Now()
+	s.logMeta["timestamp"] = struct {
+		Seconds     int64 `json:"seconds"`
+		Nanoseconds int32 `json:"nanoseconds"`
+	}{
+		Seconds:     now.Unix(),
+		Nanoseconds: int32(now.Nanosecond()),
+	}
+
 	if exitMsg.GetSignal() != "" {
 		s.logMeta["signal"] = exitMsg.GetSignal()
 	}
