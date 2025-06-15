@@ -21,411 +21,319 @@ import (
 )
 
 const (
-	maxReconnectInterval     = time.Minute
 	initialReconnectInterval = time.Second
-	relayCacheDir            = "/var/log/gosudo-relay-cache" // Directory for storing logs when disconnected
+	flushingSuffix           = ".flushing"
 )
 
-type relayState int
-
-const (
-	stateConnected relayState = iota
-	stateDisconnected
-	stateFlushing
-)
-
-// String returns a string representation of the relayState.
-func (rs relayState) String() string {
-	switch rs {
-	case stateConnected:
-		return "Connected"
-	case stateDisconnected:
-		return "Disconnected"
-	case stateFlushing:
-		return "Flushing"
-	default:
-		return "Unknown"
-	}
-}
-
-// Session handles relaying I/O logs for one session to an upstream server.
+// Session handles the entire lifecycle of a relay session. It is a durable,
+// background process independent of the client connection that created it.
 type Session struct {
 	logID            string
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
-	upstreamConn     net.Conn
-	upstreamProc     protocol.Processor
-	toClientChan     chan *pb.ServerMessage
 	fromClientChan   chan *pb.ClientMessage
-	done             chan struct{}
-	connMux          sync.Mutex
-	wg               sync.WaitGroup
-	state            relayState
-	cacheFile        *os.File
-	cacheFileName    string
+	// The 'done' channel is used to signal shutdown from the main server process.
+	// In this revised model, we assume the session lives until its work is done
+	// or the entire server process terminates.
+	wg sync.WaitGroup
+
+	cacheFileName string
 }
 
 // NewSession creates a new relay session handler.
 func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
-	if err := os.MkdirAll(relayCacheDir, 0750); err != nil {
-		return nil, fmt.Errorf("could not create relay cache directory %s: %w", relayCacheDir, err)
+	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0750); err != nil {
+		return nil, fmt.Errorf("could not create relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
 	}
+
+	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", logID))
 
 	s := &Session{
 		logID:            logID,
 		config:           cfg,
 		initialAcceptMsg: acceptMsg,
-		toClientChan:     make(chan *pb.ServerMessage),
-		fromClientChan:   make(chan *pb.ClientMessage, 100),
-		done:             make(chan struct{}),
-		state:            stateDisconnected,
-		cacheFileName:    filepath.Join(relayCacheDir, fmt.Sprintf("%s.log", logID)),
+		fromClientChan:   make(chan *pb.ClientMessage, 100), // Buffered channel for client messages
+		cacheFileName:    cacheFileName,
 	}
 
 	s.wg.Add(1)
-	go s.manager()
+	go s.run() // Start the single, durable goroutine for this session.
 
 	return s, nil
 }
 
-// manager is the core goroutine that manages the connection lifecycle.
-func (s *Session) manager() {
+// run is the core goroutine for a session. It first writes all messages from the
+// client to a local cache file. Once the client session is complete (ExitMessage),
+// it proceeds to persistently try to flush that file to the upstream server.
+func (s *Session) run() {
 	defer s.wg.Done()
+	slog.Debug("Relay session runner started", "log_id", s.logID)
 
-	reconnectAttempts := 0
-	for {
-		select {
-		case <-s.done:
-			slog.Info("Manager shutting down permanently.", "log_id", s.logID)
-			return
-		default:
-		}
+	// Phase 1: Write all incoming messages to the local cache file.
+	// This phase completes when an ExitMessage is received and written.
+	sessionCompleted := s.writeMessagesToCache()
 
-		slog.Info("Attempting to connect to upstream server", "log_id", s.logID, "attempt", reconnectAttempts+1)
-		err := s.connectToUpstream()
+	if !sessionCompleted {
+		slog.Warn("Relay session ended without a final ExitMessage. The cached log will be flushed by the next server startup.", "log_id", s.logID)
+		return
+	}
+
+	// Phase 2: The client session is complete. Now, persistently try to flush the file.
+	slog.Info("Client session complete, beginning persistent flush attempts.", "log_id", s.logID, "file", s.cacheFileName)
+	for attempt := 0; s.config.ReconnectAttempts == -1 || attempt < s.config.ReconnectAttempts; attempt++ {
+		proc, err := connectToUpstream(s.config, s.initialAcceptMsg)
 		if err != nil {
-			slog.Error("Failed to connect to upstream", "log_id", s.logID, "error", err)
-			s.setState(stateDisconnected)
-			backoffDuration := s.calculateBackoff(reconnectAttempts)
-			slog.Info("Waiting before next reconnect attempt", "log_id", s.logID, "duration", backoffDuration)
-			select {
-			case <-s.done:
-				slog.Info("Manager shutting down during reconnect backoff.", "log_id", s.logID)
-				return
-			case <-time.After(backoffDuration):
-				reconnectAttempts++
-				continue
-			}
+			slog.Warn("Upstream connection attempt failed", "log_id", s.logID, "error", err)
+			backoff := s.calculateBackoff(attempt)
+			slog.Info("Waiting before next reconnect attempt", "log_id", s.logID, "duration", backoff)
+			time.Sleep(backoff) // Simple sleep, as this goroutine has no other tasks.
+			continue
 		}
 
-		slog.Info("Successfully connected to upstream server", "log_id", s.logID)
-		reconnectAttempts = 0
+		// Connection successful, now flush the file.
+		slog.Info("Upstream connection successful, flushing cache.", "log_id", s.logID, "file", s.cacheFileName)
+		err = flushFile(proc, s.cacheFileName)
+		if err != nil {
+			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
+			// The connection is likely dead, so loop to retry the whole process.
+		} else {
+			slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
+			return // Success! The goroutine can exit.
+		}
+	}
 
-		s.flushCache() // Flush any cached logs
-
-		s.setState(stateConnected) // Switch to real-time relaying
-
-		var localWg sync.WaitGroup
-		localWg.Add(2)
-		connDone := make(chan struct{})
-		go func() {
-			defer localWg.Done()
-			s.upstreamWriter(connDone)
-		}()
-		go func() {
-			defer localWg.Done()
-			s.upstreamReader(connDone)
-		}()
-		localWg.Wait()
-
-		slog.Warn("Connection to upstream lost. Will attempt to reconnect.", "log_id", s.logID)
-		s.setState(stateDisconnected)
+	if s.config.ReconnectAttempts != -1 {
+		slog.Warn("Relay session has exhausted all reconnect attempts. The cached log remains on disk.", "log_id", s.logID, "attempts", s.config.ReconnectAttempts)
 	}
 }
 
-func (s *Session) calculateBackoff(attempts int) time.Duration {
-	if attempts == 0 {
-		return initialReconnectInterval
+// writeMessagesToCache opens the cache file and writes all received messages until an ExitMessage.
+func (s *Session) writeMessagesToCache() (completed bool) {
+	file, err := os.OpenFile(s.cacheFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	if err != nil {
+		slog.Error("CRITICAL: could not open cache file. Relay data for this session will be lost.", "log_id", s.logID, "error", err)
+		return
 	}
+	defer file.Close()
+
+	// Write the essential AcceptMessage first to ensure the cache file is valid for flushing.
+	if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
+		slog.Error("Failed to write initial accept message to cache", "log_id", s.logID, "error", err)
+		return
+	}
+
+	// This loop continues until the client disconnects and the HandleClientMessage channel is closed by its owner.
+	for msg := range s.fromClientChan {
+		if err := writeProtoMessage(file, msg); err != nil {
+			slog.Error("Failed to write message to relay cache", "log_id", s.logID, "error", err)
+		}
+		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
+			slog.Debug("ExitMessage received and cached. Ending write phase.", "log_id", s.logID)
+			return true // Session completed normally.
+		}
+	}
+	// The channel was closed, meaning the client connection handler terminated.
+	return false
+}
+
+func (s *Session) calculateBackoff(attempts int) time.Duration {
+	maxInterval := s.config.MaxReconnectInterval
+	if maxInterval <= 0 {
+		maxInterval = time.Minute // Fallback to default if not configured or invalid
+	}
+
 	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(attempts))
-	if backoff > float64(maxReconnectInterval) {
-		return maxReconnectInterval
+	if backoff > float64(maxInterval) {
+		return maxInterval
 	}
 	return time.Duration(backoff)
 }
 
-func (s *Session) connectToUpstream() error {
-	s.connMux.Lock()
-	defer s.connMux.Unlock()
-
-	dialer := &net.Dialer{Timeout: s.config.ConnectTimeout}
-	var conn net.Conn
-	var err error
-
-	slog.Debug("Dialing upstream", "host", s.config.UpstreamHost, "use_tls", s.config.UseTLS)
-	if s.config.UseTLS {
-		conn, err = tls.DialWithDialer(dialer, "tcp", s.config.UpstreamHost, &tls.Config{InsecureSkipVerify: true})
-	} else {
-		conn, err = dialer.Dial("tcp", s.config.UpstreamHost)
+func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	// Don't process the initial AcceptMsg again, it was handled in NewSession.
+	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
+		return nil, nil
 	}
+	s.fromClientChan <- msg
+	return nil, nil
+}
 
-	if err != nil {
-		return fmt.Errorf("dial failed: %w", err)
-	}
-
-	s.upstreamConn = conn
-	s.upstreamProc = protocol.NewProcessor(s.upstreamConn, s.upstreamConn)
-
-	slog.Debug("Starting handshake with upstream", "log_id", s.logID)
-	// 1. Send ClientHello
-	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
-	if err := s.upstreamProc.WriteClientMessage(helloMsg); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to send ClientHello to upstream: %w", err)
-	}
-
-	// 2. Read ServerHello
-	if _, err = s.upstreamProc.ReadServerMessage(); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
-	}
-
-	// 3. Send the original AcceptMessage to start the log session
-	acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}
-	if err := s.upstreamProc.WriteClientMessage(acceptMsg); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to send AcceptMessage to upstream: %w", err)
-	}
-
-	// 4. Read the log_id response
-	logIDResponse, err := s.upstreamProc.ReadServerMessage()
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to receive log_id from upstream: %w", err)
-	}
-	if logIDResponse.GetLogId() == "" {
-		conn.Close()
-		return fmt.Errorf("upstream did not respond with a valid log_id")
-	}
-	slog.Debug("Upstream handshake complete", "log_id", s.logID, "upstream_log_id", logIDResponse.GetLogId())
+// Close is called by the connection handler when the client disconnects.
+// It signals the messageWriter to stop accepting new messages.
+func (s *Session) Close() error {
+	slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
+	close(s.fromClientChan) // Signal the messageWriter loop to terminate.
 	return nil
 }
 
-func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
-	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); !ok {
-		select {
-		case s.fromClientChan <- msg:
-		case <-s.done:
-			return nil, fmt.Errorf("relay session is closed")
-		}
-	}
+// ---- Standalone Flusher for Orphaned Files ----
 
-	select {
-	case serverMsg, ok := <-s.toClientChan:
-		if !ok {
-			return nil, fmt.Errorf("relay session closed while waiting for response")
-		}
-		return serverMsg, nil
-	case <-s.done:
-		return nil, fmt.Errorf("relay session closed while waiting for response")
-	}
-}
+// FlushOrphanedFile connects to upstream and sends the content of a single file.
+func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
+	slog.Info("Found orphaned relay file, attempting to flush", "path", filePath)
 
-func (s *Session) upstreamReader(connDone chan struct{}) {
-	defer close(connDone)
-
-	for {
-		proc := s.getProcessor()
-		if proc == nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		serverMsg, err := proc.ReadServerMessage()
-		if err != nil {
-			slog.Debug("Upstream read failed, closing reader.", "log_id", s.logID, "error", err)
-			s.closeCurrentConnection()
-			return
-		}
-		slog.Debug("Relay received message from upstream", "log_id", s.logID, "message_type", fmt.Sprintf("%T", serverMsg.Type))
-
-		select {
-		case s.toClientChan <- serverMsg:
-		case <-s.done:
-			return
-		}
-	}
-}
-
-func (s *Session) upstreamWriter(connDone chan struct{}) {
-	for {
-		select {
-		case clientMsg := <-s.fromClientChan:
-			s.connMux.Lock()
-			currentState := s.state
-			s.connMux.Unlock()
-
-			if currentState == stateConnected {
-				proc := s.getProcessor()
-				if proc == nil {
-					// Connection likely just dropped, requeue and let manager handle it
-					s.fromClientChan <- clientMsg
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-				slog.Debug("Relay sending message to upstream", "log_id", s.logID, "message_type", fmt.Sprintf("%T", clientMsg.Type))
-				if err := proc.WriteClientMessage(clientMsg); err != nil {
-					slog.Debug("Upstream write failed.", "log_id", s.logID, "error", err)
-					s.closeCurrentConnection()
-				}
-			} else {
-				// State is disconnected or flushing, cache the message to disk
-				if err := s.writeToCache(clientMsg); err != nil {
-					slog.Error("Failed to write to relay cache", "log_id", s.logID, "error", err)
-				}
-			}
-		case <-connDone:
-			return
-		case <-s.done:
-			return
-		}
-	}
-}
-
-func (s *Session) setState(newState relayState) {
-	s.connMux.Lock()
-	defer s.connMux.Unlock()
-
-	if s.state == newState {
+	// Rename file to prevent another process from picking it up
+	flushingFileName := filePath + flushingSuffix
+	if err := os.Rename(filePath, flushingFileName); err != nil {
+		slog.Error("Could not rename orphaned file for flushing", "path", filePath, "error", err)
 		return
 	}
 
-	slog.Info("Relay session changing state", "log_id", s.logID, "from", s.state, "to", newState)
-	s.state = newState
-
-	// Handle cache file on state transitions
-	if newState == stateDisconnected && s.cacheFile == nil {
-		var err error
-		s.cacheFile, err = os.OpenFile(s.cacheFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
-		if err != nil {
-			slog.Error("Failed to open relay cache file for writing", "log_id", s.logID, "path", s.cacheFileName, "error", err)
-		}
-	} else if (newState == stateConnected || newState == stateFlushing) && s.cacheFile != nil {
-		s.cacheFile.Close()
-		s.cacheFile = nil
+	f, err := os.Open(flushingFileName)
+	if err != nil {
+		slog.Error("Failed to open renamed orphaned file for flushing", "path", flushingFileName, "error", err)
+		return
 	}
+	defer f.Close()
+
+	// Read the first message to get the AcceptMessage
+	firstMsg, err := readProtoMessage(f)
+	if err != nil {
+		slog.Error("Could not read initial message from orphaned file", "path", flushingFileName, "error", err)
+		return
+	}
+
+	acceptMsg := firstMsg.GetAcceptMsg()
+	if acceptMsg == nil {
+		slog.Error("First message in orphaned file is not AcceptMessage, cannot flush", "path", flushingFileName)
+		return
+	}
+
+	// Attempt to connect and flush persistently
+	for attempt := 0; cfg.ReconnectAttempts == -1 || attempt < cfg.ReconnectAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(initialReconnectInterval) // Simple backoff for orphaned files
+		}
+
+		proc, err := connectToUpstream(cfg, acceptMsg)
+		if err != nil {
+			slog.Warn("Failed to connect to upstream for orphaned file flush", "path", flushingFileName, "error", err)
+			continue
+		}
+
+		if err := flushFile(proc, flushingFileName, f); err != nil {
+			slog.Error("Failed to flush orphaned file, will retry", "path", flushingFileName, "error", err)
+			continue // Try again
+		}
+
+		slog.Info("Successfully flushed orphaned relay file", "path", flushingFileName)
+		return // Success
+	}
+
+	slog.Error("Exhausted all attempts to flush orphaned file. Renaming it back.", "path", flushingFileName)
+	os.Rename(flushingFileName, filePath) // Rename back on persistent failure
 }
 
-func (s *Session) writeToCache(msg *pb.ClientMessage) error {
-	s.connMux.Lock()
-	defer s.connMux.Unlock()
-	if s.cacheFile == nil {
-		return fmt.Errorf("cache file is not open")
+// flushFile reads a cache file message-by-message and sends it via the processor.
+func flushFile(proc protocol.Processor, filePath string, file ...*os.File) error {
+	var f *os.File
+	var err error
+
+	isReusedHandle := len(file) > 0 && file[0] != nil
+	if isReusedHandle {
+		f = file[0]
+		if _, err := f.Seek(0, 0); err != nil {
+			return fmt.Errorf("failed to seek to start of cache file: %w", err)
+		}
+	} else {
+		f, err = os.Open(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to open cache file for flushing: %w", err)
+		}
+		defer f.Close()
 	}
 
-	slog.Debug("Caching message to disk", "log_id", s.logID, "message_type", fmt.Sprintf("%T", msg.Type))
+	// The first message (AcceptMsg) must be sent to initiate the session upstream.
+	// Since connectToUpstream now handles this, we can just read and send all messages from the file.
+	for {
+		msg, err := readProtoMessage(f)
+		if err == io.EOF {
+			break // Successfully read all messages
+		}
+		if err != nil {
+			return fmt.Errorf("error reading message from cache during flush: %w", err)
+		}
+
+		// The first message sent by this loop will be the AcceptMessage.
+		if err := proc.WriteClientMessage(msg); err != nil {
+			return fmt.Errorf("failed to send flushed message to upstream: %w", err)
+		}
+	}
+
+	if !isReusedHandle {
+		f.Close() // Explicitly close if we opened it here
+	}
+	if err := os.Remove(filePath); err != nil {
+		return fmt.Errorf("failed to remove flushed cache file: %w", err)
+	}
+
+	return nil
+}
+
+// connectToUpstream is a helper to establish and handshake with an upstream server.
+func connectToUpstream(cfg *config.RelayConfig, initialAcceptMsg *pb.AcceptMessage) (protocol.Processor, error) {
+	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+	var conn net.Conn
+	var err error
+
+	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS)
+	if cfg.UseTLS {
+		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, &tls.Config{InsecureSkipVerify: true})
+	} else {
+		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("dial failed: %w", err)
+	}
+
+	proc := protocol.NewProcessor(conn, conn)
+
+	slog.Debug("Starting handshake with upstream")
+	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
+	if err := proc.WriteClientMessage(helloMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send ClientHello to upstream: %w", err)
+	}
+
+	if _, err = proc.ReadServerMessage(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
+	}
+	return proc, nil
+}
+
+// writeProtoMessage serializes and writes a single protobuf message with its length prefix.
+func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message for cache: %w", err)
 	}
-
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
-
-	if _, err := s.cacheFile.Write(lenBuf); err != nil {
+	if _, err := w.Write(lenBuf); err != nil {
 		return fmt.Errorf("failed to write length prefix to cache: %w", err)
 	}
-	if _, err := s.cacheFile.Write(data); err != nil {
+	if _, err := w.Write(data); err != nil {
 		return fmt.Errorf("failed to write payload to cache: %w", err)
 	}
 	return nil
 }
 
-func (s *Session) flushCache() {
-	s.setState(stateFlushing)
-	slog.Info("Starting to flush relay cache from disk", "log_id", s.logID, "path", s.cacheFileName)
-
-	f, err := os.Open(s.cacheFileName)
-	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Info("No cache file to flush.", "log_id", s.logID)
-			return // Nothing to do
-		}
-		slog.Error("Failed to open cache file for flushing", "log_id", s.logID, "error", err)
-		return
-	}
-	defer f.Close()
-
+// readProtoMessage reads a single length-prefixed protobuf message.
+func readProtoMessage(r io.Reader) (*pb.ClientMessage, error) {
 	lenBuf := make([]byte, 4)
-	for {
-		// Read message from cache file
-		_, err := io.ReadFull(f, lenBuf)
-		if err == io.EOF {
-			break // End of file
-		}
-		if err != nil {
-			slog.Error("Failed to read length prefix from cache during flush", "log_id", s.logID, "error", err)
-			return
-		}
-		msgLen := binary.BigEndian.Uint32(lenBuf)
-		data := make([]byte, msgLen)
-		if _, err := io.ReadFull(f, data); err != nil {
-			slog.Error("Failed to read payload from cache during flush", "log_id", s.logID, "error", err)
-			return
-		}
-
-		msg := &pb.ClientMessage{}
-		if err := proto.Unmarshal(data, msg); err != nil {
-			slog.Error("Failed to unmarshal message from cache during flush", "log_id", s.logID, "error", err)
-			continue
-		}
-
-		// Send message to upstream
-		slog.Debug("Flushing cached message to upstream", "log_id", s.logID, "message_type", fmt.Sprintf("%T", msg.Type))
-		if err := s.getProcessor().WriteClientMessage(msg); err != nil {
-			slog.Error("Failed to send flushed message to upstream, aborting flush", "log_id", s.logID, "error", err)
-			s.closeCurrentConnection() // Connection is dead
-			return
-		}
+	if _, err := io.ReadFull(r, lenBuf); err != nil {
+		return nil, err // Can be io.EOF
 	}
-
-	slog.Info("Finished flushing relay cache", "log_id", s.logID)
-	// Truncate and remove the cache file now that it's empty
-	f.Close()
-	if err := os.Remove(s.cacheFileName); err != nil {
-		slog.Error("Failed to remove flushed cache file", "log_id", s.logID, "error", err)
+	msgLen := binary.BigEndian.Uint32(lenBuf)
+	data := make([]byte, msgLen)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, err
 	}
-}
-
-func (s *Session) getProcessor() protocol.Processor {
-	s.connMux.Lock()
-	defer s.connMux.Unlock()
-	return s.upstreamProc
-}
-
-func (s *Session) closeCurrentConnection() {
-	s.connMux.Lock()
-	defer s.connMux.Unlock()
-	if s.upstreamConn != nil {
-		s.upstreamConn.Close()
-		s.upstreamConn = nil
-		s.upstreamProc = nil
+	msg := &pb.ClientMessage{}
+	if err := proto.Unmarshal(data, msg); err != nil {
+		return nil, err
 	}
-}
-
-func (s *Session) Close() error {
-	slog.Info("Permanently closing relay session", "log_id", s.logID)
-	close(s.done)
-	s.closeCurrentConnection()
-	s.wg.Wait()
-	close(s.fromClientChan)
-	close(s.toClientChan)
-
-	// Clean up cache file if it exists
-	s.connMux.Lock()
-	if s.cacheFile != nil {
-		s.cacheFile.Close()
-	}
-	s.connMux.Unlock()
-	return nil
+	return msg, nil
 }

@@ -30,9 +30,12 @@ type ServerConfig struct {
 
 // RelayConfig holds settings for relay mode.
 type RelayConfig struct {
-	UpstreamHost   string        `yaml:"upstream_host"`
-	UseTLS         bool          `yaml:"use_tls"`
-	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	UpstreamHost         string        `yaml:"upstream_host"`
+	UseTLS               bool          `yaml:"use_tls"`
+	ConnectTimeout       time.Duration `yaml:"connect_timeout"`
+	RelayCacheDirectory  string        `yaml:"relay_cache_directory"`
+	ReconnectAttempts    int           `yaml:"reconnect_attempts"`
+	MaxReconnectInterval time.Duration `yaml:"max_reconnect_interval"`
 }
 
 // LocalStorageConfig holds settings for local storage mode.
@@ -54,7 +57,10 @@ func LoadConfig(path string) (*Config, error) {
 			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
-			ConnectTimeout: 5 * time.Second,
+			ConnectTimeout:       5 * time.Second,
+			RelayCacheDirectory:  "/var/log/gosudo-relay-cache",
+			ReconnectAttempts:    -1, // Default to trying forever
+			MaxReconnectInterval: 1 * time.Minute,
 		},
 		LocalStorage: LocalStorageConfig{
 			LogDirectory: "/var/log/gosudo-io",
@@ -94,9 +100,12 @@ server:
 
 # Settings for when server.mode is "relay"
 relay:
-  upstream_host: "10.0.0.1:30344"
-  use_tls: true
+  upstream_host: "127.0.0.1:30343"
+  use_tls: false
   connect_timeout: 5s
+  relay_cache_directory: "/var/spool/sudosrv-cache"
+  reconnect_attempts: -1  # Number of retries, -1 for infinite
+  max_reconnect_interval: "2m" # Maximum time to wait between retries
 
 # Settings for when server.mode is "local"
 local_storage:

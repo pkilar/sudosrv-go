@@ -5,8 +5,10 @@ import (
 	"flag"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sudosrv/internal/config"
+	"sudosrv/internal/relay"
 	"sudosrv/internal/server"
 )
 
@@ -47,6 +49,11 @@ func main() {
 
 	slog.Info("Logger initialized", "level", logLevel.String())
 
+	// --- Flush any orphaned relay cache files from previous runs ---
+	if cfg.Server.Mode == "relay" {
+		go flushOrphanedRelayFiles(&cfg.Relay)
+	}
+
 	// Create and start the server
 	srv, err := server.NewServer(cfg)
 	if err != nil {
@@ -61,4 +68,23 @@ func main() {
 
 	srv.Wait()
 	slog.Info("Server shutting down.")
+}
+
+func flushOrphanedRelayFiles(cfg *config.RelayConfig) {
+	slog.Info("Scanning for orphaned relay cache files...", "directory", cfg.RelayCacheDirectory)
+	files, err := filepath.Glob(filepath.Join(cfg.RelayCacheDirectory, "*.log"))
+	if err != nil {
+		slog.Error("Failed to scan relay cache directory", "error", err)
+		return
+	}
+
+	if len(files) == 0 {
+		slog.Info("No orphaned relay files found.")
+		return
+	}
+
+	for _, file := range files {
+		// Launch each flush operation in its own goroutine so they don't block each other.
+		go relay.FlushOrphanedFile(file, cfg)
+	}
 }
