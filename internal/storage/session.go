@@ -258,21 +258,27 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	// Create a map of info messages for easy lookup of string values.
 	infoMap := make(map[string]string)
 
+	slog.Debug("--- Begin AcceptMessage InfoMsgs ---")
 	for _, info := range acceptMsg.InfoMsgs {
 		key := info.GetKey()
+		var value string
 		switch v := info.Value.(type) {
 		case *pb.InfoMessage_Strval:
-			infoMap[key] = v.Strval
+			value = v.Strval
 			s.logMeta[key] = v.Strval
 		case *pb.InfoMessage_Numval:
-			// Store as string in infoMap for consistent use in summary line
-			infoMap[key] = fmt.Sprintf("%d", v.Numval)
+			value = fmt.Sprintf("%d", v.Numval)
 			s.logMeta[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
+			value = strings.Join(v.Strlistval.Strings, " ")
 			s.logMeta[key] = v.Strlistval.Strings
 		}
+		infoMap[key] = value
+		slog.Debug("Received InfoMessage", "key", key, "value", value)
 	}
-	s.logMeta["uuid"] = s.logID
+	slog.Debug("--- End AcceptMessage InfoMsgs ---")
+
+	s.logMeta["server_log_id"] = s.logID // Add our own server-side log ID for reference
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
@@ -285,7 +291,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		infoMap["ttyname"],
 		infoMap["lines"],
 		infoMap["columns"],
-		infoMap["cwd"],
+		infoMap["submitcwd"],
 		infoMap["command"],
 	)
 	if err := os.WriteFile(logSummaryPath, []byte(summaryLine), 0640); err != nil {
@@ -293,22 +299,9 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
 
-	// --- Write the initial structured `log.json` file ---
-	logJSONPath := filepath.Join(s.sessionDir, "log.json")
-	jsonFile, err := os.Create(logJSONPath)
-	if err != nil {
-		return fmt.Errorf("failed to create 'log.json' file: %w", err)
-	}
-	defer jsonFile.Close()
-	encoder := json.NewEncoder(jsonFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(s.logMeta); err != nil {
-		return fmt.Errorf("failed to encode JSON for 'log.json': %w", err)
-	}
-	slog.Debug("Created initial log JSON metadata file", "log_id", s.logID, "path", logJSONPath)
-
-	// --- Create timing and I/O stream files ---
+	// --- Create timing and I/O stream files but NOT log.json yet ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
+	var err error
 	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
@@ -423,7 +416,7 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 		s.logMeta["dumped_core"] = true
 	}
 
-	// Overwrite log.json with the complete metadata
+	// Write the complete log.json file now that all metadata is gathered.
 	logJSONPath := filepath.Join(s.sessionDir, "log.json")
 	jsonFile, err := os.Create(logJSONPath)
 	if err != nil {

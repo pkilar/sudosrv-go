@@ -18,13 +18,14 @@ type Config struct {
 
 // ServerConfig holds server-specific settings.
 type ServerConfig struct {
-	Mode             string        `yaml:"mode"` // "local" or "relay"
-	ListenAddress    string        `yaml:"listen_address"`
-	ListenAddressTLS string        `yaml:"listen_address_tls"`
-	TLSCertFile      string        `yaml:"tls_cert_file"`
-	TLSKeyFile       string        `yaml:"tls_key_file"`
-	ServerID         string        `yaml:"server_id"`
-	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	Mode                      string        `yaml:"mode"` // "local" or "relay"
+	ListenAddress             string        `yaml:"listen_address"`
+	ListenAddressTLS          string        `yaml:"listen_address_tls"`
+	TLSCertFile               string        `yaml:"tls_cert_file"`
+	TLSKeyFile                string        `yaml:"tls_key_file"`
+	ServerID                  string        `yaml:"server_id"`
+	IdleTimeout               time.Duration `yaml:"idle_timeout"`
+	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
 
 // RelayConfig holds settings for relay mode.
@@ -46,10 +47,11 @@ func LoadConfig(path string) (*Config, error) {
 	config := &Config{
 		// Default values
 		Server: ServerConfig{
-			Mode:          "local",
-			ListenAddress: "127.0.0.1:30343",
-			ServerID:      "GoSudoLogSrv/1.0",
-			IdleTimeout:   10 * time.Minute,
+			Mode:                      "local",
+			ListenAddress:             "127.0.0.1:30343",
+			ServerID:                  "GoSudoLogSrv/1.0",
+			IdleTimeout:               10 * time.Minute,
+			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
 			ConnectTimeout: 5 * time.Second,
@@ -88,6 +90,7 @@ server:
   tls_key_file: "server.key"
   server_id: "GoSudoLogSrv/1.0"
   idle_timeout: 30m
+  server_operational_log_level: "debug" # Supported levels: debug, info, warn, error
 
 # Settings for when server.mode is "relay"
 relay:
