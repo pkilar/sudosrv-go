@@ -32,6 +32,7 @@ type ServerConfig struct {
 type RelayConfig struct {
 	UpstreamHost         string        `yaml:"upstream_host"`
 	UseTLS               bool          `yaml:"use_tls"`
+	TLSSkipVerify        bool          `yaml:"tls_skip_verify"`
 	ConnectTimeout       time.Duration `yaml:"connect_timeout"`
 	RelayCacheDirectory  string        `yaml:"relay_cache_directory"`
 	ReconnectAttempts    int           `yaml:"reconnect_attempts"`
@@ -61,6 +62,7 @@ func LoadConfig(path string) (*Config, error) {
 			RelayCacheDirectory:  "/var/log/gosudo-relay-cache",
 			ReconnectAttempts:    -1, // Default to trying forever
 			MaxReconnectInterval: 1 * time.Minute,
+			TLSSkipVerify:        false, // Default to secure TLS verification
 		},
 		LocalStorage: LocalStorageConfig{
 			LogDirectory: "/var/log/gosudo-io",
@@ -102,6 +104,7 @@ server:
 relay:
   upstream_host: "127.0.0.1:30343"
   use_tls: false
+  tls_skip_verify: false  # Set to true only for testing with self-signed certs
   connect_timeout: 5s
   relay_cache_directory: "/var/spool/sudosrv-cache"
   reconnect_attempts: -1  # Number of retries, -1 for infinite

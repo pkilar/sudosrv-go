@@ -234,9 +234,10 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 	var conn net.Conn
 	var err error
 
-	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS)
+	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, &tls.Config{InsecureSkipVerify: true})
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify}
+		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, tlsConfig)
 	} else {
 		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)
 	}
