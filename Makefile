@@ -1,5 +1,8 @@
 # Makefile for the Go Sudo I/O Log Server
 
+# RPM package version
+PKG_VERSION=0.1.0
+
 # Go variables
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -102,7 +105,7 @@ clean:
 # Build RPM package
 rpm:
 	@echo "Building RPM package..."
-	./rpm/build-rpm.sh
+	./rpm/build-rpm.sh "$(PKG_VERSION)"
 
 # Display help information
 help:

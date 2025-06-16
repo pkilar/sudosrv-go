@@ -1,7 +1,7 @@
 %define debug_package %{nil}
 
 Name:           sudosrv
-Version:        0.1.0
+Version:        %{_version}
 Release:        1%{?dist}
 Summary:        Go-based sudo I/O log server
 
