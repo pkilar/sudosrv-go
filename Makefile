@@ -79,7 +79,7 @@ proto:
 # Run all unit tests verbosely
 test:
 	@echo "Running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST) -timeout 30s -v ./...
 
 # Tidy Go module dependencies
 deps:

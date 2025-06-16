@@ -26,6 +26,8 @@ vendor/
 *.prof
 cover.out
 test.coverprofile
+.cache/
+.config/
 
 # OS-specific files
 .DS_Store
@@ -37,3 +39,5 @@ Thumbs.db
 .idea/
 *.swp
 *~
+.claude/
+.claude.json
