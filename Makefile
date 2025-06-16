@@ -24,7 +24,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help
+.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm
 
 # Build the application for local architecture
 all: build
@@ -99,6 +99,11 @@ clean:
 	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-arm64 $(BINARY_NAME)-linux-amd64-static $(BINARY_NAME)-linux-arm64-static
 	$(GOCLEAN)
 
+# Build RPM package
+rpm:
+	@echo "Building RPM package..."
+	./rpm/build-rpm.sh
+
 # Display help information
 help:
 	@echo "Usage: make [target]"
@@ -118,4 +123,5 @@ help:
 	@echo "  deps                     Ensure all Go module dependencies are correct."
 	@echo "  run                      Build and run the server. Use 'make run CONFIG=path/to/config.yaml' to specify a config file."
 	@echo "  clean                    Remove all compiled binaries and build cache."
+	@echo "  rpm                      Build RPM package for distribution."
 	@echo "  help                     Display this help message."

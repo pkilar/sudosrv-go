@@ -28,6 +28,7 @@ cover.out
 test.coverprofile
 .cache/
 .config/
+*.tar.gz
 
 # OS-specific files
 .DS_Store
@@ -41,3 +42,4 @@ Thumbs.db
 *~
 .claude/
 .claude.json
+CLAUDE.md
