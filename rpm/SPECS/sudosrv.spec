@@ -1,5 +1,7 @@
+%define debug_package %{nil}
+
 Name:           sudosrv
-Version:        1.0.0
+Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Go-based sudo I/O log server
 
@@ -40,15 +42,15 @@ install -m 0755 sudosrv %{buildroot}%{_bindir}/sudosrv
 
 # Install configuration file
 install -d %{buildroot}%{_sysconfdir}/sudosrv
-install -m 0644 rpm/SOURCES/sudosrv.conf %{buildroot}%{_sysconfdir}/sudosrv/config.yaml
+install -m 0644 rpm/sudosrv.conf %{buildroot}%{_sysconfdir}/sudosrv/config.yaml
 
 # Install systemd service file
 install -d %{buildroot}%{_unitdir}
-install -m 0644 rpm/SOURCES/sudosrv.service %{buildroot}%{_unitdir}/sudosrv.service
+install -m 0644 rpm/sudosrv.service %{buildroot}%{_unitdir}/sudosrv.service
 
 # Install logrotate configuration
 install -d %{buildroot}%{_sysconfdir}/logrotate.d
-install -m 0644 rpm/SOURCES/sudosrv.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/sudosrv
+install -m 0644 rpm/sudosrv.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/sudosrv
 
 # Create directories for logs and cache
 install -d %{buildroot}%{_localstatedir}/log/sudosrv
@@ -82,11 +84,11 @@ exit 0
 %config(noreplace) %{_sysconfdir}/sudosrv/config.yaml
 %{_unitdir}/sudosrv.service
 %config(noreplace) %{_sysconfdir}/logrotate.d/sudosrv
-%dir %attr(0755,sudosrv,sudosrv) %{_localstatedir}/log/sudosrv
-%dir %attr(0755,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
+%dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/log/sudosrv
+%dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 
 %changelog
-* Mon Jan 01 2024 Package Maintainer <maintainer@example.com> - 1.0.0-1
+* Sun Jun 15 2025 Paul Kilar <pkilar@gmail.com> - 0.1.0-1
 - Initial RPM package for sudosrv
 - Added systemd service integration
 - Added logrotate configuration
