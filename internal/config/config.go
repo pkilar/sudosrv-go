@@ -52,7 +52,7 @@ func LoadConfig(path string) (*Config, error) {
 		// Default values
 		Server: ServerConfig{
 			Mode:                      "local",
-			ListenAddress:             "127.0.0.1:30343",
+			ListenAddress:             "", // No default - must be explicitly configured
 			ServerID:                  "GoSudoLogSrv/1.0",
 			IdleTimeout:               10 * time.Minute,
 			ServerOperationalLogLevel: "info", // Default log level
