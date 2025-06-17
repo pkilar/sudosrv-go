@@ -284,10 +284,11 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 
 	// --- Write the plain text `log` file ---
 	logSummaryPath := filepath.Join(s.sessionDir, "log")
-	summaryLine := fmt.Sprintf("%d:%s:%s::%s:%s:%s\n%s\n%s\n",
+	summaryLine := fmt.Sprintf("%d:%s:%s:%s:%s:%s:%s\n%s\n%s\n",
 		submitTime.Unix(),
 		infoMap["submituser"],
 		infoMap["runuser"],
+		infoMap["rungroup"],
 		infoMap["ttyname"],
 		infoMap["lines"],
 		infoMap["columns"],
