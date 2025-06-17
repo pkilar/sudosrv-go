@@ -1,0 +1,43 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+# Go build flags
+export GOOS = linux
+export CGO_ENABLED = 0
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	# Generate protobuf Go code
+	protoc --proto_path=pkg/sudosrv_proto --go_out=pkg/sudosrv_proto --go_opt=paths=source_relative pkg/sudosrv_proto/sudo_logsrv.proto
+
+override_dh_auto_build:
+	# Build the application
+	go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+
+override_dh_auto_install:
+	# Install binary
+	install -D -m 0755 sudosrv $(CURDIR)/debian/sudosrv/usr/bin/sudosrv
+	
+	# Install configuration
+	install -D -m 0644 config.yaml $(CURDIR)/debian/sudosrv/etc/sudosrv/config.yaml
+	
+	# Install systemd service
+	install -D -m 0644 rpm/SOURCES/sudosrv.service $(CURDIR)/debian/sudosrv/lib/systemd/system/sudosrv.service
+	
+	# Create log and cache directories
+	install -d -m 0755 $(CURDIR)/debian/sudosrv/var/log/sudosrv
+	install -d -m 0755 $(CURDIR)/debian/sudosrv/var/spool/sudosrv-cache
+
+override_dh_auto_test:
+	# Run tests
+	go test -timeout 30s -v ./...
+
+override_dh_auto_clean:
+	# Clean build artifacts
+	rm -f sudosrv
+	dh_auto_clean

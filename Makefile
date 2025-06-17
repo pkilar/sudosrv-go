@@ -27,7 +27,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm
+.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb
 
 # Build the application for local architecture
 all: build
@@ -100,12 +100,67 @@ run: build
 clean:
 	@echo "Cleaning up..."
 	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-arm64 $(BINARY_NAME)-linux-amd64-static $(BINARY_NAME)-linux-arm64-static
+#	rm -rf deb/
 	$(GOCLEAN)
 
 # Build RPM package
 rpm:
 	@echo "Building RPM package..."
 	./rpm/build-rpm.sh "$(PKG_VERSION)"
+
+# Build Debian package
+deb:
+	@echo "Building Debian package for $(BINARY_NAME) version $(PKG_VERSION)"
+	@# Check if required tools are installed
+	@if ! command -v dpkg-buildpackage >/dev/null 2>&1; then \
+		echo "Error: dpkg-buildpackage not found. Please install devscripts package:"; \
+		echo "  sudo apt-get install devscripts"; \
+		exit 1; \
+	fi
+	@if ! command -v protoc >/dev/null 2>&1; then \
+		echo "Error: protoc not found. Please install protobuf-compiler:"; \
+		echo "  sudo apt-get install protobuf-compiler"; \
+		exit 1; \
+	fi
+	@if ! command -v go >/dev/null 2>&1; then \
+		echo "Error: go not found. Please install golang:"; \
+		echo "  sudo apt-get install golang-go"; \
+		exit 1; \
+	fi
+	@# Update changelog with current version if different
+	@if ! grep -q "^$(BINARY_NAME) ($(PKG_VERSION)-1)" debian/changelog; then \
+		echo "Updating changelog for version $(PKG_VERSION)"; \
+		sed -i "1s/^$(BINARY_NAME) ([^)]*-1)/$(BINARY_NAME) ($(PKG_VERSION)-1)/" debian/changelog; \
+	fi
+	@# Clean any previous builds
+	@echo "Cleaning previous builds..."
+	@$(MAKE) clean || true
+	@rm -rf deb/* || true
+	@# Build the package
+	@# Create deb output directory
+	@pwd
+	@mkdir -p deb
+	@echo "Building package..."
+	@dpkg-buildpackage -us -uc -b
+	@# Move artifacts to deb folder
+	@echo "Moving build artifacts to deb/ folder..."
+	@mv ../$(BINARY_NAME)_*.deb deb/ 2>/dev/null || true
+	@mv ../$(BINARY_NAME)_*.tar.xz deb/ 2>/dev/null || true
+	@mv ../$(BINARY_NAME)_*.dsc deb/ 2>/dev/null || true
+	@mv ../$(BINARY_NAME)_*.changes deb/ 2>/dev/null || true
+	@mv ../$(BINARY_NAME)_*.buildinfo deb/ 2>/dev/null || true
+	@echo "Package build completed successfully!"
+	@# Show package info if deb file exists
+	@if ls deb/$(BINARY_NAME)_*.deb >/dev/null 2>&1; then \
+		DEB_FILE=$$(ls deb/$(BINARY_NAME)_*.deb | head -1); \
+		echo "Debian package created: $$DEB_FILE"; \
+		echo ""; \
+		echo "Package information:"; \
+		dpkg-deb -I "$$DEB_FILE"; \
+	else \
+		echo "Warning: No .deb files found in deb/ directory"; \
+		echo "Check if dpkg-buildpackage completed successfully"; \
+	fi
 
 # Display help information
 help:
@@ -127,4 +182,5 @@ help:
 	@echo "  run                      Build and run the server. Use 'make run CONFIG=path/to/config.yaml' to specify a config file."
 	@echo "  clean                    Remove all compiled binaries and build cache."
 	@echo "  rpm                      Build RPM package for distribution."
+	@echo "  deb                      Build Debian package for distribution."
 	@echo "  help                     Display this help message."

@@ -29,6 +29,7 @@ test.coverprofile
 .cache/
 .config/
 *.tar.gz
+deb/
 
 # OS-specific files
 .DS_Store

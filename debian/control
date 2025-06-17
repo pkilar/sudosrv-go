@@ -1,0 +1,27 @@
+Source: sudosrv
+Section: admin
+Priority: optional
+Maintainer: Paul Kilar <pkilar@gmail.com>
+Build-Depends: debhelper (>= 13),
+               golang-go (>= 2:1.21),
+               protobuf-compiler
+Standards-Version: 4.6.2
+Homepage: https://github.com/pkilar/sudosrv
+Vcs-Git: https://github.com/pkilar/sudosrv.git
+Rules-Requires-Root: no
+
+Package: sudosrv
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: sudo (>= 1.9.0)
+Description: sudo I/O log server
+ A Go-based sudo I/O log server that implements the sudo_logsrv.proto
+ protocol. It serves as an alternative to sudo's native sudo_logsrvd,
+ capable of receiving and processing I/O logs from sudo clients
+ (version 1.9.0+).
+ .
+ The server supports dual-mode operation: local storage mode (saves logs
+ locally) or relay mode (forwards to upstream server). It includes full
+ sudoers compatibility for log path customization, TLS support for secure
+ log transmission, and store-and-forward caching when upstream servers
+ are unavailable.

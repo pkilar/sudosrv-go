@@ -1,0 +1,11 @@
+sudosrv (0.1.0-1) unstable; urgency=medium
+
+  * Initial release of sudosrv
+  * Implements sudo_logsrv.proto protocol
+  * Supports dual-mode operation (local storage and relay)
+  * Includes TLS support for secure log transmission
+  * Store-and-forward caching for upstream server reliability
+  * Full sudoers compatibility for log path customization
+  * Systemd service integration
+
+ -- Paul Kilar <pkilar@gmail.com>  Mon, 17 Jun 2025 00:00:00 +0000
