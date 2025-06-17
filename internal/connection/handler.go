@@ -142,6 +142,65 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
 
+// applyRuncwdFallback implements the three-tier fallback logic for runcwd as per sudo logging.c:1008-1014.
+// Tier 1: Use def_runcwd if configured (and not "*")
+// Tier 2: Use runas user's home directory if login shell mode
+// Tier 3: Use submitting user's current working directory
+func (h *Handler) applyRuncwdFallback(acceptMsg *pb.AcceptMessage) {
+	// Create a map for quick lookups of info messages
+	infoMap := make(map[string]string)
+	for _, info := range acceptMsg.InfoMsgs {
+		if strval := info.GetStrval(); strval != "" {
+			infoMap[info.GetKey()] = strval
+		}
+	}
+
+	// Check if runcwd is already set and valid (Tier 1)
+	if runcwd, exists := infoMap["runcwd"]; exists && runcwd != "" && runcwd != "*" {
+		// Tier 1: Explicit runcwd is configured and valid, use it as-is
+		slog.Debug("Using explicit runcwd", "runcwd", runcwd)
+		return
+	}
+
+	// Tier 2: Check for login shell mode
+	loginShell := infoMap["login_shell"] == "true" || infoMap["login_shell"] == "1"
+	if loginShell {
+		if runhome := infoMap["runhome"]; runhome != "" {
+			// Use runas user's home directory for login shells
+			h.setOrUpdateInfoMessage(acceptMsg, "runcwd", runhome)
+			slog.Debug("Applied runcwd fallback tier 2 (login shell)", "runcwd", runhome)
+			return
+		}
+	}
+
+	// Tier 3: Fall back to submitting user's current working directory
+	if submitcwd := infoMap["submitcwd"]; submitcwd != "" {
+		h.setOrUpdateInfoMessage(acceptMsg, "runcwd", submitcwd)
+		slog.Debug("Applied runcwd fallback tier 3 (submit cwd)", "runcwd", submitcwd)
+	} else if cwd := infoMap["cwd"]; cwd != "" {
+		// Some clients might send "cwd" instead of "submitcwd"
+		h.setOrUpdateInfoMessage(acceptMsg, "runcwd", cwd)
+		slog.Debug("Applied runcwd fallback tier 3 (cwd)", "runcwd", cwd)
+	}
+}
+
+// setOrUpdateInfoMessage adds or updates an InfoMessage in the AcceptMessage.
+func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value string) {
+	// First try to find existing message to update
+	for _, info := range acceptMsg.InfoMsgs {
+		if info.GetKey() == key {
+			info.Value = &pb.InfoMessage_Strval{Strval: value}
+			return
+		}
+	}
+
+	// If not found, add new InfoMessage
+	acceptMsg.InfoMsgs = append(acceptMsg.InfoMsgs, &pb.InfoMessage{
+		Key:   key,
+		Value: &pb.InfoMessage_Strval{Strval: value},
+	})
+}
+
 // handleAccept sets up a session for an accepted command.
 func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
 	if !acceptMsg.ExpectIobufs {
@@ -149,6 +208,9 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		slog.Info("Handling event-only log (no I/O buffers expected)", "remote_addr", h.conn.RemoteAddr())
 		return nil, nil // No server response required for event-only logs
 	}
+
+	// Apply the three-tier runcwd fallback logic before processing
+	h.applyRuncwdFallback(acceptMsg)
 
 	h.logID = uuid.New().String()
 	var err error

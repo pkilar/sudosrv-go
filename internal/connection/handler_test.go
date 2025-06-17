@@ -214,3 +214,253 @@ func TestConnectionHandler(t *testing.T) {
 	})
 
 }
+
+// mockConn implements net.Conn for testing runcwd fallback logic
+type mockConnForRuncwd struct {
+	net.Conn
+}
+
+func (m *mockConnForRuncwd) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
+}
+
+// Helper function to create a test handler for runcwd tests
+func createTestHandlerForRuncwd() *Handler {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:                      "local",
+			ServerID:                  "test-server",
+			IdleTimeout:               0,
+			ServerOperationalLogLevel: "info",
+		},
+	}
+	return NewHandler(&mockConnForRuncwd{}, cfg)
+}
+
+// Helper function to create AcceptMessage with given info messages for runcwd tests
+func createAcceptMessageForRuncwd(infoMsgs []*pb.InfoMessage) *pb.AcceptMessage {
+	return &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: 1234567890, TvNsec: 0},
+		ExpectIobufs: true,
+		InfoMsgs:     infoMsgs,
+	}
+}
+
+// Helper function to find info message value by key
+func findInfoValue(acceptMsg *pb.AcceptMessage, key string) string {
+	for _, info := range acceptMsg.InfoMsgs {
+		if info.GetKey() == key {
+			return info.GetStrval()
+		}
+	}
+	return ""
+}
+
+func TestApplyRuncwdFallback_Tier1_ExplicitRuncwd(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: explicit runcwd is set and valid
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "runcwd", Value: &pb.InfoMessage_Strval{Strval: "/explicit/path"}},
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "true"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/explicit/path" {
+		t.Errorf("Expected runcwd to remain '/explicit/path', got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_Tier1_WildcardRuncwd(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: runcwd is set to "*" (should trigger fallback)
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "runcwd", Value: &pb.InfoMessage_Strval{Strval: "*"}},
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "true"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/home/runuser" {
+		t.Errorf("Expected runcwd to be '/home/runuser' (tier 2), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_Tier2_LoginShell(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: no explicit runcwd, but login shell mode with runhome
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "true"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/home/runuser" {
+		t.Errorf("Expected runcwd to be '/home/runuser' (tier 2), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_Tier2_LoginShellNumeric(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: login_shell as "1" (numeric true)
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "1"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/home/runuser" {
+		t.Errorf("Expected runcwd to be '/home/runuser' (tier 2), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_Tier3_SubmitCwd(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: no explicit runcwd, not login shell, fall back to submitcwd
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "false"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/submit/cwd" {
+		t.Errorf("Expected runcwd to be '/submit/cwd' (tier 3), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_Tier3_Cwd(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: fall back to "cwd" if "submitcwd" is not available
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "cwd", Value: &pb.InfoMessage_Strval{Strval: "/current/working/dir"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/current/working/dir" {
+		t.Errorf("Expected runcwd to be '/current/working/dir' (tier 3), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_NoLoginShellWithRunhome(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: runhome exists but not login shell, should use submitcwd
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		// no login_shell field or false
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/submit/cwd" {
+		t.Errorf("Expected runcwd to be '/submit/cwd' (tier 3), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_EmptyRuncwd(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: empty runcwd should trigger fallback
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "runcwd", Value: &pb.InfoMessage_Strval{Strval: ""}},
+		{Key: "submitcwd", Value: &pb.InfoMessage_Strval{Strval: "/submit/cwd"}},
+		{Key: "runhome", Value: &pb.InfoMessage_Strval{Strval: "/home/runuser"}},
+		{Key: "login_shell", Value: &pb.InfoMessage_Strval{Strval: "true"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "/home/runuser" {
+		t.Errorf("Expected runcwd to be '/home/runuser' (tier 2), got '%s'", result)
+	}
+}
+
+func TestApplyRuncwdFallback_NoFallbackData(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	// Test case: no fallback data available
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "somekey", Value: &pb.InfoMessage_Strval{Strval: "somevalue"}},
+	})
+
+	handler.applyRuncwdFallback(acceptMsg)
+
+	result := findInfoValue(acceptMsg, "runcwd")
+	if result != "" {
+		t.Errorf("Expected runcwd to remain empty, got '%s'", result)
+	}
+}
+
+func TestSetOrUpdateInfoMessage_NewMessage(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "existing", Value: &pb.InfoMessage_Strval{Strval: "value"}},
+	})
+
+	handler.setOrUpdateInfoMessage(acceptMsg, "newkey", "newvalue")
+
+	result := findInfoValue(acceptMsg, "newkey")
+	if result != "newvalue" {
+		t.Errorf("Expected new info message to be added with value 'newvalue', got '%s'", result)
+	}
+
+	// Ensure existing message is unchanged
+	existing := findInfoValue(acceptMsg, "existing")
+	if existing != "value" {
+		t.Errorf("Expected existing message to remain 'value', got '%s'", existing)
+	}
+}
+
+func TestSetOrUpdateInfoMessage_UpdateExisting(t *testing.T) {
+	handler := createTestHandlerForRuncwd()
+
+	acceptMsg := createAcceptMessageForRuncwd([]*pb.InfoMessage{
+		{Key: "existing", Value: &pb.InfoMessage_Strval{Strval: "oldvalue"}},
+	})
+
+	handler.setOrUpdateInfoMessage(acceptMsg, "existing", "newvalue")
+
+	result := findInfoValue(acceptMsg, "existing")
+	if result != "newvalue" {
+		t.Errorf("Expected existing message to be updated to 'newvalue', got '%s'", result)
+	}
+
+	// Ensure we didn't add a duplicate
+	count := 0
+	for _, info := range acceptMsg.InfoMsgs {
+		if info.GetKey() == "existing" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("Expected exactly 1 'existing' info message, got %d", count)
+	}
+}
