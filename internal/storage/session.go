@@ -67,7 +67,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 	}
 
 	slog.Debug("Resolved session log path", "log_id", logID, "path", sessionDir)
-	if err := os.MkdirAll(sessionDir, 0750); err != nil {
+	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
 		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
 	}
 
@@ -115,7 +115,7 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 	}
 
 	// Get values for dynamic escapes
-	seq, err := getNextSeq(cfg.LogDirectory)
+	seq, err := getNextSeq(cfg.LogDirectory, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -165,7 +165,7 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 }
 
 // getNextSeq generates a sudo-compatible 6-character sequence number.
-func getNextSeq(baseDir string) (string, error) {
+func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) {
 	seqMutex.Lock()
 	defer seqMutex.Unlock()
 
@@ -173,11 +173,11 @@ func getNextSeq(baseDir string) (string, error) {
 	seqFile := filepath.Join(baseDir, "seq")
 
 	// Ensure the base directory exists
-	if err := os.MkdirAll(baseDir, 0750); err != nil {
+	if err := os.MkdirAll(baseDir, os.FileMode(cfg.DirPermissions)); err != nil {
 		return "", fmt.Errorf("could not create base directory %s: %w", baseDir, err)
 	}
 
-	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, 0640)
+	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, os.FileMode(cfg.FilePermissions))
 	if err != nil {
 		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
 	}
@@ -310,7 +310,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		infoMap["submitcwd"],
 		infoMap["command"],
 	)
-	if err := os.WriteFile(logSummaryPath, []byte(summaryLine), 0640); err != nil {
+	if err := os.WriteFile(logSummaryPath, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
@@ -318,7 +318,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	// --- Create timing and I/O stream files but NOT log.json yet ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
 	var err error
-	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}

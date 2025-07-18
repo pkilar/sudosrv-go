@@ -44,9 +44,11 @@ func TestStorageSession(t *testing.T) {
 	t.Run("SessionInitializationAndFinalizationWithIologDir", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
-			IologDir:     filepath.Join("%{LIVEDIR}", "%{user}"),
-			IologFile:    "%{seq}",
+			LogDirectory:    tmpDir,
+			IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+			IologFile:       "%{seq}",
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -111,9 +113,11 @@ func TestStorageSession(t *testing.T) {
 	t.Run("IoBufferHandling", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
-			IologDir:     filepath.Join("%{LIVEDIR}", "%{user}"),
-			IologFile:    "%{seq}",
+			LogDirectory:    tmpDir,
+			IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+			IologFile:       "%{seq}",
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -168,7 +172,9 @@ func TestStorageSession(t *testing.T) {
 		tmpDir := t.TempDir()
 		// Test the fallback behavior when iolog_dir/file are not set
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -200,12 +206,16 @@ func TestStorageSession(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Test sequence generation
-		seq1, err := getNextSeq(tmpDir)
+		cfg := &config.LocalStorageConfig{
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+		seq1, err := getNextSeq(tmpDir, cfg)
 		if err != nil {
 			t.Fatalf("getNextSeq() failed: %v", err)
 		}
 
-		seq2, err := getNextSeq(tmpDir)
+		seq2, err := getNextSeq(tmpDir, cfg)
 		if err != nil {
 			t.Fatalf("getNextSeq() failed: %v", err)
 		}
@@ -255,7 +265,9 @@ func TestStorageSession(t *testing.T) {
 	t.Run("AllIoEventTypes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -323,7 +335,9 @@ func TestStorageSession(t *testing.T) {
 	t.Run("WinsizeAndSuspendEvents", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -394,7 +408,9 @@ func TestStorageSession(t *testing.T) {
 		// Test handling message before initialization
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -421,9 +437,11 @@ func TestStorageSession(t *testing.T) {
 	t.Run("ComplexPathEscapes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
-			IologDir:     "%{LIVEDIR}/%{year}/%{month}/%{day}",
-			IologFile:    "%{hour}-%{minute}-%{second}-%{user}-%{command}",
+			LogDirectory:    tmpDir,
+			IologDir:        "%{LIVEDIR}/%{year}/%{month}/%{day}",
+			IologFile:       "%{hour}-%{minute}-%{second}-%{user}-%{command}",
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
@@ -460,7 +478,9 @@ func TestStorageSession(t *testing.T) {
 	t.Run("ExitMessageWithSignalAndCore", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storageCfg := &config.LocalStorageConfig{
-			LogDirectory: tmpDir,
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
 		}
 
 		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)

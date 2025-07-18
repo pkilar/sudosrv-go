@@ -41,9 +41,11 @@ type RelayConfig struct {
 
 // LocalStorageConfig holds settings for local storage mode.
 type LocalStorageConfig struct {
-	LogDirectory string `yaml:"log_directory"` // Base directory, used if iolog_dir is not set
-	IologDir     string `yaml:"iolog_dir"`     // sudoers-style I/O log directory path
-	IologFile    string `yaml:"iolog_file"`    // sudoers-style I/O log session file name
+	LogDirectory    string `yaml:"log_directory"`    // Base directory, used if iolog_dir is not set
+	IologDir        string `yaml:"iolog_dir"`        // sudoers-style I/O log directory path
+	IologFile       string `yaml:"iolog_file"`       // sudoers-style I/O log session file name
+	DirPermissions  uint32 `yaml:"dir_permissions"`  // Directory permissions (octal, e.g., 0750)
+	FilePermissions uint32 `yaml:"file_permissions"` // File permissions (octal, e.g., 0640)
 }
 
 // LoadConfig reads the configuration from a YAML file.
@@ -65,9 +67,11 @@ func LoadConfig(path string) (*Config, error) {
 			TLSSkipVerify:        false, // Default to secure TLS verification
 		},
 		LocalStorage: LocalStorageConfig{
-			LogDirectory: "/var/log/gosudo-io",
-			IologDir:     "%{LIVEDIR}/%{user}", // Default sudoers-style path
-			IologFile:    "%{seq}",             // Default sudoers-style file name
+			LogDirectory:    "/var/log/gosudo-io",
+			IologDir:        "%{LIVEDIR}/%{user}", // Default sudoers-style path
+			IologFile:       "%{seq}",             // Default sudoers-style file name
+			DirPermissions:  0750,                 // Default directory permissions
+			FilePermissions: 0640,                 // Default file permissions
 		},
 	}
 
