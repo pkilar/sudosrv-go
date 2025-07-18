@@ -43,7 +43,7 @@ func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 	h := &Handler{
 		conn:      conn,
 		config:    cfg,
-		processor: protocol.NewProcessor(conn, conn),
+		processor: protocol.NewProcessorWithCloser(conn, conn, conn),
 		isTLS:     isTLS,
 	}
 
@@ -59,10 +59,14 @@ func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 
 // Handle runs the message processing loop for the connection.
 func (h *Handler) Handle() {
-	defer h.conn.Close()
 	defer func() {
 		if h.session != nil {
-			h.session.Close()
+			if err := h.session.Close(); err != nil {
+				slog.Error("Failed to close session", "error", err, "remote_addr", h.conn.RemoteAddr())
+			}
+		}
+		if err := h.processor.Close(); err != nil {
+			slog.Error("Failed to close processor", "error", err, "remote_addr", h.conn.RemoteAddr())
 		}
 		slog.Info("Connection closed", "remote_addr", h.conn.RemoteAddr())
 	}()
