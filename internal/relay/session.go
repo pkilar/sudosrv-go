@@ -88,6 +88,7 @@ func (s *Session) run() {
 		// Connection successful, now flush the file.
 		slog.Info("Upstream connection successful, flushing cache.", "log_id", s.logID, "file", s.cacheFileName)
 		err = flushFile(proc, s.cacheFileName)
+		proc.Close() // Always close the connection after flush attempt
 		if err != nil {
 			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
 		} else {
@@ -184,7 +185,9 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
 		return
 	}
 
-	if err := flushFile(proc, flushingFileName); err != nil {
+	err = flushFile(proc, flushingFileName)
+	proc.Close() // Always close the connection after flush attempt
+	if err != nil {
 		slog.Error("Failed to flush orphaned file, renaming back", "path", flushingFileName, "error", err)
 		os.Rename(flushingFileName, filePath)
 		return
@@ -246,15 +249,15 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 		return nil, fmt.Errorf("dial failed: %w", err)
 	}
 
-	proc := protocol.NewProcessor(conn, conn)
+	proc := protocol.NewProcessorWithCloser(conn, conn, conn)
 	slog.Debug("Starting handshake with upstream")
 	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
 	if err := proc.WriteClientMessage(helloMsg); err != nil {
-		conn.Close()
+		proc.Close()
 		return nil, fmt.Errorf("failed to send ClientHello to upstream: %w", err)
 	}
 	if _, err = proc.ReadServerMessage(); err != nil {
-		conn.Close()
+		proc.Close()
 		return nil, fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
 	}
 	return proc, nil

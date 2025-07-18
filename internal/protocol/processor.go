@@ -19,12 +19,14 @@ type Processor interface {
 	WriteServerMessage(*pb.ServerMessage) error
 	ReadServerMessage() (*pb.ServerMessage, error)
 	WriteClientMessage(*pb.ClientMessage) error
+	Close() error
 }
 
 type processor struct {
 	reader   io.Reader
 	writer   io.Writer
 	writeMux sync.Mutex
+	closer   io.Closer // Optional closer for the underlying connection
 }
 
 // NewProcessor creates a new protocol processor.
@@ -32,6 +34,15 @@ func NewProcessor(r io.Reader, w io.Writer) Processor {
 	return &processor{
 		reader: r,
 		writer: w,
+	}
+}
+
+// NewProcessorWithCloser creates a new protocol processor with a closer for the underlying connection.
+func NewProcessorWithCloser(r io.Reader, w io.Writer, c io.Closer) Processor {
+	return &processor{
+		reader: r,
+		writer: w,
+		closer: c,
 	}
 }
 
@@ -117,4 +128,12 @@ func (p *processor) WriteClientMessage(msg *pb.ClientMessage) error {
 	p.writeMux.Lock()
 	defer p.writeMux.Unlock()
 	return p.writeMessage(p.writer, msg)
+}
+
+// Close closes the underlying connection if available.
+func (p *processor) Close() error {
+	if p.closer != nil {
+		return p.closer.Close()
+	}
+	return nil
 }
