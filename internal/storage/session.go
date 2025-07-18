@@ -24,6 +24,7 @@ type Session struct {
 	sessionDir      string
 	files           map[string]*os.File
 	timingFile      *os.File
+	logJSONFile     *os.File
 	cumulativeDelay map[string]time.Duration
 	logMeta         map[string]interface{}
 	fileMux         sync.Mutex
@@ -315,7 +316,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
 
-	// --- Create timing and I/O stream files but NOT log.json yet ---
+	// --- Create timing and I/O stream files and initialize log.json ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
 	var err error
 	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
@@ -323,6 +324,19 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		return err
 	}
 	slog.Debug("Opened timing file for session", "log_id", s.logID, "path", timingFilePath)
+
+	// Create and initialize log.json file
+	logJSONPath := filepath.Join(s.sessionDir, "log.json")
+	s.logJSONFile, err = os.OpenFile(logJSONPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
+	if err != nil {
+		return fmt.Errorf("failed to create log.json file: %w", err)
+	}
+	slog.Debug("Created log.json file for session", "log_id", s.logID, "path", logJSONPath)
+
+	// Write initial metadata to log.json
+	if err := s.updateLogJSON(); err != nil {
+		return fmt.Errorf("failed to write initial metadata to log.json: %w", err)
+	}
 
 	// Create I/O stream files
 	for streamName, streamInfo := range streamMap {
@@ -334,6 +348,36 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath)
 		s.files[streamName] = f
 	}
+	return nil
+}
+
+// updateLogJSON writes the current metadata to the log.json file incrementally.
+func (s *Session) updateLogJSON() error {
+	if s.logJSONFile == nil {
+		return fmt.Errorf("log.json file not initialized")
+	}
+
+	// Seek to the beginning of the file and truncate it
+	if _, err := s.logJSONFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek to beginning of log.json: %w", err)
+	}
+	if err := s.logJSONFile.Truncate(0); err != nil {
+		return fmt.Errorf("failed to truncate log.json: %w", err)
+	}
+
+	// Write the updated metadata
+	encoder := json.NewEncoder(s.logJSONFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(s.logMeta); err != nil {
+		return fmt.Errorf("failed to encode JSON to log.json: %w", err)
+	}
+
+	// Flush the data to disk
+	if err := s.logJSONFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync log.json: %w", err)
+	}
+
+	slog.Debug("Updated log.json", "log_id", s.logID)
 	return nil
 }
 
@@ -364,6 +408,11 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, err
 	}
 
+	// Update log.json with current state
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after I/O entry", "log_id", s.logID, "error", err)
+	}
+
 	// Send commit point
 	commitPoint := s.cumulativeDelay[streamName]
 	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
@@ -381,6 +430,12 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
+
+	// Update log.json with current state
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after winsize event", "log_id", s.logID, "error", err)
+	}
+
 	return nil, nil // No commit point for winsize
 }
 
@@ -397,6 +452,12 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
 	}
+
+	// Update log.json with current state
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after suspend/resume event", "log_id", s.logID, "error", err)
+	}
+
 	return nil, nil // No commit point for suspend
 }
 
@@ -432,19 +493,11 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 		s.logMeta["dumped_core"] = true
 	}
 
-	// Write the complete log.json file now that all metadata is gathered.
-	logJSONPath := filepath.Join(s.sessionDir, "log.json")
-	jsonFile, err := os.Create(logJSONPath)
-	if err != nil {
-		slog.Error("Failed to open 'log.json' for finalization", "log_id", s.logID, "error", err)
+	// Update log.json with final exit information
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json with final exit information", "log_id", s.logID, "error", err)
 	} else {
-		defer jsonFile.Close()
-		encoder := json.NewEncoder(jsonFile)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(s.logMeta); err != nil {
-			slog.Error("Failed to encode final JSON for 'log.json'", "log_id", s.logID, "error", err)
-		}
-		slog.Debug("Wrote final metadata to log.json", "log_id", s.logID, "path", logJSONPath)
+		slog.Debug("Updated log.json with final metadata", "log_id", s.logID)
 	}
 
 	// Close all file handles
@@ -467,6 +520,10 @@ func (s *Session) Close() error {
 	if s.timingFile != nil {
 		slog.Debug("Closing timing file", "log_id", s.logID)
 		s.timingFile.Close()
+	}
+	if s.logJSONFile != nil {
+		slog.Debug("Closing log.json file", "log_id", s.logID)
+		s.logJSONFile.Close()
 	}
 	slog.Info("Closed all log files for session", "log_id", s.logID)
 	return nil
