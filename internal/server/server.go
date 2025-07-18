@@ -11,8 +11,10 @@ import (
 	"os/signal"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
+	"sudosrv/internal/metrics"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Server manages listeners and handles graceful shutdown.
@@ -77,6 +79,10 @@ func (s *Server) Start() error {
 		return fmt.Errorf("no listeners configured, server not started")
 	}
 
+	// Start metrics logging goroutine
+	s.waitGroup.Add(1)
+	go s.logMetricsPeriodically()
+
 	return nil
 }
 
@@ -103,15 +109,21 @@ func (s *Server) acceptLoop(listener net.Listener) {
 			case <-s.quit:
 				return // Normal shutdown
 			default:
-				slog.Error("Failed to accept connection", "error", err)
+				metrics.Global.IncrementFailedConnections()
+				slog.Error("Failed to accept connection", "error", err, "failed_connections", metrics.Global.GetFailedConnections())
 			}
 			continue
 		}
-		slog.Info("Accepted new connection", "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr())
+		metrics.Global.IncrementConnections()
+		slog.Info("Accepted new connection", "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr(),
+			"total_connections", metrics.Global.GetTotalConnections(), "active_connections", metrics.Global.GetActiveConnections())
 
 		s.waitGroup.Add(1)
 		go func() {
-			defer s.waitGroup.Done()
+			defer func() {
+				s.waitGroup.Done()
+				metrics.Global.DecrementActiveConnections()
+			}()
 			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
 			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config)
 			handler.Handle()
@@ -144,4 +156,35 @@ func (s *Server) Wait() {
 
 	// Wait for all goroutines to finish
 	s.waitGroup.Wait()
+}
+
+// logMetricsPeriodically logs server metrics every 5 minutes for operational visibility.
+func (s *Server) logMetricsPeriodically() {
+	defer s.waitGroup.Done()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			slog.Info("Stopping metrics logging due to context cancellation")
+			return
+		case <-s.quit:
+			slog.Info("Stopping metrics logging")
+			return
+		case <-ticker.C:
+			slog.Info("Server metrics",
+				"uptime", metrics.Global.GetUptime().String(),
+				"total_connections", metrics.Global.GetTotalConnections(),
+				"active_connections", metrics.Global.GetActiveConnections(),
+				"failed_connections", metrics.Global.GetFailedConnections(),
+				"total_sessions", metrics.Global.GetTotalSessions(),
+				"active_sessions", metrics.Global.GetActiveSessions(),
+				"local_sessions", metrics.Global.GetLocalSessions(),
+				"relay_sessions", metrics.Global.GetRelaySessions(),
+				"messages_processed", metrics.Global.GetMessagesProcessed(),
+				"message_errors", metrics.Global.GetMessageErrors(),
+			)
+		}
+	}
 }

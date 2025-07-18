@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sudosrv/internal/config"
+	"sudosrv/internal/metrics"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/relay"
 	"sudosrv/internal/storage"
@@ -69,6 +70,7 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 func (h *Handler) Handle() {
 	defer func() {
 		if h.session != nil {
+			metrics.Global.DecrementActiveSessions()
 			if err := h.session.Close(); err != nil {
 				slog.Error("Failed to close session", "error", err, "remote_addr", h.conn.RemoteAddr())
 			}
@@ -76,7 +78,8 @@ func (h *Handler) Handle() {
 		if err := h.processor.Close(); err != nil {
 			slog.Error("Failed to close processor", "error", err, "remote_addr", h.conn.RemoteAddr())
 		}
-		slog.Info("Connection closed", "remote_addr", h.conn.RemoteAddr())
+		slog.Info("Connection closed", "remote_addr", h.conn.RemoteAddr(),
+			"active_connections", metrics.Global.GetActiveConnections(), "active_sessions", metrics.Global.GetActiveSessions())
 	}()
 
 	// Main message loop
@@ -109,12 +112,16 @@ func (h *Handler) Handle() {
 
 		serverMsg, err := h.processMessage(clientMsg)
 		if err != nil {
-			slog.Error("Error processing message", "error", err, "remote_addr", h.conn.RemoteAddr())
+			metrics.Global.IncrementMessageErrors()
+			slog.Error("Error processing message", "error", err, "remote_addr", h.conn.RemoteAddr(),
+				"message_errors", metrics.Global.GetMessageErrors())
 			// Attempt to send a fatal error to the client
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
 			_ = h.processor.WriteServerMessage(errMsg)
 			return
 		}
+
+		metrics.Global.IncrementMessagesProcessed()
 
 		if serverMsg != nil {
 			if err := h.processor.WriteServerMessage(serverMsg); err != nil {
@@ -249,14 +256,20 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local storage session: %w", err)
 		}
-		slog.Info("Started local storage session", "log_id", h.logID)
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementLocalSessions()
+		slog.Info("Started local storage session", "log_id", h.logID,
+			"total_sessions", metrics.Global.GetTotalSessions(), "local_sessions", metrics.Global.GetLocalSessions())
 
 	case "relay":
 		h.session, err = h.sessionFactories.newRelaySession(h.logID, acceptMsg, &h.config.Relay)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
-		slog.Info("Started relay session", "log_id", h.logID, "upstream", h.config.Relay.UpstreamHost)
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementRelaySessions()
+		slog.Info("Started relay session", "log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
+			"total_sessions", metrics.Global.GetTotalSessions(), "relay_sessions", metrics.Global.GetRelaySessions())
 
 	default:
 		return nil, fmt.Errorf("unknown server mode: %s", h.config.Server.Mode)
