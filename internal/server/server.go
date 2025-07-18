@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -20,14 +21,19 @@ type Server struct {
 	waitGroup sync.WaitGroup
 	listeners []net.Listener
 	quit      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // NewServer creates a new server instance.
 func NewServer(cfg *config.Config) (*Server, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		config:    cfg,
 		listeners: make([]net.Listener, 0),
 		quit:      make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}, nil
 }
 
@@ -79,6 +85,9 @@ func (s *Server) acceptLoop(listener net.Listener) {
 	defer s.waitGroup.Done()
 	for {
 		select {
+		case <-s.ctx.Done():
+			slog.Info("Stopping accept loop due to context cancellation", "address", listener.Addr())
+			return
 		case <-s.quit:
 			slog.Info("Stopping accept loop", "address", listener.Addr())
 			return
@@ -89,6 +98,8 @@ func (s *Server) acceptLoop(listener net.Listener) {
 		if err != nil {
 			// Check if the error is due to the listener being closed.
 			select {
+			case <-s.ctx.Done():
+				return // Context cancelled
 			case <-s.quit:
 				return // Normal shutdown
 			default:
@@ -102,7 +113,7 @@ func (s *Server) acceptLoop(listener net.Listener) {
 		go func() {
 			defer s.waitGroup.Done()
 			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
-			handler := connection.NewHandler(conn, s.config)
+			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config)
 			handler.Handle()
 			slog.Debug("Connection handler finished", "remote_addr", conn.RemoteAddr())
 		}()
@@ -117,6 +128,9 @@ func (s *Server) Wait() {
 	<-sigChan
 
 	slog.Info("Shutdown signal received, closing listeners...")
+
+	// Cancel context to signal all goroutines to stop
+	s.cancel()
 
 	// Signal goroutines to stop
 	close(s.quit)

@@ -2,6 +2,7 @@
 package connection
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 
 // Handler manages a single client connection.
 type Handler struct {
+	ctx       context.Context
 	conn      net.Conn
 	config    *config.Config
 	processor protocol.Processor
@@ -39,8 +41,14 @@ type SessionHandler interface {
 
 // NewHandler creates a new handler for a connection.
 func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
+	return NewHandlerWithContext(context.Background(), conn, cfg)
+}
+
+// NewHandlerWithContext creates a new handler for a connection with context support.
+func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config) *Handler {
 	_, isTLS := conn.(*tls.Conn)
 	h := &Handler{
+		ctx:       ctx,
 		conn:      conn,
 		config:    cfg,
 		processor: protocol.NewProcessorWithCloser(conn, conn, conn),
@@ -73,6 +81,14 @@ func (h *Handler) Handle() {
 
 	// Main message loop
 	for {
+		// Check if context is cancelled
+		select {
+		case <-h.ctx.Done():
+			slog.Info("Connection handler stopping due to context cancellation", "remote_addr", h.conn.RemoteAddr())
+			return
+		default:
+		}
+
 		if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
 			slog.Error("Failed to set read deadline", "error", err)
 			return
@@ -80,8 +96,15 @@ func (h *Handler) Handle() {
 
 		clientMsg, err := h.processor.ReadClientMessage()
 		if err != nil {
-			slog.Debug("Failed to read client message", "error", err, "remote_addr", h.conn.RemoteAddr())
-			return
+			// Check if the error is due to context cancellation
+			select {
+			case <-h.ctx.Done():
+				slog.Info("Connection handler stopping due to context cancellation during read", "remote_addr", h.conn.RemoteAddr())
+				return
+			default:
+				slog.Debug("Failed to read client message", "error", err, "remote_addr", h.conn.RemoteAddr())
+				return
+			}
 		}
 
 		serverMsg, err := h.processMessage(clientMsg)
