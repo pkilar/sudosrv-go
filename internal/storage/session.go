@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -172,31 +171,47 @@ func getNextSeq(baseDir string) (string, error) {
 
 	// The sequence file is stored in the base log directory
 	seqFile := filepath.Join(baseDir, "seq")
+
+	// Ensure the base directory exists
+	if err := os.MkdirAll(baseDir, 0750); err != nil {
+		return "", fmt.Errorf("could not create base directory %s: %w", baseDir, err)
+	}
+
 	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, 0640)
 	if err != nil {
 		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
 	}
 	defer f.Close()
 
-	// Read the current sequence number
-	data := make([]byte, 4)
-	n, err := f.Read(data)
-	if err != nil && err != io.EOF {
-		return "", fmt.Errorf("could not read sequence file: %w", err)
+	// Get file info to check size
+	stat, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("could not stat sequence file: %w", err)
 	}
 
 	var currentSeq uint32
-	if n == 4 {
+	if stat.Size() >= 4 {
+		// Read the current sequence number
+		data := make([]byte, 4)
+		if _, err := f.ReadAt(data, 0); err != nil {
+			return "", fmt.Errorf("could not read sequence file: %w", err)
+		}
 		currentSeq = binary.BigEndian.Uint32(data)
 	}
 
 	// Increment and wrap if necessary (sudo uses a base36 encoding)
 	nextSeq := currentSeq + 1
 
-	// Write the new sequence number back to the file
+	// Write the new sequence number back to the file atomically
+	data := make([]byte, 4)
 	binary.BigEndian.PutUint32(data, nextSeq)
 	if _, err := f.WriteAt(data, 0); err != nil {
 		return "", fmt.Errorf("could not write to sequence file: %w", err)
+	}
+
+	// Ensure the write is flushed to disk
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("could not sync sequence file: %w", err)
 	}
 
 	// Convert the number to a 6-character, zero-padded, base36 string
