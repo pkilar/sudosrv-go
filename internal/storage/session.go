@@ -78,7 +78,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		sessionDir:      sessionDir,
 		files:           make(map[string]*os.File),
 		cumulativeDelay: make(map[string]time.Duration),
-		logMeta:         make(map[string]interface{}),
+		logMeta:         make(map[string]any),
 	}, nil
 }
 
@@ -517,13 +517,13 @@ func (s *Session) Close() error {
 		slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
 		f.Close()
 	}
-	if s.timingFile != nil {
-		slog.Debug("Closing timing file", "log_id", s.logID)
-		s.timingFile.Close()
-	}
 	if s.logJSONFile != nil {
 		slog.Debug("Closing log.json file", "log_id", s.logID)
 		s.logJSONFile.Close()
+	}
+	if s.timingFile != nil {
+		slog.Debug("Closing timing file", "log_id", s.logID)
+		s.timingFile.Close()
 	}
 	slog.Info("Closed all log files for session", "log_id", s.logID)
 	return nil
