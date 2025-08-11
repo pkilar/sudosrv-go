@@ -2,6 +2,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -34,6 +35,8 @@ type Session struct {
 	fromClientChan   chan *pb.ClientMessage
 	wg               sync.WaitGroup
 	cacheFileName    string
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 // NewSession creates a new relay session handler.
@@ -44,12 +47,15 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConf
 
 	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", logID))
 
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		logID:            logID,
 		config:           cfg,
 		initialAcceptMsg: acceptMsg,
-		fromClientChan:   make(chan *pb.ClientMessage, 100), // Buffered channel for client messages
+		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
 		cacheFileName:    cacheFileName,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	s.wg.Add(1)
@@ -76,13 +82,27 @@ func (s *Session) run() {
 	// Phase 2: The client session is complete. Now, persistently try to flush the file.
 	slog.Info("Client session complete, beginning persistent flush attempts.", "log_id", s.logID, "file", s.cacheFileName)
 	for attempt := 0; s.config.ReconnectAttempts == -1 || attempt < s.config.ReconnectAttempts; attempt++ {
+		select {
+		case <-s.ctx.Done():
+			slog.Info("Relay session cancelled, stopping flush attempts", "log_id", s.logID)
+			return
+		default:
+		}
+
 		proc, err := connectToUpstream(s.config)
 		if err != nil {
 			slog.Warn("Upstream connection attempt failed", "log_id", s.logID, "error", err)
 			backoff := s.calculateBackoff(attempt)
 			slog.Info("Waiting before next reconnect attempt", "log_id", s.logID, "duration", backoff)
-			time.Sleep(backoff)
-			continue
+
+			// Respect context cancellation during backoff
+			select {
+			case <-s.ctx.Done():
+				slog.Info("Relay session cancelled during backoff", "log_id", s.logID)
+				return
+			case <-time.After(backoff):
+				continue
+			}
 		}
 
 		// Connection successful, now flush the file.
@@ -149,11 +169,16 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		// For relay mode, we return a log ID immediately to satisfy the client
 		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
 	}
+
+	// Use a timeout to prevent indefinite blocking
 	select {
 	case s.fromClientChan <- msg:
 		return nil, nil
-	default:
-		return nil, fmt.Errorf("relay session message channel full")
+	case <-time.After(5 * time.Second):
+		slog.Warn("Relay session message channel timeout", "log_id", s.logID)
+		return nil, fmt.Errorf("relay session message channel timeout")
+	case <-s.ctx.Done():
+		return nil, fmt.Errorf("relay session cancelled")
 	}
 }
 
@@ -162,6 +187,12 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 func (s *Session) Close() error {
 	slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
 	close(s.fromClientChan) // Signal the messageWriter loop to terminate.
+
+	// Wait for goroutine to finish, but don't cancel context yet to allow natural completion
+	s.wg.Wait()
+
+	// Now cancel context for cleanup
+	s.cancel()
 	return nil
 }
 

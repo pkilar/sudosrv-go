@@ -14,6 +14,7 @@ import (
 	"sudosrv/internal/config"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -55,8 +56,9 @@ var streamMap = map[string]struct {
 	"ttyout": {filename: "ttyout", marker: IO_EVENT_TTYOUT},
 }
 
-// Global mutex for sequence file access
-var seqMutex sync.Mutex
+// Per-directory mutexes for sequence file access to reduce contention
+var seqMutexMap = make(map[string]*sync.Mutex)
+var seqMutexMapLock sync.RWMutex
 
 const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -165,10 +167,33 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 	return filepath.Join(iologDir, iologFile), nil
 }
 
-// getNextSeq generates a sudo-compatible 6-character sequence number.
+// getMutexForDir returns a mutex for the given directory, creating one if needed
+func getMutexForDir(dir string) *sync.Mutex {
+	seqMutexMapLock.RLock()
+	if mutex, exists := seqMutexMap[dir]; exists {
+		seqMutexMapLock.RUnlock()
+		return mutex
+	}
+	seqMutexMapLock.RUnlock()
+
+	seqMutexMapLock.Lock()
+	defer seqMutexMapLock.Unlock()
+
+	// Double-check pattern
+	if mutex, exists := seqMutexMap[dir]; exists {
+		return mutex
+	}
+
+	mutex := &sync.Mutex{}
+	seqMutexMap[dir] = mutex
+	return mutex
+}
+
+// getNextSeq generates a sudo-compatible 6-character sequence number with file locking.
 func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) {
-	seqMutex.Lock()
-	defer seqMutex.Unlock()
+	mutex := getMutexForDir(baseDir)
+	mutex.Lock()
+	defer mutex.Unlock()
 
 	// The sequence file is stored in the base log directory
 	seqFile := filepath.Join(baseDir, "seq")
@@ -183,6 +208,12 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
 	}
 	defer f.Close()
+
+	// Apply file lock for additional safety
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("could not lock sequence file: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	// Get file info to check size
 	stat, err := f.Stat()
@@ -513,18 +544,29 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 
 // Close closes all open file handles for the session.
 func (s *Session) Close() error {
+	var lastErr error
+
 	for name, f := range s.files {
 		slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
-		f.Close()
+		if err := f.Close(); err != nil {
+			slog.Error("Failed to close stream file", "log_id", s.logID, "stream", name, "error", err)
+			lastErr = err
+		}
 	}
 	if s.logJSONFile != nil {
 		slog.Debug("Closing log.json file", "log_id", s.logID)
-		s.logJSONFile.Close()
+		if err := s.logJSONFile.Close(); err != nil {
+			slog.Error("Failed to close log.json file", "log_id", s.logID, "error", err)
+			lastErr = err
+		}
 	}
 	if s.timingFile != nil {
 		slog.Debug("Closing timing file", "log_id", s.logID)
-		s.timingFile.Close()
+		if err := s.timingFile.Close(); err != nil {
+			slog.Error("Failed to close timing file", "log_id", s.logID, "error", err)
+			lastErr = err
+		}
 	}
 	slog.Info("Closed all log files for session", "log_id", s.logID)
-	return nil
+	return lastErr
 }
