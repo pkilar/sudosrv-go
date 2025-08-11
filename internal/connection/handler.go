@@ -13,6 +13,7 @@ import (
 	"sudosrv/internal/relay"
 	"sudosrv/internal/storage"
 	pb "sudosrv/pkg/sudosrv_proto"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,10 @@ type Handler struct {
 	logID     string
 	session   SessionHandler
 	isTLS     bool
+	// Rate limiting
+	messageCount    int64
+	lastMessageTime time.Time
+	rateLimitMutex  sync.Mutex
 	// sessionFactories allows for injecting mock session creators during tests.
 	sessionFactories struct {
 		newLocalStorageSession func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
@@ -49,11 +54,12 @@ func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config) *Handler {
 	_, isTLS := conn.(*tls.Conn)
 	h := &Handler{
-		ctx:       ctx,
-		conn:      conn,
-		config:    cfg,
-		processor: protocol.NewProcessorWithCloser(conn, conn, conn),
-		isTLS:     isTLS,
+		ctx:             ctx,
+		conn:            conn,
+		config:          cfg,
+		processor:       protocol.NewProcessorWithCloser(conn, conn, conn),
+		isTLS:           isTLS,
+		lastMessageTime: time.Now(),
 	}
 
 	// Initialize factories to point to the real session creation functions.
@@ -108,6 +114,14 @@ func (h *Handler) Handle() {
 				slog.Debug("Failed to read client message", "error", err, "remote_addr", h.conn.RemoteAddr())
 				return
 			}
+		}
+
+		// Apply rate limiting to prevent memory exhaustion
+		if !h.checkRateLimit() {
+			slog.Warn("Rate limit exceeded, closing connection", "remote_addr", h.conn.RemoteAddr())
+			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Rate limit exceeded"}}
+			_ = h.processor.WriteServerMessage(errMsg)
+			return
 		}
 
 		serverMsg, err := h.processMessage(clientMsg)
@@ -174,6 +188,33 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 		ServerId: h.config.Server.ServerID,
 	}
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
+}
+
+// checkRateLimit implements simple rate limiting to prevent memory exhaustion attacks.
+// Limits to 100 messages per second per connection.
+func (h *Handler) checkRateLimit() bool {
+	h.rateLimitMutex.Lock()
+	defer h.rateLimitMutex.Unlock()
+
+	now := time.Now()
+	timeDiff := now.Sub(h.lastMessageTime)
+
+	// Reset counter if more than 1 second has passed
+	if timeDiff >= time.Second {
+		h.messageCount = 1
+		h.lastMessageTime = now
+		return true
+	}
+
+	h.messageCount++
+
+	// Allow up to 100 messages per second
+	const maxMessagesPerSecond = 100
+	if h.messageCount > maxMessagesPerSecond {
+		return false
+	}
+
+	return true
 }
 
 // applyRuncwdFallback implements the three-tier fallback logic for runcwd as per sudo logging.c:1008-1014.
