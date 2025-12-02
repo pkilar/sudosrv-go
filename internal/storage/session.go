@@ -34,14 +34,14 @@ type Session struct {
 
 // IO event types for the timing file, matching native sudo implementation.
 const (
-	IO_EVENT_STDIN   = 0
-	IO_EVENT_STDOUT  = 1
-	IO_EVENT_STDERR  = 2
-	IO_EVENT_TTYIN   = 3
-	IO_EVENT_TTYOUT  = 4
-	IO_EVENT_WINSIZE = 5
-	IO_EVENT_SUSPEND = 6
-	IO_EVENT_RESUME  = 7
+	IO_EVENT_STDIN        = 0
+	IO_EVENT_STDOUT       = 1
+	IO_EVENT_STDERR       = 2
+	IO_EVENT_TTYIN        = 3
+	IO_EVENT_TTYOUT       = 4
+	IO_EVENT_WINSIZE      = 5
+	IO_EVENT_TTYOUT_1_8_7 = 6 // Legacy sudo 1.8.7 bug compatibility (not used)
+	IO_EVENT_SUSPEND      = 7 // Used for both suspend and resume events
 )
 
 // Map stream names to filenames and timing file markers
@@ -473,12 +473,8 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 
-	eventType := IO_EVENT_SUSPEND
-	if event.Signal == "CONT" {
-		eventType = IO_EVENT_RESUME
-	}
-
-	timingRecord := fmt.Sprintf("%d %.9f %s\n", eventType, delay.Seconds(), event.Signal)
+	// Sudo uses marker 7 for all suspend/resume events; signal name differentiates them
+	timingRecord := fmt.Sprintf("%d %.9f %s\n", IO_EVENT_SUSPEND, delay.Seconds(), event.Signal)
 	slog.Debug("Writing suspend/resume entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
