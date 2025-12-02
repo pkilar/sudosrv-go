@@ -47,6 +47,7 @@ type LocalStorageConfig struct {
 	DirPermissions  uint32 `yaml:"dir_permissions"`  // Directory permissions (octal, e.g., 0750)
 	FilePermissions uint32 `yaml:"file_permissions"` // File permissions (octal, e.g., 0640)
 	Compress        bool   `yaml:"compress"`         // Enable gzip compression for I/O log files
+	PasswordFilter  bool   `yaml:"password_filter"`  // Enable regex-based password filtering
 }
 
 // LoadConfig reads the configuration from a YAML file.
@@ -74,6 +75,7 @@ func LoadConfig(path string) (*Config, error) {
 			DirPermissions:  0750,                 // Default directory permissions
 			FilePermissions: 0640,                 // Default file permissions
 			Compress:        false,                // Compression disabled by default for compatibility
+			PasswordFilter:  true,                 // Password filtering enabled by default for security
 		},
 	}
 
@@ -137,5 +139,10 @@ local_storage:
   # Enable gzip compression for I/O log data files (stdin/stdout/stderr/ttyin/ttyout)
   # Disabled by default for compatibility with older tools
   compress: false
+
+  # Enable password filtering to prevent passwords from being logged in cleartext
+  # Uses regex pattern matching to detect password prompts and mask input
+  # Enabled by default for security
+  password_filter: true
 
 */

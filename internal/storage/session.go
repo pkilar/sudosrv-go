@@ -31,6 +31,7 @@ type Session struct {
 	logJSONFile     *os.File
 	cumulativeDelay map[string]time.Duration
 	logMeta         map[string]interface{}
+	passwordFilter  *PasswordFilter // Password filtering for security
 	fileMux         sync.Mutex
 	isInitialized   bool
 }
@@ -77,7 +78,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
 	}
 
-	return &Session{
+	session := &Session{
 		logID:           logID,
 		config:          cfg,
 		sessionDir:      sessionDir,
@@ -85,7 +86,15 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		gzipWriters:     make(map[string]*gzip.Writer),
 		cumulativeDelay: make(map[string]time.Duration),
 		logMeta:         make(map[string]any),
-	}, nil
+	}
+
+	// Initialize password filter if enabled
+	if cfg.PasswordFilter {
+		session.passwordFilter = NewPasswordFilter()
+		slog.Debug("Password filtering enabled for session", "log_id", logID)
+	}
+
+	return session, nil
 }
 
 // randomAlphanumericString generates a cryptographically secure random alphanumeric string of length n.
@@ -429,6 +438,21 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, fmt.Errorf("unknown stream name: %s", streamName)
 	}
 
+	// Apply password filtering if enabled
+	dataToWrite := data
+	if s.passwordFilter != nil {
+		if streamName == "ttyout" {
+			// Check output for password prompts
+			s.passwordFilter.CheckOutput(data)
+		} else if streamName == "ttyin" {
+			// Filter input if password prompt was detected
+			dataToWrite = s.passwordFilter.FilterInput(data)
+			if len(dataToWrite) != len(data) || string(dataToWrite) != string(data) {
+				slog.Debug("Password input masked", "log_id", s.logID, "original_len", len(data), "masked_len", len(dataToWrite))
+			}
+		}
+	}
+
 	// Write data - use gzip writer if compression is enabled, otherwise write directly
 	var writer io.Writer
 	if gzWriter, compressed := s.gzipWriters[streamName]; compressed {
@@ -437,7 +461,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		writer = s.files[streamName]
 	}
 
-	if _, err := writer.Write(data); err != nil {
+	if _, err := writer.Write(dataToWrite); err != nil {
 		return nil, err
 	}
 
