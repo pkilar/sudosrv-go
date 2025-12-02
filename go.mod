@@ -1,7 +1,7 @@
 // Filename: go.mod
 module sudosrv
 
-go 1.22
+go 1.25.4
 
 require (
 	github.com/google/uuid v1.6.0
