@@ -46,6 +46,7 @@ type LocalStorageConfig struct {
 	IologFile       string `yaml:"iolog_file"`       // sudoers-style I/O log session file name
 	DirPermissions  uint32 `yaml:"dir_permissions"`  // Directory permissions (octal, e.g., 0750)
 	FilePermissions uint32 `yaml:"file_permissions"` // File permissions (octal, e.g., 0640)
+	Compress        bool   `yaml:"compress"`         // Enable gzip compression for I/O log files
 }
 
 // LoadConfig reads the configuration from a YAML file.
@@ -72,6 +73,7 @@ func LoadConfig(path string) (*Config, error) {
 			IologFile:       "%{seq}",             // Default sudoers-style file name
 			DirPermissions:  0750,                 // Default directory permissions
 			FilePermissions: 0640,                 // Default file permissions
+			Compress:        false,                // Compression disabled by default for compatibility
 		},
 	}
 
@@ -131,5 +133,9 @@ local_storage:
 
   # File name for the session log directory, with support for the same escapes.
   iolog_file: "%{epoch}-%{rand}-%{command}"
+
+  # Enable gzip compression for I/O log data files (stdin/stdout/stderr/ttyin/ttyout)
+  # Disabled by default for compatibility with older tools
+  compress: false
 
 */

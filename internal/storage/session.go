@@ -2,10 +2,12 @@
 package storage
 
 import (
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -24,6 +26,7 @@ type Session struct {
 	config          *config.LocalStorageConfig
 	sessionDir      string
 	files           map[string]*os.File
+	gzipWriters     map[string]*gzip.Writer // Gzip writers for compressed streams
 	timingFile      *os.File
 	logJSONFile     *os.File
 	cumulativeDelay map[string]time.Duration
@@ -79,6 +82,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 		config:          cfg,
 		sessionDir:      sessionDir,
 		files:           make(map[string]*os.File),
+		gzipWriters:     make(map[string]*gzip.Writer),
 		cumulativeDelay: make(map[string]time.Duration),
 		logMeta:         make(map[string]any),
 	}, nil
@@ -376,8 +380,14 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		if err != nil {
 			return err
 		}
-		slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath)
+		slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath, "compressed", s.config.Compress)
 		s.files[streamName] = f
+
+		// If compression is enabled, wrap the file with a gzip writer
+		if s.config.Compress {
+			gzWriter := gzip.NewWriter(f)
+			s.gzipWriters[streamName] = gzWriter
+		}
 	}
 	return nil
 }
@@ -419,11 +429,23 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, fmt.Errorf("unknown stream name: %s", streamName)
 	}
 
-	ioFile := s.files[streamName]
+	// Write data - use gzip writer if compression is enabled, otherwise write directly
+	var writer io.Writer
+	if gzWriter, compressed := s.gzipWriters[streamName]; compressed {
+		writer = gzWriter
+	} else {
+		writer = s.files[streamName]
+	}
 
-	// Write data
-	if _, err := ioFile.Write(data); err != nil {
+	if _, err := writer.Write(data); err != nil {
 		return nil, err
+	}
+
+	// Flush gzip writer if using compression (equivalent to sudo's Z_SYNC_FLUSH)
+	if gzWriter, compressed := s.gzipWriters[streamName]; compressed {
+		if err := gzWriter.Flush(); err != nil {
+			return nil, fmt.Errorf("failed to flush gzip writer for %s: %w", streamName, err)
+		}
 	}
 
 	// Write timing info
@@ -542,6 +564,16 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 func (s *Session) Close() error {
 	var lastErr error
 
+	// First, close all gzip writers to ensure all data is flushed
+	for name, gzWriter := range s.gzipWriters {
+		slog.Debug("Closing gzip writer", "log_id", s.logID, "stream", name)
+		if err := gzWriter.Close(); err != nil {
+			slog.Error("Failed to close gzip writer", "log_id", s.logID, "stream", name, "error", err)
+			lastErr = err
+		}
+	}
+
+	// Then close the underlying file handles
 	for name, f := range s.files {
 		slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
 		if err := f.Close(); err != nil {
