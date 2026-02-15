@@ -1104,3 +1104,35 @@ func TestPathWithinBase(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+
+	acceptMsg := createTestAcceptMessage()
+	updated := false
+	for _, info := range acceptMsg.InfoMsgs {
+		if info.GetKey() == "submituser" {
+			info.Value = &pb.InfoMessage_Strval{Strval: ".."}
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		t.Fatal("test setup failed: submituser info message not found")
+	}
+
+	_, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	if err == nil {
+		t.Fatal("expected path traversal error for submituser='..'")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Fatalf("expected path traversal error, got: %v", err)
+	}
+}

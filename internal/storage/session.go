@@ -240,13 +240,15 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 	iologDir := replacer.Replace(cfg.IologDir)
 	iologFile := replacer.Replace(cfg.IologFile)
 
-	fullPath := filepath.Join(iologDir, iologFile)
-
-	// Reject paths containing ".." to prevent directory traversal,
-	// matching C sudo_logsrvd's contains_dot_dot() check.
-	if containsDotDot(fullPath) {
-		return "", fmt.Errorf("path traversal detected in constructed path: %s", fullPath)
+	// Reject paths containing ".." to prevent directory traversal.
+	// This check must run before filepath.Join, which cleans the path and
+	// could otherwise hide the original ".." components.
+	// Matches C sudo_logsrvd's contains_dot_dot() behavior on expanded values.
+	if containsDotDot(iologDir) || containsDotDot(iologFile) {
+		return "", fmt.Errorf("path traversal detected in constructed path components: dir=%q file=%q", iologDir, iologFile)
 	}
+
+	fullPath := filepath.Join(iologDir, iologFile)
 
 	return fullPath, nil
 }
