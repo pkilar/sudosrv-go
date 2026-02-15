@@ -788,6 +788,144 @@ func TestStorageSession(t *testing.T) {
 	})
 }
 
+func TestCommitPointThrottling(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	// Initialize session
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+	_, _ = session.HandleClientMessage(acceptClientMsg)
+
+	makeIoMsg := func() *pb.ClientMessage {
+		return &pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{
+				TtyoutBuf: &pb.IoBuffer{
+					Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 100000000}, // 100ms
+					Data:  []byte("x"),
+				},
+			},
+		}
+	}
+
+	// First I/O event should always return a commit point (zero-value lastCommitTime)
+	resp, err := session.HandleClientMessage(makeIoMsg())
+	if err != nil {
+		t.Fatalf("First I/O event failed: %v", err)
+	}
+	if resp == nil || resp.GetCommitPoint() == nil {
+		t.Fatal("Expected commit point on first I/O event, got nil")
+	}
+
+	// Subsequent events within the 10s window should NOT return commit points
+	for i := 0; i < 5; i++ {
+		resp, err := session.HandleClientMessage(makeIoMsg())
+		if err != nil {
+			t.Fatalf("I/O event %d failed: %v", i+2, err)
+		}
+		if resp != nil {
+			t.Fatalf("Expected nil response for I/O event %d within throttle window, got commit point", i+2)
+		}
+	}
+
+	// Simulate time passing beyond the throttle interval by backdating lastCommitTime
+	session.fileMux.Lock()
+	session.lastCommitTime = time.Now().Add(-commitPointInterval - time.Second)
+	session.fileMux.Unlock()
+
+	// Next event should return a commit point
+	resp, err = session.HandleClientMessage(makeIoMsg())
+	if err != nil {
+		t.Fatalf("I/O event after interval failed: %v", err)
+	}
+	if resp == nil || resp.GetCommitPoint() == nil {
+		t.Fatal("Expected commit point after throttle interval elapsed, got nil")
+	}
+}
+
+func TestNoLogJSONRewriteOnIoEvents(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	// Initialize session
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+	_, _ = session.HandleClientMessage(acceptClientMsg)
+
+	// Record log.json mod time after initialization
+	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+	logJSONPath := filepath.Join(sessDir, "log.json")
+	initInfo, err := os.Stat(logJSONPath)
+	if err != nil {
+		t.Fatalf("Failed to stat log.json: %v", err)
+	}
+	initModTime := initInfo.ModTime()
+
+	// Wait briefly to ensure any write would produce a different mtime
+	time.Sleep(50 * time.Millisecond)
+
+	// Send I/O events, winsize, and suspend — none should update log.json
+	ioMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{
+			TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+				Data:  []byte("output"),
+			},
+		},
+	}
+	session.HandleClientMessage(ioMsg)
+
+	winsizeMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_WinsizeEvent{
+			WinsizeEvent: &pb.ChangeWindowSize{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+				Rows:  25, Cols: 80,
+			},
+		},
+	}
+	session.HandleClientMessage(winsizeMsg)
+
+	suspendMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_SuspendEvent{
+			SuspendEvent: &pb.CommandSuspend{
+				Delay:  &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+				Signal: "STOP",
+			},
+		},
+	}
+	session.HandleClientMessage(suspendMsg)
+
+	// Verify log.json was NOT rewritten
+	afterInfo, err := os.Stat(logJSONPath)
+	if err != nil {
+		t.Fatalf("Failed to stat log.json after events: %v", err)
+	}
+	if afterInfo.ModTime() != initModTime {
+		t.Errorf("log.json was rewritten during I/O hot path; expected modtime %v, got %v",
+			initModTime, afterInfo.ModTime())
+	}
+}
+
 func TestDecodeLogID(t *testing.T) {
 	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 

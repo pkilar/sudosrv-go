@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -104,7 +103,7 @@ func runApplication(flags *CommandLineFlags) error {
 	}
 
 	// Setup structured logging with enhanced configuration
-	logger, err := setupStructuredLogging(cfg, *flags.LogLevel)
+	logLevel, err := setupStructuredLogging(cfg, *flags.LogLevel)
 	if err != nil {
 		return fmt.Errorf("logging setup error: %w", err)
 	}
@@ -114,7 +113,7 @@ func runApplication(flags *CommandLineFlags) error {
 		"version", appVersion,
 		"config_file", *flags.ConfigFile,
 		"mode", cfg.Server.Mode,
-		"log_level", logger.Enabled(context.Background(), slog.LevelDebug))
+		"log_level", logLevel.Level().String())
 
 	// Handle dry-run mode
 	if *flags.DryRun {
@@ -128,7 +127,7 @@ func runApplication(flags *CommandLineFlags) error {
 	}
 
 	// Create and start the server with proper lifecycle management
-	return runServerWithGracefulShutdown(cfg)
+	return runServerWithGracefulShutdown(cfg, *flags.ConfigFile, logLevel)
 }
 
 // loadAndValidateConfig loads configuration with enhanced error handling
@@ -178,23 +177,28 @@ func validateConfiguration(cfg *config.Config) error {
 	return nil
 }
 
-// setupStructuredLogging configures logging with enhanced options
-func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.Logger, error) {
+// setupStructuredLogging configures logging with enhanced options.
+// Returns a *slog.LevelVar that can be dynamically updated (e.g., on SIGHUP).
+func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.LevelVar, error) {
 	// Determine log level with override support
 	logLevelStr := cfg.Server.ServerOperationalLogLevel
 	if logLevelOverride != "" {
 		logLevelStr = logLevelOverride
 	}
 
-	logLevel, err := parseLogLevel(logLevelStr)
+	parsedLevel, err := parseLogLevel(logLevelStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid log level: %w", err)
 	}
 
+	// Use LevelVar for dynamic log level changes at runtime
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(parsedLevel)
+
 	// Configure handler options with enhanced formatting
 	handlerOpts := &slog.HandlerOptions{
 		Level:     logLevel,
-		AddSource: logLevel <= slog.LevelDebug, // Add source info for debug level
+		AddSource: parsedLevel <= slog.LevelDebug, // Add source info for debug level
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			// Add timestamp formatting and other enhancements
 			if a.Key == slog.TimeKey {
@@ -209,10 +213,10 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 	slog.SetDefault(logger)
 
 	slog.Info("Structured logging initialized",
-		"level", logLevel.String(),
+		"level", parsedLevel.String(),
 		"source_enabled", handlerOpts.AddSource)
 
-	return logger, nil
+	return logLevel, nil
 }
 
 // parseLogLevel converts string log level to slog.Level with validation
@@ -255,9 +259,9 @@ func initializeRelayMode(cfg *config.Config) error {
 }
 
 // runServerWithGracefulShutdown manages server lifecycle with proper shutdown handling
-func runServerWithGracefulShutdown(cfg *config.Config) error {
+func runServerWithGracefulShutdown(cfg *config.Config, configPath string, logLevel *slog.LevelVar) error {
 	// Create server instance
-	srv, err := server.NewServer(cfg)
+	srv, err := server.NewServer(cfg, configPath, logLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
