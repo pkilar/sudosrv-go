@@ -109,6 +109,26 @@ func pathWithinBase(base, target string) (bool, error) {
 	return relPath != ".." && !strings.HasPrefix(relPath, ".."+string(filepath.Separator)), nil
 }
 
+// deriveLogIDRelativePath returns the path component that should be embedded in
+// log_id. It only strips logDirectory when sessionDir is a true descendant.
+func deriveLogIDRelativePath(logDirectory, sessionDir string) string {
+	cleanLogDirectory := filepath.Clean(logDirectory)
+	cleanSessionDir := filepath.Clean(sessionDir)
+
+	relPath, err := filepath.Rel(cleanLogDirectory, cleanSessionDir)
+	if err != nil {
+		return cleanSessionDir
+	}
+	if relPath == "." {
+		return ""
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return cleanSessionDir
+	}
+
+	return relPath
+}
+
 // generateLogID creates a log ID matching the C sudo_logsrvd format:
 // base64(16-byte UUID + relative_path).
 func generateLogID(sessionUUID uuid.UUID, relativePath string) string {
@@ -126,10 +146,7 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	}
 
 	// Compute relative path for log_id generation (matches C sudo_logsrvd behavior).
-	relativePath := sessionDir
-	if strings.HasPrefix(sessionDir, cfg.LogDirectory) {
-		relativePath = strings.TrimPrefix(sessionDir[len(cfg.LogDirectory):], string(filepath.Separator))
-	}
+	relativePath := deriveLogIDRelativePath(cfg.LogDirectory, sessionDir)
 	logID := generateLogID(sessionUUID, relativePath)
 
 	slog.Debug("Resolved session log path", "log_id", logID, "path", sessionDir)

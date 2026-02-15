@@ -842,6 +842,43 @@ func TestDecodeLogID(t *testing.T) {
 	})
 }
 
+func TestNewSessionLogIDSiblingPrefixPath(t *testing.T) {
+	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	logRoot := filepath.Join(tmpDir, "log-root")
+	siblingPrefixDir := logRoot + "-archive"
+
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    logRoot,
+		IologDir:        filepath.Join(siblingPrefixDir, "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+
+	session, err := NewSession(testUUID, createTestAcceptMessage(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "000001")
+	if session.sessionDir != expectedPath {
+		t.Fatalf("unexpected session dir: expected %q, got %q", expectedPath, session.sessionDir)
+	}
+
+	decodedUUID, decodedPath, err := DecodeLogID(session.logID)
+	if err != nil {
+		t.Fatalf("DecodeLogID() failed: %v", err)
+	}
+	if decodedUUID != testUUID {
+		t.Fatalf("decoded UUID mismatch: expected %s, got %s", testUUID, decodedUUID)
+	}
+	if decodedPath != expectedPath {
+		t.Fatalf("decoded path mismatch: expected %q, got %q", expectedPath, decodedPath)
+	}
+}
+
 func TestNewRestartSession(t *testing.T) {
 	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 
