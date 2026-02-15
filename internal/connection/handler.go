@@ -4,9 +4,12 @@ package connection
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"sudosrv/internal/config"
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/protocol"
@@ -36,6 +39,7 @@ type Handler struct {
 	sessionFactories struct {
 		newLocalStorageSession func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
+		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 	}
 }
 
@@ -68,6 +72,9 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 	}
 	h.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
 		return relay.NewSession(sessionUUID, acceptMsg, relayCfg)
+	}
+	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+		return storage.NewRestartSession(restartMsg, localCfg)
 	}
 	return h
 }
@@ -163,11 +170,25 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		slog.Info("Received AcceptMessage", "expect_io", event.AcceptMsg.ExpectIobufs, "remote_addr", h.conn.RemoteAddr())
 		return h.handleAccept(event.AcceptMsg)
 
+	case *pb.ClientMessage_AlertMsg:
+		slog.Info("Received pre-session AlertMessage",
+			"reason", event.AlertMsg.GetReason(),
+			"remote_addr", h.conn.RemoteAddr())
+		if alertTime := event.AlertMsg.GetAlertTime(); alertTime != nil {
+			slog.Info("Alert details", "alert_time", time.Unix(alertTime.TvSec, int64(alertTime.TvNsec)).UTC())
+		}
+		for _, info := range event.AlertMsg.GetInfoMsgs() {
+			slog.Info("Alert info", "key", info.GetKey(), "value", info.GetStrval())
+		}
+		return nil, nil // No response needed for alerts
+
 	case *pb.ClientMessage_RejectMsg:
 		slog.Info("Received RejectMessage", "reason", event.RejectMsg.Reason, "remote_addr", h.conn.RemoteAddr())
-		// For now, we just log this and take no further action.
-		// A more advanced server might write an event log.
-		return nil, nil // No response needed
+		return h.handleReject(event.RejectMsg)
+
+	case *pb.ClientMessage_RestartMsg:
+		slog.Info("Received RestartMessage", "log_id", event.RestartMsg.GetLogId(), "remote_addr", h.conn.RemoteAddr())
+		return h.handleRestart(event.RestartMsg)
 
 	case *pb.ClientMessage_ExitMsg:
 		// This can happen if a command is run without I/O logging.
@@ -275,6 +296,95 @@ func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value
 		Key:   key,
 		Value: &pb.InfoMessage_Strval{Strval: value},
 	})
+}
+
+// handleReject logs a rejected command event. In local mode, it persists a
+// log.json event record to disk. In relay mode, it only logs via slog.
+func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
+	if h.config.Server.Mode != "local" {
+		slog.Info("Reject event in non-local mode, logging only", "reason", rejectMsg.GetReason())
+		return nil, nil
+	}
+
+	// Generate a UUID-based path for the reject event log
+	rejectUUID := uuid.New()
+	uuidStr := rejectUUID.String()
+	sessID := uuidStr[:6]
+	rejectDir := filepath.Join(h.config.LocalStorage.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6])
+
+	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.DirPermissions)); err != nil {
+		slog.Error("Failed to create reject event directory", "error", err, "path", rejectDir)
+		return nil, nil // Non-fatal
+	}
+
+	// Build the event record
+	eventRecord := map[string]interface{}{
+		"event_type": "reject",
+		"reason":     rejectMsg.GetReason(),
+	}
+	if st := rejectMsg.GetSubmitTime(); st != nil {
+		eventRecord["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+	}
+
+	// Extract info messages
+	infoMap := make(map[string]interface{})
+	for _, info := range rejectMsg.GetInfoMsgs() {
+		key := info.GetKey()
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			infoMap[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			infoMap[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			infoMap[key] = v.Strlistval.GetStrings()
+		}
+	}
+	if len(infoMap) > 0 {
+		for k, v := range infoMap {
+			// Preserve authoritative fields already set by the server.
+			if _, exists := eventRecord[k]; exists {
+				continue
+			}
+			eventRecord[k] = v
+		}
+	}
+
+	data, err := json.MarshalIndent(eventRecord, "", "  ")
+	if err != nil {
+		slog.Error("Failed to marshal reject event", "error", err)
+		return nil, nil // Non-fatal
+	}
+
+	logJSONPath := filepath.Join(rejectDir, "log.json")
+	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.FilePermissions)); err != nil {
+		slog.Error("Failed to write reject event log", "error", err, "path", logJSONPath)
+		return nil, nil // Non-fatal
+	}
+
+	slog.Info("Wrote reject event log", "path", logJSONPath, "reason", rejectMsg.GetReason())
+	return nil, nil
+}
+
+// handleRestart resumes an existing session from a RestartMessage.
+func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessage, error) {
+	if h.config.Server.Mode != "local" {
+		return nil, fmt.Errorf("restart not supported in %s mode", h.config.Server.Mode)
+	}
+
+	session, err := h.sessionFactories.newLocalRestartSession(restartMsg, &h.config.LocalStorage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create restart session: %w", err)
+	}
+
+	h.session = session
+	h.logID = restartMsg.GetLogId()
+	metrics.Global.IncrementSessions()
+	metrics.Global.IncrementLocalSessions()
+	slog.Info("Resumed local storage session via restart",
+		"log_id", h.logID,
+		"total_sessions", metrics.Global.GetTotalSessions())
+
+	return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: restartMsg.GetLogId()}}, nil
 }
 
 // handleAccept sets up a session for an accepted command.
