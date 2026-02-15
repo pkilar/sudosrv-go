@@ -350,6 +350,12 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	}
 
 	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_AlertMsg:
+		return s.handleAlert(event.AlertMsg)
+	case *pb.ClientMessage_AcceptMsg:
+		return s.handleSubCommandAccept(event.AcceptMsg)
+	case *pb.ClientMessage_RejectMsg:
+		return s.handleSubCommandReject(event.RejectMsg)
 	case *pb.ClientMessage_TtyinBuf:
 		return s.writeIoEntry("ttyin", event.TtyinBuf.Delay, event.TtyinBuf.Data)
 	case *pb.ClientMessage_TtyoutBuf:
@@ -604,6 +610,280 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 	}
 
 	return nil, nil // No commit point for suspend
+}
+
+// handleAlert records a security alert in the session's log.json metadata.
+func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, error) {
+	alert := map[string]interface{}{
+		"reason": alertMsg.GetReason(),
+	}
+	if alertTime := alertMsg.GetAlertTime(); alertTime != nil {
+		alert["alert_time"] = time.Unix(alertTime.TvSec, int64(alertTime.TvNsec)).UTC().Format(time.RFC3339Nano)
+	}
+
+	// Extract info messages
+	infoMap := make(map[string]interface{})
+	for _, info := range alertMsg.GetInfoMsgs() {
+		key := info.GetKey()
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			infoMap[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			infoMap[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			infoMap[key] = v.Strlistval.GetStrings()
+		}
+	}
+	if len(infoMap) > 0 {
+		alert["info"] = infoMap
+	}
+
+	// Append to alerts array in metadata
+	alerts, _ := s.logMeta["alerts"].([]interface{})
+	alerts = append(alerts, alert)
+	s.logMeta["alerts"] = alerts
+
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after alert", "log_id", s.logID, "error", err)
+	}
+
+	slog.Info("Recorded alert in session", "log_id", s.logID, "reason", alertMsg.GetReason())
+	return nil, nil // No commit point for alerts
+}
+
+// handleSubCommandAccept records a sub-command accept event in the session metadata.
+// Sub-commands share the parent session's iolog_path, matching C sudo_logsrvd behavior.
+func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
+	entry := map[string]interface{}{
+		"event_type": "accept",
+	}
+	if st := acceptMsg.GetSubmitTime(); st != nil {
+		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+	}
+
+	// Extract info messages
+	infoMap := make(map[string]interface{})
+	for _, info := range acceptMsg.GetInfoMsgs() {
+		key := info.GetKey()
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			infoMap[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			infoMap[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			infoMap[key] = v.Strlistval.GetStrings()
+		}
+	}
+	if len(infoMap) > 0 {
+		for k, v := range infoMap {
+			entry[k] = v
+		}
+	}
+
+	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds = append(subCmds, entry)
+	s.logMeta["sub_commands"] = subCmds
+
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after sub-command accept", "log_id", s.logID, "error", err)
+	}
+
+	slog.Info("Recorded sub-command accept", "log_id", s.logID)
+	// Return the same log_id — sub-commands share iolog_path
+	return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
+}
+
+// handleSubCommandReject records a sub-command reject event in the session metadata.
+func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
+	entry := map[string]interface{}{
+		"event_type": "reject",
+		"reason":     rejectMsg.GetReason(),
+	}
+	if st := rejectMsg.GetSubmitTime(); st != nil {
+		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+	}
+
+	// Extract info messages
+	infoMap := make(map[string]interface{})
+	for _, info := range rejectMsg.GetInfoMsgs() {
+		key := info.GetKey()
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			infoMap[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			infoMap[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			infoMap[key] = v.Strlistval.GetStrings()
+		}
+	}
+	if len(infoMap) > 0 {
+		for k, v := range infoMap {
+			entry[k] = v
+		}
+	}
+
+	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds = append(subCmds, entry)
+	s.logMeta["sub_commands"] = subCmds
+
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update log.json after sub-command reject", "log_id", s.logID, "error", err)
+	}
+
+	slog.Info("Recorded sub-command reject", "log_id", s.logID, "reason", rejectMsg.GetReason())
+	return nil, nil // No response for sub-command rejects
+}
+
+// DecodeLogID decodes a log ID back into the UUID and relative path components.
+// The log ID format is: base64(16-byte UUID + relative_path).
+func DecodeLogID(logID string) (uuid.UUID, string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(logID)
+	if err != nil {
+		return uuid.UUID{}, "", fmt.Errorf("failed to base64 decode log_id: %w", err)
+	}
+	if len(decoded) < 16 {
+		return uuid.UUID{}, "", fmt.Errorf("decoded log_id too short: %d bytes (need at least 16)", len(decoded))
+	}
+
+	var sessionUUID uuid.UUID
+	copy(sessionUUID[:], decoded[:16])
+	relativePath := string(decoded[16:])
+
+	return sessionUUID, relativePath, nil
+}
+
+// NewRestartSession creates a session that resumes an existing log from a RestartMessage.
+func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (*Session, error) {
+	sessionUUID, relativePath, err := DecodeLogID(restartMsg.GetLogId())
+	if err != nil {
+		return nil, fmt.Errorf("invalid log_id in RestartMessage: %w", err)
+	}
+
+	// Path safety check
+	if containsDotDot(relativePath) {
+		return nil, fmt.Errorf("path traversal detected in log_id path: %s", relativePath)
+	}
+
+	sessionDir := filepath.Join(cfg.LogDirectory, relativePath)
+
+	// Verify session directory exists
+	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("session directory does not exist: %s", sessionDir)
+	}
+
+	// Read and verify UUID file
+	uuidPath := filepath.Join(sessionDir, "uuid")
+	uuidData, err := os.ReadFile(uuidPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read uuid file: %w", err)
+	}
+	storedUUID := strings.TrimSpace(string(uuidData))
+	if storedUUID != sessionUUID.String() {
+		return nil, fmt.Errorf("UUID mismatch: log_id contains %s but session has %s", sessionUUID.String(), storedUUID)
+	}
+
+	// Check timing file is writable (not completed — finalize() sets 0440)
+	timingPath := filepath.Join(sessionDir, "timing")
+	timingInfo, err := os.Stat(timingPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat timing file: %w", err)
+	}
+	if timingInfo.Mode().Perm()&0200 == 0 {
+		return nil, fmt.Errorf("session already completed (timing file is read-only)")
+	}
+
+	// Reject compressed restarts — complexity of resuming mid-gzip-stream not worth it
+	if cfg.Compress {
+		return nil, fmt.Errorf("restart not supported for compressed sessions")
+	}
+
+	// Open timing file in append mode
+	timingFile, err := os.OpenFile(timingPath, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
+	}
+
+	// Open log.json for reading existing metadata and subsequent updates
+	logJSONPath := filepath.Join(sessionDir, "log.json")
+	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDWR, os.FileMode(cfg.FilePermissions))
+	if err != nil {
+		timingFile.Close()
+		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
+	}
+
+	// Read existing metadata
+	logMeta := make(map[string]interface{})
+	decoder := json.NewDecoder(logJSONFile)
+	if err := decoder.Decode(&logMeta); err != nil {
+		timingFile.Close()
+		logJSONFile.Close()
+		return nil, fmt.Errorf("failed to read existing log.json: %w", err)
+	}
+
+	// Open I/O stream files in append mode
+	files := make(map[string]*os.File)
+	for streamName, streamInfo := range streamMap {
+		filePath := filepath.Join(sessionDir, streamInfo.filename)
+		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+		if err != nil {
+			// Clean up already opened files
+			for _, openFile := range files {
+				openFile.Close()
+			}
+			timingFile.Close()
+			logJSONFile.Close()
+			return nil, fmt.Errorf("failed to open stream file %s for restart: %w", streamName, err)
+		}
+		files[streamName] = f
+	}
+
+	// Restore cumulative delay from resume_point
+	cumulativeDelay := make(map[string]time.Duration)
+	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
+		dur := time.Duration(resumePoint.TvSec)*time.Second + time.Duration(resumePoint.TvNsec)*time.Nanosecond
+		// Apply to all streams as a starting point
+		for streamName := range streamMap {
+			cumulativeDelay[streamName] = dur
+		}
+	}
+
+	session := &Session{
+		logID:           restartMsg.GetLogId(),
+		sessionUUID:     sessionUUID,
+		config:          cfg,
+		sessionDir:      sessionDir,
+		files:           files,
+		gzipWriters:     make(map[string]*gzip.Writer), // empty — no compression for restart
+		cumulativeDelay: cumulativeDelay,
+		logMeta:         logMeta,
+		timingFile:      timingFile,
+		logJSONFile:     logJSONFile,
+		isInitialized:   true, // Already initialized from existing session
+	}
+
+	// Initialize password filter if enabled
+	if cfg.PasswordFilter {
+		session.passwordFilter = NewPasswordFilter()
+	}
+
+	// Record restart event in log.json
+	restarts, _ := logMeta["restarts"].([]interface{})
+	restartEntry := map[string]interface{}{
+		"time": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
+		restartEntry["resume_point_sec"] = resumePoint.TvSec
+		restartEntry["resume_point_nsec"] = resumePoint.TvNsec
+	}
+	restarts = append(restarts, restartEntry)
+	session.logMeta["restarts"] = restarts
+
+	if err := session.updateLogJSON(); err != nil {
+		slog.Error("Failed to record restart event in log.json", "log_id", session.logID, "error", err)
+	}
+
+	slog.Info("Resumed session via RestartMessage", "log_id", session.logID, "session_dir", sessionDir)
+	return session, nil
 }
 
 // finalize cleans up and closes files, marking the log as complete.

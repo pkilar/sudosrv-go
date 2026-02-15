@@ -536,4 +536,454 @@ func TestStorageSession(t *testing.T) {
 			t.Errorf("Expected dumped_core true, got '%v'", logMeta["dumped_core"])
 		}
 	})
+
+	t.Run("AlertMessageHandling", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageCfg := &config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+		if err != nil {
+			t.Fatalf("NewSession() failed: %v", err)
+		}
+		defer session.Close()
+
+		// Initialize session
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		_, _ = session.HandleClientMessage(acceptClientMsg)
+
+		// Send an alert message
+		alertMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_AlertMsg{
+				AlertMsg: &pb.AlertMessage{
+					AlertTime: &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+					Reason:    "policy violation detected",
+					InfoMsgs: []*pb.InfoMessage{
+						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/bin/rm -rf /"}},
+					},
+				},
+			},
+		}
+		resp, err := session.HandleClientMessage(alertMsg)
+		if err != nil {
+			t.Fatalf("HandleClientMessage(AlertMsg) failed: %v", err)
+		}
+		if resp != nil {
+			t.Errorf("Expected nil response for AlertMsg, got %v", resp)
+		}
+
+		// Verify log.json contains the alert
+		sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+		logJSONPath := filepath.Join(sessDir, "log.json")
+		data, err := os.ReadFile(logJSONPath)
+		if err != nil {
+			t.Fatalf("Failed to read log.json: %v", err)
+		}
+		var logMeta map[string]interface{}
+		if err := json.Unmarshal(data, &logMeta); err != nil {
+			t.Fatalf("Failed to unmarshal log.json: %v", err)
+		}
+
+		alerts, ok := logMeta["alerts"].([]interface{})
+		if !ok || len(alerts) != 1 {
+			t.Fatalf("Expected 1 alert in log.json, got %v", logMeta["alerts"])
+		}
+		alert := alerts[0].(map[string]interface{})
+		if alert["reason"] != "policy violation detected" {
+			t.Errorf("Expected alert reason 'policy violation detected', got '%v'", alert["reason"])
+		}
+	})
+
+	t.Run("SubCommandAccept", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageCfg := &config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+		if err != nil {
+			t.Fatalf("NewSession() failed: %v", err)
+		}
+		defer session.Close()
+
+		// Initialize session
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		initResp, _ := session.HandleClientMessage(acceptClientMsg)
+		initialLogID := initResp.GetLogId()
+
+		// Send a sub-command accept
+		subCmdMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{
+				AcceptMsg: &pb.AcceptMessage{
+					SubmitTime: &pb.TimeSpec{TvSec: 1700000100, TvNsec: 0},
+					InfoMsgs: []*pb.InfoMessage{
+						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/bin/cat /etc/passwd"}},
+					},
+				},
+			},
+		}
+		resp, err := session.HandleClientMessage(subCmdMsg)
+		if err != nil {
+			t.Fatalf("HandleClientMessage(SubCommand AcceptMsg) failed: %v", err)
+		}
+		if resp == nil || resp.GetLogId() == "" {
+			t.Fatal("Expected log_id response for sub-command accept")
+		}
+		if resp.GetLogId() != initialLogID {
+			t.Errorf("Sub-command should return same log_id: expected %s, got %s", initialLogID, resp.GetLogId())
+		}
+
+		// Verify log.json
+		sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+		data, err := os.ReadFile(filepath.Join(sessDir, "log.json"))
+		if err != nil {
+			t.Fatalf("Failed to read log.json: %v", err)
+		}
+		var logMeta map[string]interface{}
+		json.Unmarshal(data, &logMeta)
+
+		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		if !ok || len(subCmds) != 1 {
+			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
+		}
+		subCmd := subCmds[0].(map[string]interface{})
+		if subCmd["event_type"] != "accept" {
+			t.Errorf("Expected event_type 'accept', got '%v'", subCmd["event_type"])
+		}
+	})
+
+	t.Run("SubCommandReject", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageCfg := &config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+		if err != nil {
+			t.Fatalf("NewSession() failed: %v", err)
+		}
+		defer session.Close()
+
+		// Initialize session
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		_, _ = session.HandleClientMessage(acceptClientMsg)
+
+		// Send a sub-command reject
+		rejectMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_RejectMsg{
+				RejectMsg: &pb.RejectMessage{
+					SubmitTime: &pb.TimeSpec{TvSec: 1700000200, TvNsec: 0},
+					Reason:     "policy denied sub-command",
+					InfoMsgs: []*pb.InfoMessage{
+						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/sbin/visudo"}},
+					},
+				},
+			},
+		}
+		resp, err := session.HandleClientMessage(rejectMsg)
+		if err != nil {
+			t.Fatalf("HandleClientMessage(SubCommand RejectMsg) failed: %v", err)
+		}
+		if resp != nil {
+			t.Errorf("Expected nil response for sub-command reject, got %v", resp)
+		}
+
+		// Verify log.json
+		sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+		data, err := os.ReadFile(filepath.Join(sessDir, "log.json"))
+		if err != nil {
+			t.Fatalf("Failed to read log.json: %v", err)
+		}
+		var logMeta map[string]interface{}
+		json.Unmarshal(data, &logMeta)
+
+		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		if !ok || len(subCmds) != 1 {
+			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
+		}
+		subCmd := subCmds[0].(map[string]interface{})
+		if subCmd["event_type"] != "reject" {
+			t.Errorf("Expected event_type 'reject', got '%v'", subCmd["event_type"])
+		}
+		if subCmd["reason"] != "policy denied sub-command" {
+			t.Errorf("Expected reason 'policy denied sub-command', got '%v'", subCmd["reason"])
+		}
+	})
+
+	t.Run("MultipleSubCommands", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storageCfg := &config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+		if err != nil {
+			t.Fatalf("NewSession() failed: %v", err)
+		}
+		defer session.Close()
+
+		// Initialize session
+		acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		_, _ = session.HandleClientMessage(acceptClientMsg)
+
+		// Send multiple sub-commands
+		for i := 0; i < 3; i++ {
+			subCmdMsg := &pb.ClientMessage{
+				Type: &pb.ClientMessage_AcceptMsg{
+					AcceptMsg: &pb.AcceptMessage{
+						SubmitTime: &pb.TimeSpec{TvSec: int64(1700000000 + i*100), TvNsec: 0},
+						InfoMsgs: []*pb.InfoMessage{
+							{Key: "command", Value: &pb.InfoMessage_Strval{Strval: fmt.Sprintf("/bin/cmd%d", i)}},
+						},
+					},
+				},
+			}
+			_, err := session.HandleClientMessage(subCmdMsg)
+			if err != nil {
+				t.Fatalf("Sub-command %d failed: %v", i, err)
+			}
+		}
+
+		// Verify log.json has 3 sub-commands
+		sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+		data, err := os.ReadFile(filepath.Join(sessDir, "log.json"))
+		if err != nil {
+			t.Fatalf("Failed to read log.json: %v", err)
+		}
+		var logMeta map[string]interface{}
+		json.Unmarshal(data, &logMeta)
+
+		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		if !ok || len(subCmds) != 3 {
+			t.Fatalf("Expected 3 sub_commands, got %d", len(subCmds))
+		}
+	})
+}
+
+func TestDecodeLogID(t *testing.T) {
+	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+
+	t.Run("ValidLogID", func(t *testing.T) {
+		relativePath := "testuser/000001"
+		logID := generateLogID(testUUID, relativePath)
+
+		decodedUUID, decodedPath, err := DecodeLogID(logID)
+		if err != nil {
+			t.Fatalf("DecodeLogID() failed: %v", err)
+		}
+		if decodedUUID != testUUID {
+			t.Errorf("UUID mismatch: expected %s, got %s", testUUID, decodedUUID)
+		}
+		if decodedPath != relativePath {
+			t.Errorf("Path mismatch: expected %s, got %s", relativePath, decodedPath)
+		}
+	})
+
+	t.Run("ValidLogIDEmptyPath", func(t *testing.T) {
+		logID := base64.StdEncoding.EncodeToString(testUUID[:])
+
+		decodedUUID, decodedPath, err := DecodeLogID(logID)
+		if err != nil {
+			t.Fatalf("DecodeLogID() failed: %v", err)
+		}
+		if decodedUUID != testUUID {
+			t.Errorf("UUID mismatch: expected %s, got %s", testUUID, decodedUUID)
+		}
+		if decodedPath != "" {
+			t.Errorf("Expected empty path, got '%s'", decodedPath)
+		}
+	})
+
+	t.Run("InvalidBase64", func(t *testing.T) {
+		_, _, err := DecodeLogID("not-valid-base64!!!")
+		if err == nil {
+			t.Fatal("Expected error for invalid base64")
+		}
+	})
+
+	t.Run("TooShort", func(t *testing.T) {
+		// Only 8 bytes — need at least 16
+		shortData := base64.StdEncoding.EncodeToString([]byte("tooshort"))
+		_, _, err := DecodeLogID(shortData)
+		if err == nil {
+			t.Fatal("Expected error for too-short log_id")
+		}
+		if !strings.Contains(err.Error(), "too short") {
+			t.Errorf("Expected 'too short' in error, got: %v", err)
+		}
+	})
+}
+
+func TestNewRestartSession(t *testing.T) {
+	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+
+	// Helper to set up a completed or active session directory
+	setupSession := func(t *testing.T, finalized bool) (string, *config.LocalStorageConfig, string) {
+		tmpDir := t.TempDir()
+		cfg := &config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		session, err := NewSession(testUUID, createTestAcceptMessage(), cfg)
+		if err != nil {
+			t.Fatalf("Setup NewSession() failed: %v", err)
+		}
+
+		// Initialize
+		acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+		resp, err := session.HandleClientMessage(acceptMsg)
+		if err != nil {
+			t.Fatalf("Setup HandleClientMessage(Accept) failed: %v", err)
+		}
+		logID := resp.GetLogId()
+
+		// Write some I/O data
+		ttyoutMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{
+				TtyoutBuf: &pb.IoBuffer{
+					Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+					Data:  []byte("hello"),
+				},
+			},
+		}
+		session.HandleClientMessage(ttyoutMsg)
+
+		if finalized {
+			exitMsg := &pb.ClientMessage{
+				Type: &pb.ClientMessage_ExitMsg{
+					ExitMsg: &pb.ExitMessage{
+						ExitValue: 0,
+						RunTime:   &pb.TimeSpec{TvSec: 5, TvNsec: 0},
+					},
+				},
+			}
+			session.HandleClientMessage(exitMsg)
+		} else {
+			session.Close()
+		}
+
+		return tmpDir, cfg, logID
+	}
+
+	t.Run("HappyPath", func(t *testing.T) {
+		_, cfg, logID := setupSession(t, false)
+
+		restartMsg := &pb.RestartMessage{
+			LogId:       logID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		session, err := NewRestartSession(restartMsg, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession() failed: %v", err)
+		}
+		defer session.Close()
+
+		// Session should be already initialized — can write I/O directly
+		ttyoutMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{
+				TtyoutBuf: &pb.IoBuffer{
+					Delay: &pb.TimeSpec{TvSec: 2, TvNsec: 0},
+					Data:  []byte(" world"),
+				},
+			},
+		}
+		resp, err := session.HandleClientMessage(ttyoutMsg)
+		if err != nil {
+			t.Fatalf("HandleClientMessage after restart failed: %v", err)
+		}
+		if resp == nil || resp.GetCommitPoint() == nil {
+			t.Fatal("Expected commit point response")
+		}
+	})
+
+	t.Run("CompletedSessionFails", func(t *testing.T) {
+		_, cfg, logID := setupSession(t, true)
+
+		restartMsg := &pb.RestartMessage{
+			LogId:       logID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		_, err := NewRestartSession(restartMsg, cfg)
+		if err == nil {
+			t.Fatal("Expected error when restarting completed session")
+		}
+		if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("Expected 'read-only' in error, got: %v", err)
+		}
+	})
+
+	t.Run("UUIDMismatch", func(t *testing.T) {
+		_, cfg, logID := setupSession(t, false)
+
+		// Decode the log ID, replace UUID with a different one, re-encode
+		_, relativePath, _ := DecodeLogID(logID)
+		wrongUUID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
+		fakeLogID := generateLogID(wrongUUID, relativePath)
+
+		restartMsg := &pb.RestartMessage{
+			LogId:       fakeLogID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		_, err := NewRestartSession(restartMsg, cfg)
+		if err == nil {
+			t.Fatal("Expected error for UUID mismatch")
+		}
+		if !strings.Contains(err.Error(), "UUID mismatch") {
+			t.Errorf("Expected 'UUID mismatch' in error, got: %v", err)
+		}
+	})
+
+	t.Run("CompressedSessionFails", func(t *testing.T) {
+		_, cfg, logID := setupSession(t, false)
+		cfg.Compress = true
+
+		restartMsg := &pb.RestartMessage{
+			LogId:       logID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		_, err := NewRestartSession(restartMsg, cfg)
+		if err == nil {
+			t.Fatal("Expected error for compressed restart")
+		}
+		if !strings.Contains(err.Error(), "compressed") {
+			t.Errorf("Expected 'compressed' in error, got: %v", err)
+		}
+	})
+
+	t.Run("NonexistentPath", func(t *testing.T) {
+		cfg := &config.LocalStorageConfig{
+			LogDirectory:    "/nonexistent/path",
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		logID := generateLogID(testUUID, "some/path")
+		restartMsg := &pb.RestartMessage{
+			LogId:       logID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		_, err := NewRestartSession(restartMsg, cfg)
+		if err == nil {
+			t.Fatal("Expected error for nonexistent path")
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("Expected 'does not exist' in error, got: %v", err)
+		}
+	})
 }

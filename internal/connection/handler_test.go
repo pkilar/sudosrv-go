@@ -2,8 +2,11 @@
 package connection
 
 import (
+	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -438,6 +441,295 @@ func TestSetOrUpdateInfoMessage_NewMessage(t *testing.T) {
 	existing := findInfoValue(acceptMsg, "existing")
 	if existing != "value" {
 		t.Errorf("Expected existing message to remain 'value', got '%s'", existing)
+	}
+}
+
+func TestPreSessionAlertMessage(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "local",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	go handler.Handle()
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+	// Send an AlertMessage before any session
+	alertMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_AlertMsg{
+			AlertMsg: &pb.AlertMessage{
+				AlertTime: &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+				Reason:    "test alert",
+			},
+		},
+	}
+	if err := clientProc.WriteClientMessage(alertMsg); err != nil {
+		t.Fatalf("Client failed to write AlertMsg: %v", err)
+	}
+
+	// No response expected — send another message to verify connection is alive
+	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "test"}}}
+	if err := clientProc.WriteClientMessage(helloMsg); err != nil {
+		t.Fatalf("Client failed to write Hello after alert: %v", err)
+	}
+
+	resp, err := clientProc.ReadServerMessage()
+	if err != nil {
+		t.Fatalf("Client failed to read response after alert: %v", err)
+	}
+	if resp.GetHello() == nil {
+		t.Fatal("Expected ServerHello after alert, got something else")
+	}
+
+	serverConn.Close()
+}
+
+func TestPreSessionRejectEventLogging(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "local",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+		LocalStorage: config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	go handler.Handle()
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+	// Send a RejectMessage
+	rejectMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_RejectMsg{
+			RejectMsg: &pb.RejectMessage{
+				SubmitTime: &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+				Reason:     "command not allowed",
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/sbin/reboot"}},
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "eviluser"}},
+				},
+			},
+		},
+	}
+	if err := clientProc.WriteClientMessage(rejectMsg); err != nil {
+		t.Fatalf("Client failed to write RejectMsg: %v", err)
+	}
+
+	// No response expected — verify connection is still alive
+	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "test"}}}
+	if err := clientProc.WriteClientMessage(helloMsg); err != nil {
+		t.Fatalf("Client failed to write Hello after reject: %v", err)
+	}
+
+	resp, err := clientProc.ReadServerMessage()
+	if err != nil {
+		t.Fatalf("Client failed to read response after reject: %v", err)
+	}
+	if resp.GetHello() == nil {
+		t.Fatal("Expected ServerHello after reject, got something else")
+	}
+
+	serverConn.Close()
+
+	// Verify a log.json file was created somewhere in tmpDir
+	found := false
+	filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Name() == "log.json" {
+			found = true
+			data, _ := os.ReadFile(path)
+			var eventRecord map[string]interface{}
+			if err := json.Unmarshal(data, &eventRecord); err != nil {
+				t.Errorf("Failed to unmarshal reject event log: %v", err)
+				return nil
+			}
+			if eventRecord["event_type"] != "reject" {
+				t.Errorf("Expected event_type 'reject', got '%v'", eventRecord["event_type"])
+			}
+			if eventRecord["reason"] != "command not allowed" {
+				t.Errorf("Expected reason 'command not allowed', got '%v'", eventRecord["reason"])
+			}
+		}
+		return nil
+	})
+
+	if !found {
+		t.Error("No log.json reject event file was created")
+	}
+}
+
+func TestRestartMessageStartsSession(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "local",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	restartCalled := false
+
+	// Override the restart factory to use a mock
+	handler.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+		restartCalled = true
+		return &mockSessionHandler{
+			t: t,
+			HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+				return nil, nil
+			},
+			CloseFn: func() error { return nil },
+		}, nil
+	}
+
+	go handler.Handle()
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+	// Send a RestartMessage
+	restartMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_RestartMsg{
+			RestartMsg: &pb.RestartMessage{
+				LogId:       "dGVzdC1sb2ctaWQ=", // base64("test-log-id")
+				ResumePoint: &pb.TimeSpec{TvSec: 5, TvNsec: 0},
+			},
+		},
+	}
+	if err := clientProc.WriteClientMessage(restartMsg); err != nil {
+		t.Fatalf("Client failed to write RestartMsg: %v", err)
+	}
+
+	resp, err := clientProc.ReadServerMessage()
+	if err != nil {
+		t.Fatalf("Client failed to read response: %v", err)
+	}
+
+	if resp.GetLogId() == "" {
+		t.Fatal("Expected log_id in response to RestartMessage")
+	}
+
+	if !restartCalled {
+		t.Error("Expected restart session factory to be called")
+	}
+
+	serverConn.Close()
+}
+
+func TestSubCommandRoutingToActiveSession(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "local",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	messagesReceived := make([]string, 0)
+
+	// Override session factory to track messages
+	handler.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
+		return &mockSessionHandler{
+			t: t,
+			HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+				switch msg.Type.(type) {
+				case *pb.ClientMessage_AcceptMsg:
+					messagesReceived = append(messagesReceived, "accept")
+					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "test-id"}}, nil
+				case *pb.ClientMessage_RejectMsg:
+					messagesReceived = append(messagesReceived, "reject")
+					return nil, nil
+				case *pb.ClientMessage_AlertMsg:
+					messagesReceived = append(messagesReceived, "alert")
+					return nil, nil
+				default:
+					return nil, nil
+				}
+			},
+			CloseFn: func() error { return nil },
+		}, nil
+	}
+
+	go handler.Handle()
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+	// Start a session with AcceptMessage
+	acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
+	clientProc.WriteClientMessage(acceptMsg)
+	clientProc.ReadServerMessage() // Read log_id
+
+	// Now send a sub-command accept (should be routed to session)
+	subAcceptMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{
+			AcceptMsg: &pb.AcceptMessage{
+				SubmitTime: &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+			},
+		},
+	}
+	clientProc.WriteClientMessage(subAcceptMsg)
+	clientProc.ReadServerMessage() // Read sub-command response
+
+	// Send a sub-command reject (should be routed to session)
+	subRejectMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_RejectMsg{
+			RejectMsg: &pb.RejectMessage{
+				Reason: "denied",
+			},
+		},
+	}
+	clientProc.WriteClientMessage(subRejectMsg)
+	// No response for reject, send another message to confirm processing
+	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+
+	// Send an alert (should be routed to session)
+	alertMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_AlertMsg{
+			AlertMsg: &pb.AlertMessage{
+				Reason: "test alert",
+			},
+		},
+	}
+	clientProc.WriteClientMessage(alertMsg)
+	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+
+	serverConn.Close()
+	time.Sleep(100 * time.Millisecond) // Allow handler to process
+
+	// Verify all messages were routed to the active session
+	// First accept is the initial session setup, second is the sub-command
+	expectedMessages := []string{"accept", "accept", "reject", "alert"}
+	if len(messagesReceived) != len(expectedMessages) {
+		t.Fatalf("Expected %d messages routed to session, got %d: %v", len(expectedMessages), len(messagesReceived), messagesReceived)
+	}
+	for i, expected := range expectedMessages {
+		if messagesReceived[i] != expected {
+			t.Errorf("Message %d: expected '%s', got '%s'", i, expected, messagesReceived[i])
+		}
 	}
 }
 
