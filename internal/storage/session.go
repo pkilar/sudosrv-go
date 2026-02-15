@@ -98,6 +98,17 @@ func containsDotDot(path string) bool {
 	return false
 }
 
+// pathWithinBase returns true when target stays lexically within base.
+// Both values are cleaned before checking.
+func pathWithinBase(base, target string) (bool, error) {
+	relPath, err := filepath.Rel(filepath.Clean(base), filepath.Clean(target))
+	if err != nil {
+		return false, err
+	}
+
+	return relPath != ".." && !strings.HasPrefix(relPath, ".."+string(filepath.Separator)), nil
+}
+
 // generateLogID creates a log ID matching the C sudo_logsrvd format:
 // base64(16-byte UUID + relative_path).
 func generateLogID(sessionUUID uuid.UUID, relativePath string) string {
@@ -776,6 +787,13 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	sessionDir := filepath.Join(cfg.LogDirectory, relativePath)
+	withinLogRoot, err := pathWithinBase(cfg.LogDirectory, sessionDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate session path: %w", err)
+	}
+	if !withinLogRoot {
+		return nil, fmt.Errorf("log_id path escapes log root: %s", relativePath)
+	}
 
 	// Verify session directory exists
 	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
