@@ -874,6 +874,19 @@ func TestNewSessionLogIDSiblingPrefixPath(t *testing.T) {
 	if decodedUUID != testUUID {
 		t.Fatalf("decoded UUID mismatch: expected %s, got %s", testUUID, decodedUUID)
 	}
+
+	// Reproduce legacy behavior to verify this test covers the historical bug:
+	// raw string-prefix trimming incorrectly truncates similarly named siblings.
+	legacyRelativePath := expectedPath
+	if strings.HasPrefix(expectedPath, logRoot) {
+		legacyRelativePath = strings.TrimPrefix(expectedPath[len(logRoot):], string(filepath.Separator))
+	}
+	if legacyRelativePath == expectedPath {
+		t.Fatalf("test setup failed: legacy prefix logic did not alter path %q", expectedPath)
+	}
+	if decodedPath == legacyRelativePath {
+		t.Fatalf("decoded path unexpectedly matched legacy truncated path %q", legacyRelativePath)
+	}
 	if decodedPath != expectedPath {
 		t.Fatalf("decoded path mismatch: expected %q, got %q", expectedPath, decodedPath)
 	}
