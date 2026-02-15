@@ -23,6 +23,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
+// Commit points are only sent when this interval has elapsed since the last one.
+const commitPointInterval = 10 * time.Second
+
 // Session handles saving I/O logs for one session to the local filesystem.
 type Session struct {
 	logID           string
@@ -36,6 +40,7 @@ type Session struct {
 	cumulativeDelay map[string]time.Duration
 	logMeta         map[string]interface{}
 	passwordFilter  *PasswordFilter // Password filtering for security
+	lastCommitTime  time.Time       // Tracks when last commit point was sent
 	fileMux         sync.Mutex
 	isInitialized   bool
 }
@@ -588,19 +593,20 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, err
 	}
 
-	// Update log.json with current state
-	if err := s.updateLogJSON(); err != nil {
-		slog.Error("Failed to update log.json after I/O entry", "log_id", s.logID, "error", err)
+	// Only send commit points at commitPointInterval, matching C sudo_logsrvd's ACK_FREQUENCY.
+	// The first I/O event always sends one (zero-value lastCommitTime guarantees this).
+	if time.Since(s.lastCommitTime) >= commitPointInterval {
+		s.lastCommitTime = time.Now()
+		commitPoint := s.cumulativeDelay[streamName]
+		return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+			CommitPoint: &pb.TimeSpec{
+				TvSec:  int64(commitPoint.Seconds()),
+				TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
+			},
+		}}, nil
 	}
 
-	// Send commit point
-	commitPoint := s.cumulativeDelay[streamName]
-	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
-		CommitPoint: &pb.TimeSpec{
-			TvSec:  int64(commitPoint.Seconds()),
-			TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
-		},
-	}}, nil
+	return nil, nil
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
@@ -609,11 +615,6 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
-	}
-
-	// Update log.json with current state
-	if err := s.updateLogJSON(); err != nil {
-		slog.Error("Failed to update log.json after winsize event", "log_id", s.logID, "error", err)
 	}
 
 	return nil, nil // No commit point for winsize
@@ -632,11 +633,6 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 	slog.Debug("Writing suspend/resume entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
-	}
-
-	// Update log.json with current state
-	if err := s.updateLogJSON(); err != nil {
-		slog.Error("Failed to update log.json after suspend/resume event", "log_id", s.logID, "error", err)
 	}
 
 	return nil, nil // No commit point for suspend

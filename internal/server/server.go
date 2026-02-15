@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
 	"sudosrv/internal/metrics"
@@ -19,23 +20,29 @@ import (
 
 // Server manages listeners and handles graceful shutdown.
 type Server struct {
-	config    *config.Config
-	waitGroup sync.WaitGroup
-	listeners []net.Listener
-	quit      chan struct{}
-	ctx       context.Context
-	cancel    context.CancelFunc
+	config     *config.Config
+	configPath string
+	logLevel   *slog.LevelVar
+	waitGroup  sync.WaitGroup
+	listeners  []net.Listener
+	quit       chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // NewServer creates a new server instance.
-func NewServer(cfg *config.Config) (*Server, error) {
+// configPath is the path to the config file (used for SIGHUP reload).
+// logLevel is the dynamic log level that can be updated at runtime.
+func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		config:    cfg,
-		listeners: make([]net.Listener, 0),
-		quit:      make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
+		config:     cfg,
+		configPath: configPath,
+		logLevel:   logLevel,
+		listeners:  make([]net.Listener, 0),
+		quit:       make(chan struct{}),
+		ctx:        ctx,
+		cancel:     cancel,
 	}, nil
 }
 
@@ -133,13 +140,22 @@ func (s *Server) acceptLoop(listener net.Listener) {
 }
 
 // Wait blocks until the server is shut down.
+// SIGHUP triggers a config reload; SIGINT/SIGTERM trigger graceful shutdown.
 func (s *Server) Wait() {
-	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	slog.Info("Shutdown signal received, closing listeners...")
+	for sig := range sigChan {
+		if sig == syscall.SIGHUP {
+			slog.Info("SIGHUP received, reloading configuration...")
+			s.reload()
+			continue
+		}
+
+		// SIGINT or SIGTERM — initiate graceful shutdown
+		slog.Info("Shutdown signal received, closing listeners...", "signal", sig)
+		break
+	}
 
 	// Cancel context to signal all goroutines to stop
 	s.cancel()
@@ -156,6 +172,73 @@ func (s *Server) Wait() {
 
 	// Wait for all goroutines to finish
 	s.waitGroup.Wait()
+}
+
+// reload re-reads the configuration file and applies changes that can be
+// updated at runtime. New connections pick up the updated config; existing
+// connections continue with the config they were created with.
+func (s *Server) reload() {
+	newCfg, err := config.LoadConfig(s.configPath)
+	if err != nil {
+		slog.Error("Config reload failed: could not load config", "path", s.configPath, "error", err)
+		return
+	}
+
+	oldCfg := s.config
+
+	// Update log level dynamically
+	if s.logLevel != nil {
+		newLevelStr := newCfg.Server.ServerOperationalLogLevel
+		if newLevelStr == "" {
+			newLevelStr = "info"
+		}
+		newLevel, err := parseLogLevel(newLevelStr)
+		if err != nil {
+			slog.Error("Config reload: invalid log level, keeping current", "level", newLevelStr, "error", err)
+		} else if s.logLevel.Level() != newLevel {
+			oldLevel := s.logLevel.Level()
+			s.logLevel.Set(newLevel)
+			slog.Info("Config reload: log level changed", "old", oldLevel.String(), "new", newLevel.String())
+		}
+	}
+
+	// Warn about changes that require a restart
+	if oldCfg.Server.ListenAddress != newCfg.Server.ListenAddress {
+		slog.Warn("Config reload: listen_address changed; restart required to take effect",
+			"old", oldCfg.Server.ListenAddress, "new", newCfg.Server.ListenAddress)
+	}
+	if oldCfg.Server.ListenAddressTLS != newCfg.Server.ListenAddressTLS {
+		slog.Warn("Config reload: listen_address_tls changed; restart required to take effect",
+			"old", oldCfg.Server.ListenAddressTLS, "new", newCfg.Server.ListenAddressTLS)
+	}
+	if oldCfg.Server.TLSCertFile != newCfg.Server.TLSCertFile || oldCfg.Server.TLSKeyFile != newCfg.Server.TLSKeyFile {
+		slog.Warn("Config reload: TLS certificate/key changed; restart required to take effect")
+	}
+	if oldCfg.Server.Mode != newCfg.Server.Mode {
+		slog.Warn("Config reload: server mode changed; restart required to take effect",
+			"old", oldCfg.Server.Mode, "new", newCfg.Server.Mode)
+	}
+
+	// Update config pointer — new connections will use the new config
+	s.config = newCfg
+
+	slog.Info("Config reload complete", "path", s.configPath)
+}
+
+// parseLogLevel converts string log level to slog.Level with validation.
+func parseLogLevel(levelStr string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(levelStr)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unknown log level: %s", levelStr)
+	}
 }
 
 // logMetricsPeriodically logs server metrics every 5 minutes for operational visibility.

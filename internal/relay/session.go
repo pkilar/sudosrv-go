@@ -26,6 +26,8 @@ import (
 const (
 	initialReconnectInterval = time.Second
 	flushingSuffix           = ".flushing"
+	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
+	commitPointInterval = 10 * time.Second
 )
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
@@ -37,6 +39,8 @@ type Session struct {
 	fromClientChan   chan *pb.ClientMessage
 	wg               sync.WaitGroup
 	cacheFileName    string
+	cumulativeDelay  map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
+	lastCommitTime   time.Time               // When last commit point was sent to client
 	ctx              context.Context
 	cancel           context.CancelFunc
 }
@@ -61,6 +65,7 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
 		cacheFileName:    cacheFileName,
+		cumulativeDelay:  make(map[string]time.Duration),
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -170,6 +175,25 @@ func (s *Session) calculateBackoff(attempts int) time.Duration {
 	return time.Duration(backoff)
 }
 
+// extractIoDelay extracts the stream name and delay from I/O buffer messages.
+// Returns ("", nil, false) for non-I/O messages.
+func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec, bool) {
+	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_TtyinBuf:
+		return "ttyin", event.TtyinBuf.GetDelay(), true
+	case *pb.ClientMessage_TtyoutBuf:
+		return "ttyout", event.TtyoutBuf.GetDelay(), true
+	case *pb.ClientMessage_StdinBuf:
+		return "stdin", event.StdinBuf.GetDelay(), true
+	case *pb.ClientMessage_StdoutBuf:
+		return "stdout", event.StdoutBuf.GetDelay(), true
+	case *pb.ClientMessage_StderrBuf:
+		return "stderr", event.StderrBuf.GetDelay(), true
+	default:
+		return "", nil, false
+	}
+}
+
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
 	// Don't process the initial AcceptMsg again, it was handled in NewSession.
 	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
@@ -180,13 +204,33 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	// Use a timeout to prevent indefinite blocking
 	select {
 	case s.fromClientChan <- msg:
-		return nil, nil
 	case <-time.After(5 * time.Second):
 		slog.Warn("Relay session message channel timeout", "log_id", s.logID)
 		return nil, fmt.Errorf("relay session message channel timeout")
 	case <-s.ctx.Done():
 		return nil, fmt.Errorf("relay session cancelled")
 	}
+
+	// Generate local commit points for relay clients on I/O events,
+	// throttled to commitPointInterval matching C sudo_logsrvd behavior.
+	if streamName, delay, ok := extractIoDelay(msg); ok {
+		if delay != nil {
+			delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
+			s.cumulativeDelay[streamName] += delayDur
+		}
+		if time.Since(s.lastCommitTime) >= commitPointInterval {
+			s.lastCommitTime = time.Now()
+			commitPoint := s.cumulativeDelay[streamName]
+			return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+				CommitPoint: &pb.TimeSpec{
+					TvSec:  int64(commitPoint.Seconds()),
+					TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
+				},
+			}}, nil
+		}
+	}
+
+	return nil, nil
 }
 
 // Close is called by the connection handler when the client disconnects.

@@ -249,3 +249,145 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 		t.Errorf("Expected cache file %s to be deleted after successful flush, but it still exists", cacheFilePath)
 	}
 }
+
+func TestRelayCommitPoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	relayCfg := &config.RelayConfig{
+		RelayCacheDirectory:  tmpDir,
+		ReconnectAttempts:    0,
+		MaxReconnectInterval: 100 * time.Millisecond,
+		ConnectTimeout:       time.Second,
+		UpstreamHost:         "127.0.0.1:0", // Won't actually connect; we only test HandleClientMessage
+	}
+
+	sessionUUID := uuid.MustParse("b2c3d4e5-f6a7-4b2c-9d3e-0f1a2b3c4d5e")
+	acceptMsg := createTestAcceptMessage()
+
+	session, err := NewSession(sessionUUID, acceptMsg, relayCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+
+	// AcceptMsg should return log_id
+	resp, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(AcceptMsg) failed: %v", err)
+	}
+	if resp == nil || resp.GetLogId() == "" {
+		t.Fatal("Expected log_id response for AcceptMsg")
+	}
+
+	// First I/O event should return a commit point (zero-value lastCommitTime)
+	resp, err = session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{
+			TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 500000000},
+				Data:  []byte("hello"),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(TtyoutBuf) failed: %v", err)
+	}
+	if resp == nil || resp.GetCommitPoint() == nil {
+		t.Fatal("Expected commit point for first I/O event in relay mode")
+	}
+
+	// Verify commit point values
+	cp := resp.GetCommitPoint()
+	if cp.TvSec != 1 || cp.TvNsec != 500000000 {
+		t.Errorf("Commit point mismatch: expected 1.5s, got %d.%09d", cp.TvSec, cp.TvNsec)
+	}
+
+	// Non-I/O events should not return commit points
+	resp, err = session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_WinsizeEvent{
+			WinsizeEvent: &pb.ChangeWindowSize{
+				Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 100000000},
+				Rows:  25, Cols: 80,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(WinsizeEvent) failed: %v", err)
+	}
+	if resp != nil {
+		t.Errorf("Expected nil response for non-I/O event, got %v", resp)
+	}
+
+	// Clean up: send exit and close
+	session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	})
+	session.Close()
+}
+
+func TestRelayCommitPointThrottling(t *testing.T) {
+	tmpDir := t.TempDir()
+	relayCfg := &config.RelayConfig{
+		RelayCacheDirectory:  tmpDir,
+		ReconnectAttempts:    0,
+		MaxReconnectInterval: 100 * time.Millisecond,
+		ConnectTimeout:       time.Second,
+		UpstreamHost:         "127.0.0.1:0",
+	}
+
+	sessionUUID := uuid.MustParse("c3d4e5f6-a7b8-4c3d-ae4f-1a2b3c4d5e6f")
+	acceptMsg := createTestAcceptMessage()
+
+	session, err := NewSession(sessionUUID, acceptMsg, relayCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+
+	makeIoMsg := func() *pb.ClientMessage {
+		return &pb.ClientMessage{
+			Type: &pb.ClientMessage_StdoutBuf{
+				StdoutBuf: &pb.IoBuffer{
+					Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 50000000}, // 50ms
+					Data:  []byte("x"),
+				},
+			},
+		}
+	}
+
+	// First I/O event: commit point expected
+	resp, err := session.HandleClientMessage(makeIoMsg())
+	if err != nil {
+		t.Fatalf("First I/O event failed: %v", err)
+	}
+	if resp == nil || resp.GetCommitPoint() == nil {
+		t.Fatal("Expected commit point on first relay I/O event")
+	}
+
+	// Subsequent events within throttle window: no commit point
+	for i := 0; i < 3; i++ {
+		resp, err = session.HandleClientMessage(makeIoMsg())
+		if err != nil {
+			t.Fatalf("I/O event %d failed: %v", i+2, err)
+		}
+		if resp != nil {
+			t.Fatalf("Expected nil for I/O event %d within throttle window, got commit point", i+2)
+		}
+	}
+
+	// Backdate lastCommitTime to simulate time passing
+	session.lastCommitTime = time.Now().Add(-commitPointInterval - time.Second)
+
+	// Next event should return a commit point
+	resp, err = session.HandleClientMessage(makeIoMsg())
+	if err != nil {
+		t.Fatalf("I/O event after interval failed: %v", err)
+	}
+	if resp == nil || resp.GetCommitPoint() == nil {
+		t.Fatal("Expected commit point after throttle interval elapsed")
+	}
+
+	// Clean up
+	session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	})
+	session.Close()
+}
