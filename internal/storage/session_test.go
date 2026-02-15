@@ -1052,10 +1052,6 @@ func TestNewRestartSession(t *testing.T) {
 		if !filepath.IsAbs(decodedPath) {
 			t.Fatalf("test setup failed: decoded path is not absolute: %q", decodedPath)
 		}
-		joinedPath := filepath.Join(logRoot, decodedPath)
-		if joinedPath != decodedPath {
-			t.Fatalf("test setup failed: expected absolute path to override log root in filepath.Join, got %q", joinedPath)
-		}
 		restartMsg := &pb.RestartMessage{
 			LogId:       absolutePathLogID,
 			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
@@ -1086,19 +1082,14 @@ func TestPathWithinBase(t *testing.T) {
 		}
 	})
 
-	t.Run("AbsoluteJoinEscapeIsRejected", func(t *testing.T) {
+	t.Run("AbsoluteTargetOutsideRootIsRejected", func(t *testing.T) {
 		outsideRoot := t.TempDir()
-		joinedPath := filepath.Join(logRoot, outsideRoot)
-		if joinedPath != outsideRoot {
-			t.Fatalf("test setup failed: expected absolute path to override base join, got %q", joinedPath)
-		}
-
-		within, err := pathWithinBase(logRoot, joinedPath)
+		within, err := pathWithinBase(logRoot, outsideRoot)
 		if err != nil {
 			t.Fatalf("pathWithinBase() returned unexpected error: %v", err)
 		}
 		if within {
-			t.Fatalf("expected %q to be rejected as outside %q", joinedPath, logRoot)
+			t.Fatalf("expected %q to be rejected as outside %q", outsideRoot, logRoot)
 		}
 	})
 
