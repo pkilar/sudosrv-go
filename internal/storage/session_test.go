@@ -986,4 +986,65 @@ func TestNewRestartSession(t *testing.T) {
 			t.Errorf("Expected 'does not exist' in error, got: %v", err)
 		}
 	})
+
+	t.Run("AbsoluteLogIDPathRejected", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		logRoot, err := filepath.Abs(filepath.Join(tmpDir, "log-root"))
+		if err != nil {
+			t.Fatalf("failed to resolve absolute log root: %v", err)
+		}
+		cfg := &config.LocalStorageConfig{
+			LogDirectory:    logRoot,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		}
+
+		// Build a restartable session layout outside cfg.LogDirectory.
+		outsideSessionDir, err := filepath.Abs(filepath.Join(tmpDir, "outside-session"))
+		if err != nil {
+			t.Fatalf("failed to resolve absolute outside session path: %v", err)
+		}
+		if !filepath.IsAbs(outsideSessionDir) {
+			t.Fatalf("test setup failed: outside session path is not absolute: %q", outsideSessionDir)
+		}
+		if err := os.MkdirAll(outsideSessionDir, 0o755); err != nil {
+			t.Fatalf("failed to create outside session directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outsideSessionDir, "uuid"), []byte(testUUID.String()+"\n"), 0o644); err != nil {
+			t.Fatalf("failed to write uuid file: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outsideSessionDir, "timing"), []byte(""), 0o644); err != nil {
+			t.Fatalf("failed to write timing file: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outsideSessionDir, "log.json"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("failed to write log.json: %v", err)
+		}
+		for _, streamInfo := range streamMap {
+			if err := os.WriteFile(filepath.Join(outsideSessionDir, streamInfo.filename), []byte(""), 0o644); err != nil {
+				t.Fatalf("failed to write stream file %s: %v", streamInfo.filename, err)
+			}
+		}
+
+		absolutePathLogID := generateLogID(testUUID, outsideSessionDir)
+		_, decodedPath, err := DecodeLogID(absolutePathLogID)
+		if err != nil {
+			t.Fatalf("failed to decode generated log_id: %v", err)
+		}
+		if !filepath.IsAbs(decodedPath) {
+			t.Fatalf("test setup failed: decoded path is not absolute: %q", decodedPath)
+		}
+		restartMsg := &pb.RestartMessage{
+			LogId:       absolutePathLogID,
+			ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+		}
+
+		session, err := NewRestartSession(restartMsg, cfg)
+		if err == nil {
+			session.Close()
+			t.Fatal("Expected error for absolute log_id path")
+		}
+		if !strings.Contains(err.Error(), "absolute path") {
+			t.Errorf("Expected 'absolute path' in error, got: %v", err)
+		}
+	})
 }

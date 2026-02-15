@@ -760,6 +760,9 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	// Path safety check
+	if filepath.IsAbs(relativePath) || strings.HasPrefix(filepath.ToSlash(relativePath), "/") || filepath.VolumeName(relativePath) != "" {
+		return nil, fmt.Errorf("absolute path detected in log_id path: %s", relativePath)
+	}
 	if containsDotDot(relativePath) {
 		return nil, fmt.Errorf("path traversal detected in log_id path: %s", relativePath)
 	}
