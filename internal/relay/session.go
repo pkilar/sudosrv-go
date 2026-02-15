@@ -4,6 +4,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -30,6 +32,7 @@ const (
 // background process independent of the client connection that created it.
 type Session struct {
 	logID            string
+	sessionUUID      uuid.UUID
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
 	fromClientChan   chan *pb.ClientMessage
@@ -40,16 +43,22 @@ type Session struct {
 }
 
 // NewSession creates a new relay session handler.
-func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
+func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
 	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0750); err != nil {
 		return nil, fmt.Errorf("could not create relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
 	}
 
-	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", logID))
+	// Use UUID string for cache file naming (safe for filenames).
+	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", sessionUUID.String()))
+
+	// Generate log_id matching C sudo_logsrvd format: base64(UUID bytes).
+	// Relay has no local path, matching journal mode behavior (empty path).
+	logID := base64.StdEncoding.EncodeToString(sessionUUID[:])
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		logID:            logID,
+		sessionUUID:      sessionUUID,
 		config:           cfg,
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages

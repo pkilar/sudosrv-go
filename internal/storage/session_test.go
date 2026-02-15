@@ -2,6 +2,7 @@
 package storage
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 	pb "sudosrv/pkg/sudosrv_proto"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Helper to create a standard AcceptMessage for tests
@@ -39,7 +42,7 @@ func createTestAcceptMessage() *pb.AcceptMessage {
 }
 
 func TestStorageSession(t *testing.T) {
-	logID := "a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d"
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 
 	t.Run("SessionInitializationAndFinalizationWithIologDir", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -51,7 +54,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -63,9 +66,12 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
 		}
 
-		// Check for correct server response (log_id)
-		if serverResponse.GetLogId() != logID {
-			t.Errorf("Expected server response to be log_id '%s', got '%s'", logID, serverResponse.GetLogId())
+		// Check for correct server response (log_id should be base64-encoded)
+		expectedRelPath := "testuser/000001"
+		idBytes := append(sessionUUID[:], []byte(expectedRelPath)...)
+		expectedLogID := base64.StdEncoding.EncodeToString(idBytes)
+		if serverResponse.GetLogId() != expectedLogID {
+			t.Errorf("Expected server response to be log_id '%s', got '%s'", expectedLogID, serverResponse.GetLogId())
 		}
 
 		// Send Exit message to finalize
@@ -120,7 +126,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -177,7 +183,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -270,7 +276,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -340,7 +346,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -400,7 +406,7 @@ func TestStorageSession(t *testing.T) {
 			LogDirectory: "/invalid/path/that/does/not/exist",
 		}
 
-		_, err := NewSession(logID, createTestAcceptMessage(), invalidCfg)
+		_, err := NewSession(sessionUUID, createTestAcceptMessage(), invalidCfg)
 		if err == nil {
 			t.Fatal("NewSession() should have failed with invalid directory")
 		}
@@ -413,7 +419,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -444,7 +450,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}
@@ -483,7 +489,7 @@ func TestStorageSession(t *testing.T) {
 			FilePermissions: 0644,
 		}
 
-		session, err := NewSession(logID, createTestAcceptMessage(), storageCfg)
+		session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
 		if err != nil {
 			t.Fatalf("NewSession() failed: %v", err)
 		}

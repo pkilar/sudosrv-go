@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // mockSessionHandler is a mock implementation of the SessionHandler interface for testing.
@@ -182,11 +184,11 @@ func TestConnectionHandler(t *testing.T) {
 		sessionClosed := make(chan bool, 1)
 
 		// Override the session factory on the handler instance to return our mock
-		handler.sessionFactories.newLocalStorageSession = func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
+		handler.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
 			return &mockSessionHandler{
 				t: t,
 				HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
-					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: logID}}, nil
+					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: sessionUUID.String()}}, nil
 				},
 				CloseFn: func() error {
 					sessionClosed <- true

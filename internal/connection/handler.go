@@ -34,8 +34,8 @@ type Handler struct {
 	rateLimitMutex  sync.Mutex
 	// sessionFactories allows for injecting mock session creators during tests.
 	sessionFactories struct {
-		newLocalStorageSession func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
-		newRelaySession        func(logID string, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
+		newLocalStorageSession func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
+		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
 	}
 }
 
@@ -63,11 +63,11 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 	}
 
 	// Initialize factories to point to the real session creation functions.
-	h.sessionFactories.newLocalStorageSession = func(logID string, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
-		return storage.NewSession(logID, acceptMsg, localCfg)
+	h.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+		return storage.NewSession(sessionUUID, acceptMsg, localCfg)
 	}
-	h.sessionFactories.newRelaySession = func(logID string, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
-		return relay.NewSession(logID, acceptMsg, relayCfg)
+	h.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
+		return relay.NewSession(sessionUUID, acceptMsg, relayCfg)
 	}
 	return h
 }
@@ -185,7 +185,8 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 // handleHello responds to a ClientHello.
 func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	helloResponse := &pb.ServerHello{
-		ServerId: h.config.Server.ServerID,
+		ServerId:    h.config.Server.ServerID,
+		Subcommands: true,
 	}
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
@@ -287,13 +288,14 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	// Apply the three-tier runcwd fallback logic before processing
 	h.applyRuncwdFallback(acceptMsg)
 
-	h.logID = uuid.New().String()
+	sessionUUID := uuid.New()
+	h.logID = sessionUUID.String() // Store UUID string for logging
 	var err error
 
 	// Initialize the correct session handler based on server mode
 	switch h.config.Server.Mode {
 	case "local":
-		h.session, err = h.sessionFactories.newLocalStorageSession(h.logID, acceptMsg, &h.config.LocalStorage)
+		h.session, err = h.sessionFactories.newLocalStorageSession(sessionUUID, acceptMsg, &h.config.LocalStorage)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local storage session: %w", err)
 		}
@@ -303,7 +305,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 			"total_sessions", metrics.Global.GetTotalSessions(), "local_sessions", metrics.Global.GetLocalSessions())
 
 	case "relay":
-		h.session, err = h.sessionFactories.newRelaySession(h.logID, acceptMsg, &h.config.Relay)
+		h.session, err = h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
