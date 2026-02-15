@@ -32,7 +32,6 @@ const (
 // background process independent of the client connection that created it.
 type Session struct {
 	logID            string
-	sessionUUID      uuid.UUID
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
 	fromClientChan   chan *pb.ClientMessage
@@ -58,7 +57,6 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		logID:            logID,
-		sessionUUID:      sessionUUID,
 		config:           cfg,
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
