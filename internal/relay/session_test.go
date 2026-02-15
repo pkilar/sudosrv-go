@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Helper to create a standard AcceptMessage for tests
@@ -168,11 +170,11 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 		UpstreamHost:         mockServer.Addr(),
 	}
 
-	logID := "relay-test-01"
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 	acceptMsg := createTestAcceptMessage()
 
 	// 3. Create a new relay session
-	session, err := NewSession(logID, acceptMsg, relayCfg)
+	session, err := NewSession(sessionUUID, acceptMsg, relayCfg)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
@@ -241,8 +243,8 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 		t.Errorf("Expected last flushed message to be ExitMsg, but it was %T", allMsgs[3].Type)
 	}
 
-	// 8. Verify the cache file was deleted
-	cacheFilePath := filepath.Join(tmpDir, logID+".log")
+	// 8. Verify the cache file was deleted (uses UUID string for filename)
+	cacheFilePath := filepath.Join(tmpDir, sessionUUID.String()+".log")
 	if _, err := os.Stat(cacheFilePath); !os.IsNotExist(err) {
 		t.Errorf("Expected cache file %s to be deleted after successful flush, but it still exists", cacheFilePath)
 	}

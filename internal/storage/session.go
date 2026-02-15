@@ -4,6 +4,7 @@ package storage
 import (
 	"compress/gzip"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -18,11 +19,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Session handles saving I/O logs for one session to the local filesystem.
 type Session struct {
 	logID           string
+	sessionUUID     uuid.UUID
 	config          *config.LocalStorageConfig
 	sessionDir      string
 	files           map[string]*os.File
@@ -60,18 +64,62 @@ var streamMap = map[string]struct {
 	"ttyout": {filename: "ttyout", marker: IO_EVENT_TTYOUT},
 }
 
+// validSuspendSignals is the set of signal names allowed in CommandSuspend messages,
+// matching the C sudo_logsrvd validation (signals sent without "SIG" prefix).
+var validSuspendSignals = map[string]bool{
+	"STOP": true,
+	"TSTP": true,
+	"CONT": true,
+	"TTIN": true,
+	"TTOU": true,
+}
+
 // Per-directory mutexes for sequence file access to reduce contention
 var seqMutexMap = make(map[string]*sync.Mutex)
 var seqMutexMapLock sync.RWMutex
 
 const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+// sanitizePathComponent removes forward slashes from user-controlled path values
+// to prevent path traversal attacks via escape sequence expansion.
+// Matches the behavior of strlcpy_no_slash() in C sudo_logsrvd.
+func sanitizePathComponent(s string) string {
+	return strings.ReplaceAll(s, "/", "")
+}
+
+// containsDotDot checks whether a path contains a ".." component,
+// matching C sudo_logsrvd's contains_dot_dot() check.
+func containsDotDot(path string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// generateLogID creates a log ID matching the C sudo_logsrvd format:
+// base64(16-byte UUID + relative_path).
+func generateLogID(sessionUUID uuid.UUID, relativePath string) string {
+	idBytes := make([]byte, 0, 16+len(relativePath))
+	idBytes = append(idBytes, sessionUUID[:]...)
+	idBytes = append(idBytes, []byte(relativePath)...)
+	return base64.StdEncoding.EncodeToString(idBytes)
+}
+
 // NewSession creates a new local storage session handler.
-func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
-	sessionDir, err := buildSessionPath(logID, cfg, acceptMsg)
+func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*Session, error) {
+	sessionDir, err := buildSessionPath(sessionUUID, cfg, acceptMsg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build session path: %w", err)
 	}
+
+	// Compute relative path for log_id generation (matches C sudo_logsrvd behavior).
+	relativePath := sessionDir
+	if strings.HasPrefix(sessionDir, cfg.LogDirectory) {
+		relativePath = strings.TrimPrefix(sessionDir[len(cfg.LogDirectory):], string(filepath.Separator))
+	}
+	logID := generateLogID(sessionUUID, relativePath)
 
 	slog.Debug("Resolved session log path", "log_id", logID, "path", sessionDir)
 	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
@@ -80,6 +128,7 @@ func NewSession(logID string, acceptMsg *pb.AcceptMessage, cfg *config.LocalStor
 
 	session := &Session{
 		logID:           logID,
+		sessionUUID:     sessionUUID,
 		config:          cfg,
 		sessionDir:      sessionDir,
 		files:           make(map[string]*os.File),
@@ -111,10 +160,11 @@ func randomAlphanumericString(n int) (string, error) {
 }
 
 // buildSessionPath constructs the full path to the log directory based on config settings.
-func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
+func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
 	// If iolog_dir is not configured, use a simple default behavior.
 	if cfg.IologDir == "" || cfg.IologFile == "" {
-		sessID := logID[:6] // Use the passed-in UUID for uniqueness
+		uuidStr := sessionUUID.String()
+		sessID := uuidStr[:6] // Use the UUID string for uniqueness
 		return filepath.Join(cfg.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6]), nil
 	}
 
@@ -143,24 +193,26 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 	epochStr := fmt.Sprintf("%d", now.Unix())
 
 	// Replacer for sudoers-style escape sequences.
+	// User-controlled values are sanitized to strip "/" characters,
+	// matching C sudo_logsrvd's strlcpy_no_slash() behavior.
 	replacer := strings.NewReplacer(
-		// User/Group escapes
-		"%{user}", infoMap["submituser"],
-		"%{uid}", infoMap["submituid"],
-		"%{group}", infoMap["submitgroup"],
-		"%{gid}", infoMap["submitgid"],
-		"%{runuser}", infoMap["runuser"],
-		"%{runuid}", infoMap["runuid"],
-		"%{rungroup}", infoMap["rungroup"],
-		"%{rungid}", infoMap["rungid"],
-		// Host/Command escapes
-		"%{hostname}", infoMap["submithost"],
-		"%{command_path}", infoMap["command"],
-		"%{command}", filepath.Base(infoMap["command"]),
-		// Sequence and Random escapes
+		// User/Group escapes (sanitized — user-controlled)
+		"%{user}", sanitizePathComponent(infoMap["submituser"]),
+		"%{uid}", sanitizePathComponent(infoMap["submituid"]),
+		"%{group}", sanitizePathComponent(infoMap["submitgroup"]),
+		"%{gid}", sanitizePathComponent(infoMap["submitgid"]),
+		"%{runuser}", sanitizePathComponent(infoMap["runuser"]),
+		"%{runuid}", sanitizePathComponent(infoMap["runuid"]),
+		"%{rungroup}", sanitizePathComponent(infoMap["rungroup"]),
+		"%{rungid}", sanitizePathComponent(infoMap["rungid"]),
+		// Host/Command escapes (sanitized — user-controlled)
+		"%{hostname}", sanitizePathComponent(infoMap["submithost"]),
+		"%{command_path}", sanitizePathComponent(infoMap["command"]),
+		"%{command}", sanitizePathComponent(filepath.Base(infoMap["command"])),
+		// Sequence and Random escapes (server-generated, safe)
 		"%{seq}", seq,
 		"%{rand}", randStr,
-		// Time/Date escapes
+		// Time/Date escapes (server-generated, safe)
 		"%{year}", fmt.Sprintf("%04d", now.Year()),
 		"%{month}", fmt.Sprintf("%02d", now.Month()),
 		"%{day}", fmt.Sprintf("%02d", now.Day()),
@@ -177,7 +229,15 @@ func buildSessionPath(logID string, cfg *config.LocalStorageConfig, acceptMsg *p
 	iologDir := replacer.Replace(cfg.IologDir)
 	iologFile := replacer.Replace(cfg.IologFile)
 
-	return filepath.Join(iologDir, iologFile), nil
+	fullPath := filepath.Join(iologDir, iologFile)
+
+	// Reject paths containing ".." to prevent directory traversal,
+	// matching C sudo_logsrvd's contains_dot_dot() check.
+	if containsDotDot(fullPath) {
+		return "", fmt.Errorf("path traversal detected in constructed path: %s", fullPath)
+	}
+
+	return fullPath, nil
 }
 
 // getMutexForDir returns a mutex for the given directory, creating one if needed
@@ -341,6 +401,13 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	s.logMeta["server_log_id"] = s.logID // Add our own server-side log ID for reference
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
+
+	// --- Write the UUID file (matches C sudo_logsrvd's iolog_store_uuid) ---
+	uuidPath := filepath.Join(s.sessionDir, "uuid")
+	if err := os.WriteFile(uuidPath, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
+		return fmt.Errorf("failed to write uuid file: %w", err)
+	}
+	slog.Debug("Created UUID file", "log_id", s.logID, "path", uuidPath)
 
 	// --- Write the plain text `log` file ---
 	logSummaryPath := filepath.Join(s.sessionDir, "log")
@@ -517,6 +584,11 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 }
 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
+	// Validate signal against allowed set, matching C sudo_logsrvd behavior.
+	if !validSuspendSignals[event.Signal] {
+		return nil, fmt.Errorf("invalid CommandSuspend signal: %q", event.Signal)
+	}
+
 	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
 
 	// Sudo uses marker 7 for all suspend/resume events; signal name differentiates them
