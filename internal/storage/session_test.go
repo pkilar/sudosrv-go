@@ -842,6 +842,56 @@ func TestDecodeLogID(t *testing.T) {
 	})
 }
 
+func TestNewSessionLogIDSiblingPrefixPath(t *testing.T) {
+	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	logRoot := filepath.Join(tmpDir, "log-root")
+	siblingPrefixDir := logRoot + "-archive"
+
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    logRoot,
+		IologDir:        filepath.Join(siblingPrefixDir, "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+
+	session, err := NewSession(testUUID, createTestAcceptMessage(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "000001")
+	if session.sessionDir != expectedPath {
+		t.Fatalf("unexpected session dir: expected %q, got %q", expectedPath, session.sessionDir)
+	}
+
+	decodedUUID, decodedPath, err := DecodeLogID(session.logID)
+	if err != nil {
+		t.Fatalf("DecodeLogID() failed: %v", err)
+	}
+	if decodedUUID != testUUID {
+		t.Fatalf("decoded UUID mismatch: expected %s, got %s", testUUID, decodedUUID)
+	}
+
+	// Reproduce legacy behavior to verify this test covers the historical bug:
+	// raw string-prefix trimming incorrectly truncates similarly named siblings.
+	legacyRelativePath := expectedPath
+	if strings.HasPrefix(expectedPath, logRoot) {
+		legacyRelativePath = strings.TrimPrefix(expectedPath[len(logRoot):], string(filepath.Separator))
+	}
+	if legacyRelativePath == expectedPath {
+		t.Fatalf("test setup failed: legacy prefix logic did not alter path %q", expectedPath)
+	}
+	if decodedPath == legacyRelativePath {
+		t.Fatalf("decoded path unexpectedly matched legacy truncated path %q", legacyRelativePath)
+	}
+	if decodedPath != expectedPath {
+		t.Fatalf("decoded path mismatch: expected %q, got %q", expectedPath, decodedPath)
+	}
+}
+
 func TestNewRestartSession(t *testing.T) {
 	testUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 
@@ -1103,4 +1153,36 @@ func TestPathWithinBase(t *testing.T) {
 			t.Fatalf("expected %q to be rejected as outside %q", target, logRoot)
 		}
 	})
+}
+
+func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+
+	acceptMsg := createTestAcceptMessage()
+	updated := false
+	for _, info := range acceptMsg.InfoMsgs {
+		if info.GetKey() == "submituser" {
+			info.Value = &pb.InfoMessage_Strval{Strval: ".."}
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		t.Fatal("test setup failed: submituser info message not found")
+	}
+
+	_, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	if err == nil {
+		t.Fatal("expected path traversal error for submituser='..'")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Fatalf("expected path traversal error, got: %v", err)
+	}
 }
