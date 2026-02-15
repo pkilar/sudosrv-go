@@ -623,6 +623,8 @@ func TestStorageSession(t *testing.T) {
 					SubmitTime: &pb.TimeSpec{TvSec: 1700000100, TvNsec: 0},
 					InfoMsgs: []*pb.InfoMessage{
 						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/bin/cat /etc/passwd"}},
+						{Key: "event_type", Value: &pb.InfoMessage_Strval{Strval: "reject"}},
+						{Key: "submit_time", Value: &pb.InfoMessage_Strval{Strval: "attacker time"}},
 					},
 				},
 			},
@@ -655,6 +657,13 @@ func TestStorageSession(t *testing.T) {
 		if subCmd["event_type"] != "accept" {
 			t.Errorf("Expected event_type 'accept', got '%v'", subCmd["event_type"])
 		}
+		expectedSubmitTime := time.Unix(1700000100, 0).UTC().Format(time.RFC3339Nano)
+		if subCmd["submit_time"] != expectedSubmitTime {
+			t.Errorf("Expected submit_time '%s', got '%v'", expectedSubmitTime, subCmd["submit_time"])
+		}
+		if subCmd["command"] != "/usr/bin/cat /etc/passwd" {
+			t.Errorf("Expected command '/usr/bin/cat /etc/passwd', got '%v'", subCmd["command"])
+		}
 	})
 
 	t.Run("SubCommandReject", func(t *testing.T) {
@@ -683,6 +692,9 @@ func TestStorageSession(t *testing.T) {
 					Reason:     "policy denied sub-command",
 					InfoMsgs: []*pb.InfoMessage{
 						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/sbin/visudo"}},
+						{Key: "event_type", Value: &pb.InfoMessage_Strval{Strval: "accept"}},
+						{Key: "reason", Value: &pb.InfoMessage_Strval{Strval: "attacker override"}},
+						{Key: "submit_time", Value: &pb.InfoMessage_Strval{Strval: "attacker time"}},
 					},
 				},
 			},
@@ -714,6 +726,13 @@ func TestStorageSession(t *testing.T) {
 		}
 		if subCmd["reason"] != "policy denied sub-command" {
 			t.Errorf("Expected reason 'policy denied sub-command', got '%v'", subCmd["reason"])
+		}
+		expectedSubmitTime := time.Unix(1700000200, 0).UTC().Format(time.RFC3339Nano)
+		if subCmd["submit_time"] != expectedSubmitTime {
+			t.Errorf("Expected submit_time '%s', got '%v'", expectedSubmitTime, subCmd["submit_time"])
+		}
+		if subCmd["command"] != "/usr/sbin/visudo" {
+			t.Errorf("Expected command '/usr/sbin/visudo', got '%v'", subCmd["command"])
 		}
 	})
 

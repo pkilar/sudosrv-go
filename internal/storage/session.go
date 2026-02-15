@@ -676,6 +676,10 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 	}
 	if len(infoMap) > 0 {
 		for k, v := range infoMap {
+			// Preserve authoritative fields already set by the server.
+			if _, exists := entry[k]; exists {
+				continue
+			}
 			entry[k] = v
 		}
 	}
@@ -718,6 +722,10 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 	}
 	if len(infoMap) > 0 {
 		for k, v := range infoMap {
+			// Preserve authoritative fields already set by the server.
+			if _, exists := entry[k]; exists {
+				continue
+			}
 			entry[k] = v
 		}
 	}

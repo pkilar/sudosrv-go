@@ -523,6 +523,9 @@ func TestPreSessionRejectEventLogging(t *testing.T) {
 				InfoMsgs: []*pb.InfoMessage{
 					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/usr/sbin/reboot"}},
 					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "eviluser"}},
+					{Key: "event_type", Value: &pb.InfoMessage_Strval{Strval: "accept"}},
+					{Key: "reason", Value: &pb.InfoMessage_Strval{Strval: "attacker override"}},
+					{Key: "submit_time", Value: &pb.InfoMessage_Strval{Strval: "attacker time"}},
 				},
 			},
 		},
@@ -566,6 +569,13 @@ func TestPreSessionRejectEventLogging(t *testing.T) {
 			}
 			if eventRecord["reason"] != "command not allowed" {
 				t.Errorf("Expected reason 'command not allowed', got '%v'", eventRecord["reason"])
+			}
+			expectedSubmitTime := time.Unix(1700000000, 0).UTC().Format(time.RFC3339Nano)
+			if eventRecord["submit_time"] != expectedSubmitTime {
+				t.Errorf("Expected submit_time '%s', got '%v'", expectedSubmitTime, eventRecord["submit_time"])
+			}
+			if eventRecord["command"] != "/usr/sbin/reboot" {
+				t.Errorf("Expected command '/usr/sbin/reboot', got '%v'", eventRecord["command"])
 			}
 		}
 		return nil

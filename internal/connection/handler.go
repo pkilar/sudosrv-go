@@ -341,6 +341,10 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	}
 	if len(infoMap) > 0 {
 		for k, v := range infoMap {
+			// Preserve authoritative fields already set by the server.
+			if _, exists := eventRecord[k]; exists {
+				continue
+			}
 			eventRecord[k] = v
 		}
 	}
