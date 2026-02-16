@@ -1,0 +1,61 @@
+# Maintainer: Paul Kilar <pkilar@gmail.com>
+pkgname=sudosrv
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
+arch=('x86_64' 'aarch64')
+url='https://github.com/pkilar/sudosrv'
+license=('MIT')
+depends=('glibc')
+makedepends=('go>=1.25' 'protobuf')
+optdepends=('sudo: sudo client (>= 1.9.0)')
+backup=('etc/sudosrv/config.yaml'
+        'etc/logrotate.d/sudosrv')
+install=sudosrv.install
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgname}-${pkgver}"
+
+    # Generate protobuf code
+    protoc \
+        --proto_path=pkg/sudosrv_proto \
+        --go_out=pkg/sudosrv_proto \
+        --go_opt=paths=source_relative \
+        pkg/sudosrv_proto/sudo_logsrv.proto
+
+    # Tidy dependencies
+    go mod tidy
+
+    # Build with stripped symbols
+    export CGO_ENABLED=0
+    go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+}
+
+check() {
+    cd "${pkgname}-${pkgver}"
+    go test -timeout 30s ./...
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+
+    # Binary
+    install -Dm0755 sudosrv "${pkgdir}/usr/bin/sudosrv"
+
+    # Configuration
+    install -Dm0644 archlinux/sudosrv.conf "${pkgdir}/etc/sudosrv/config.yaml"
+
+    # Systemd service
+    install -Dm0644 archlinux/sudosrv.service "${pkgdir}/usr/lib/systemd/system/sudosrv.service"
+
+    # Systemd sysusers (creates sudosrv user/group)
+    install -Dm0644 archlinux/sudosrv.sysusers "${pkgdir}/usr/lib/sysusers.d/sudosrv.conf"
+
+    # Systemd tmpfiles (creates log/cache directories)
+    install -Dm0644 archlinux/sudosrv.tmpfiles "${pkgdir}/usr/lib/tmpfiles.d/sudosrv.conf"
+
+    # Logrotate
+    install -Dm0644 archlinux/sudosrv.logrotate "${pkgdir}/etc/logrotate.d/sudosrv"
+}

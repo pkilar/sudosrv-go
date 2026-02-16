@@ -1,0 +1,22 @@
+post_install() {
+    systemd-sysusers
+    systemd-tmpfiles --create sudosrv.conf
+    echo ":: Enable and start the service with: systemctl enable --now sudosrv.service"
+}
+
+post_upgrade() {
+    systemd-sysusers
+    systemd-tmpfiles --create sudosrv.conf
+    systemctl daemon-reload
+    if systemctl is-active --quiet sudosrv.service; then
+        echo ":: Restarting sudosrv.service..."
+        systemctl restart sudosrv.service
+    fi
+}
+
+pre_remove() {
+    if systemctl is-active --quiet sudosrv.service; then
+        systemctl stop sudosrv.service
+    fi
+    systemctl disable sudosrv.service 2>/dev/null || true
+}

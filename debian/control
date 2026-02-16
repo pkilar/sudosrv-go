@@ -3,7 +3,7 @@ Section: admin
 Priority: optional
 Maintainer: Paul Kilar <pkilar@gmail.com>
 Build-Depends: debhelper (>= 13),
-               golang-go (>= 2:1.21),
+               golang-go (>= 2:1.25),
                protobuf-compiler
 Standards-Version: 4.6.2
 Homepage: https://github.com/pkilar/sudosrv

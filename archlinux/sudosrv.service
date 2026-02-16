@@ -1,0 +1,32 @@
+[Unit]
+Description=sudo I/O Log Server
+Documentation=man:sudosrv(8)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sudosrv
+Group=sudosrv
+ExecStart=/usr/bin/sudosrv -config=/etc/sudosrv/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/sudosrv /var/spool/sudosrv-cache
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

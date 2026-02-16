@@ -1,0 +1,2 @@
+d /var/log/sudosrv 0700 sudosrv sudosrv -
+d /var/spool/sudosrv-cache 0700 sudosrv sudosrv -

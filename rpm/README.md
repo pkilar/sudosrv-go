@@ -43,7 +43,7 @@ rpm/
 ### Prerequisites
 
 - `rpmbuild` and `rpmdevtools` packages
-- Go 1.22 or newer
+- Go 1.25 or newer
 - `protoc` (Protocol Buffer compiler)
 - `make`
 

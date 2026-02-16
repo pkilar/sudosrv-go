@@ -27,7 +27,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb
+.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
@@ -162,6 +162,16 @@ deb:
 		echo "Check if dpkg-buildpackage completed successfully"; \
 	fi
 
+# Build Arch Linux package
+arch:
+	@echo "Building Arch Linux package for $(BINARY_NAME) version $(PKG_VERSION)"
+	@if ! command -v makepkg >/dev/null 2>&1; then \
+		echo "Error: makepkg not found. This must be run on Arch Linux."; \
+		echo "  sudo pacman -S base-devel"; \
+		exit 1; \
+	fi
+	./archlinux/build-arch.sh "$(PKG_VERSION)"
+
 # Display help information
 help:
 	@echo "Usage: make [target]"
@@ -183,4 +193,5 @@ help:
 	@echo "  clean                    Remove all compiled binaries and build cache."
 	@echo "  rpm                      Build RPM package for distribution."
 	@echo "  deb                      Build Debian package for distribution."
+	@echo "  arch                     Build Arch Linux package for distribution."
 	@echo "  help                     Display this help message."
