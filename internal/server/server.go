@@ -14,13 +14,14 @@ import (
 	"sudosrv/internal/connection"
 	"sudosrv/internal/metrics"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 // Server manages listeners and handles graceful shutdown.
 type Server struct {
-	config     *config.Config
+	config     atomic.Pointer[config.Config]
 	configPath string
 	logLevel   *slog.LevelVar
 	waitGroup  sync.WaitGroup
@@ -35,51 +36,59 @@ type Server struct {
 // logLevel is the dynamic log level that can be updated at runtime.
 func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{
-		config:     cfg,
+	s := &Server{
 		configPath: configPath,
 		logLevel:   logLevel,
 		listeners:  make([]net.Listener, 0),
 		quit:       make(chan struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
-	}, nil
+	}
+	s.config.Store(cfg)
+	return s, nil
 }
 
 // Start initializes listeners and begins accepting connections.
 func (s *Server) Start() error {
+	cfg := s.config.Load()
 
 	// Start plaintext listener if configured
-	if s.config.Server.ListenAddress != "" {
-		plainListener, err := net.Listen("tcp", s.config.Server.ListenAddress)
+	if cfg.Server.ListenAddress != "" {
+		plainListener, err := net.Listen("tcp", cfg.Server.ListenAddress)
 		if err != nil {
-			return fmt.Errorf("failed to start plaintext listener on %s: %w", s.config.Server.ListenAddress, err)
+			return fmt.Errorf("failed to start plaintext listener on %s: %w", cfg.Server.ListenAddress, err)
 		}
 		s.listeners = append(s.listeners, plainListener)
 		s.waitGroup.Add(1)
 		go s.acceptLoop(plainListener)
-		slog.Info("Started plaintext listener", "address", s.config.Server.ListenAddress)
+		slog.Info("Started plaintext listener", "address", cfg.Server.ListenAddress)
 	}
 
 	// Start TLS listener if configured
-	if s.config.Server.ListenAddressTLS != "" {
-		if s.config.Server.TLSCertFile == "" || s.config.Server.TLSKeyFile == "" {
+	if cfg.Server.ListenAddressTLS != "" {
+		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
+			s.closeListeners()
 			return fmt.Errorf("tls_cert_file and tls_key_file must be configured for TLS listener")
 		}
-		cert, err := tls.LoadX509KeyPair(s.config.Server.TLSCertFile, s.config.Server.TLSKeyFile)
+		cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		if err != nil {
+			s.closeListeners()
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
 		}
-		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
 
-		tlsListener, err := tls.Listen("tcp", s.config.Server.ListenAddressTLS, tlsConfig)
+		tlsListener, err := tls.Listen("tcp", cfg.Server.ListenAddressTLS, tlsConfig)
 		if err != nil {
-			return fmt.Errorf("failed to start TLS listener on %s: %w", s.config.Server.ListenAddressTLS, err)
+			s.closeListeners()
+			return fmt.Errorf("failed to start TLS listener on %s: %w", cfg.Server.ListenAddressTLS, err)
 		}
 		s.listeners = append(s.listeners, tlsListener)
 		s.waitGroup.Add(1)
 		go s.acceptLoop(tlsListener)
-		slog.Info("Started TLS listener", "address", s.config.Server.ListenAddressTLS)
+		slog.Info("Started TLS listener", "address", cfg.Server.ListenAddressTLS)
 	}
 
 	if len(s.listeners) == 0 {
@@ -91,6 +100,17 @@ func (s *Server) Start() error {
 	go s.logMetricsPeriodically()
 
 	return nil
+}
+
+// closeListeners closes all currently open listeners. Used during Start()
+// cleanup if a later listener bind fails.
+func (s *Server) closeListeners() {
+	for _, l := range s.listeners {
+		if err := l.Close(); err != nil {
+			slog.Error("Failed to close listener during cleanup", "address", l.Addr(), "error", err)
+		}
+	}
+	s.listeners = s.listeners[:0]
 }
 
 // acceptLoop continuously accepts new connections on a listener.
@@ -118,6 +138,8 @@ func (s *Server) acceptLoop(listener net.Listener) {
 			default:
 				metrics.Global.IncrementFailedConnections()
 				slog.Error("Failed to accept connection", "error", err, "failed_connections", metrics.Global.GetFailedConnections())
+				// Brief backoff to avoid tight error loop on transient failures
+				time.Sleep(100 * time.Millisecond)
 			}
 			continue
 		}
@@ -132,7 +154,7 @@ func (s *Server) acceptLoop(listener net.Listener) {
 				metrics.Global.DecrementActiveConnections()
 			}()
 			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
-			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config)
+			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config.Load())
 			handler.Handle()
 			slog.Debug("Connection handler finished", "remote_addr", conn.RemoteAddr())
 		}()
@@ -184,7 +206,7 @@ func (s *Server) reload() {
 		return
 	}
 
-	oldCfg := s.config
+	oldCfg := s.config.Load()
 
 	// Update log level dynamically
 	if s.logLevel != nil {
@@ -220,7 +242,7 @@ func (s *Server) reload() {
 	}
 
 	// Update config pointer — new connections will use the new config
-	s.config = newCfg
+	s.config.Store(newCfg)
 
 	slog.Info("Config reload complete", "path", s.configPath)
 }

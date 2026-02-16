@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ const (
 	flushingSuffix           = ".flushing"
 	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
 	commitPointInterval = 10 * time.Second
+	// maxMessageSize is the maximum allowed protobuf message size (2MB),
+	// matching the protocol spec in internal/protocol/processor.go.
+	maxMessageSize = 2 * 1024 * 1024
 )
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
@@ -152,7 +156,8 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 	// This loop continues until the client disconnects and the HandleClientMessage channel is closed by its owner.
 	for msg := range s.fromClientChan {
 		if err := writeProtoMessage(file, msg); err != nil {
-			slog.Error("Failed to write message to relay cache", "log_id", s.logID, "error", err)
+			slog.Error("Failed to write message to relay cache, aborting write phase", "log_id", s.logID, "error", err)
+			return false
 		}
 		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
 			slog.Debug("ExitMessage received and cached. Ending write phase.", "log_id", s.logID)
@@ -166,11 +171,16 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 func (s *Session) calculateBackoff(attempts int) time.Duration {
 	maxInterval := s.config.MaxReconnectInterval
 	if maxInterval <= 0 {
-		maxInterval = time.Minute // Fallback to default if not configured or invalid
+		maxInterval = time.Minute
 	}
 	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(attempts))
 	if backoff > float64(maxInterval) {
-		return maxInterval
+		backoff = float64(maxInterval)
+	}
+	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2)
+	half := time.Duration(backoff) / 2
+	if half > 0 {
+		return half + time.Duration(rand.Int63n(int64(half)))
 	}
 	return time.Duration(backoff)
 }
@@ -263,15 +273,19 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
 	proc, err := connectToUpstream(cfg)
 	if err != nil {
 		slog.Error("Failed to connect to upstream for orphaned file flush", "path", flushingFileName, "error", err)
-		os.Rename(flushingFileName, filePath)
+		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
+			slog.Error("Failed to rename orphaned file back after connection failure", "path", flushingFileName, "error", renameErr)
+		}
 		return
 	}
 
 	err = flushFile(proc, flushingFileName)
-	proc.Close() // Always close the connection after flush attempt
+	proc.Close()
 	if err != nil {
 		slog.Error("Failed to flush orphaned file, renaming back", "path", flushingFileName, "error", err)
-		os.Rename(flushingFileName, filePath)
+		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
+			slog.Error("Failed to rename orphaned file back after flush failure", "path", flushingFileName, "error", renameErr)
+		}
 		return
 	}
 	slog.Info("Successfully flushed orphaned relay file", "path", flushingFileName)
@@ -282,30 +296,25 @@ func flushFile(proc protocol.Processor, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open cache file for flushing: %w", err)
 	}
-	defer func() {
-		f.Close()
-		if err := os.Remove(filePath); err != nil {
-			slog.Error("Failed to remove flushed cache file", "path", filePath, "error", err)
-		}
-	}()
+	defer f.Close()
 
-	// The first message (AcceptMsg) must be sent to initiate the session upstream.
-	// Since connectToUpstream now handles this, we can just read and send all messages from the file.
 	for {
 		msg, err := readProtoMessage(f)
 		if err == io.EOF {
-			return nil // Success
+			// All messages sent successfully — now safe to remove the cache file
+			if removeErr := os.Remove(filePath); removeErr != nil {
+				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
+			}
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("error reading message from cache during flush: %w", err)
 		}
 
-		// The first message sent by this loop will be the AcceptMessage.
 		if err := proc.WriteClientMessage(msg); err != nil {
 			return fmt.Errorf("failed to send flushed message to upstream: %w", err)
 		}
 
-		// Wait for response after sending AcceptMsg
 		if msg.GetAcceptMsg() != nil {
 			if _, err := proc.ReadServerMessage(); err != nil {
 				return fmt.Errorf("did not get log_id response from upstream: %w", err)
@@ -367,6 +376,9 @@ func readProtoMessage(r io.Reader) (*pb.ClientMessage, error) {
 		return nil, err
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
+	if msgLen > maxMessageSize {
+		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, maxMessageSize)
+	}
 	data := make([]byte, msgLen)
 	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, err

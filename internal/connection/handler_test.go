@@ -668,6 +668,7 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 	}
 
 	handler := NewHandler(serverConn, cfg)
+	var mu sync.Mutex
 	messagesReceived := make([]string, 0)
 
 	// Override session factory to track messages
@@ -675,6 +676,8 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		return &mockSessionHandler{
 			t: t,
 			HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+				mu.Lock()
+				defer mu.Unlock()
 				switch msg.Type.(type) {
 				case *pb.ClientMessage_AcceptMsg:
 					messagesReceived = append(messagesReceived, "accept")
@@ -750,13 +753,18 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 
 	// Verify all messages were routed to the active session
 	// First accept is the initial session setup, second is the sub-command
+	mu.Lock()
+	received := make([]string, len(messagesReceived))
+	copy(received, messagesReceived)
+	mu.Unlock()
+
 	expectedMessages := []string{"accept", "accept", "reject", "alert"}
-	if len(messagesReceived) != len(expectedMessages) {
-		t.Fatalf("Expected %d messages routed to session, got %d: %v", len(expectedMessages), len(messagesReceived), messagesReceived)
+	if len(received) != len(expectedMessages) {
+		t.Fatalf("Expected %d messages routed to session, got %d: %v", len(expectedMessages), len(received), received)
 	}
 	for i, expected := range expectedMessages {
-		if messagesReceived[i] != expected {
-			t.Errorf("Message %d: expected '%s', got '%s'", i, expected, messagesReceived[i])
+		if received[i] != expected {
+			t.Errorf("Message %d: expected '%s', got '%s'", i, expected, received[i])
 		}
 	}
 }
