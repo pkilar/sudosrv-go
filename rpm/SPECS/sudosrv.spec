@@ -9,7 +9,7 @@ License:        MIT
 URL:            https://github.com/example/sudosrv
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  golang >= 1.22
+BuildRequires:  golang >= 1.25
 BuildRequires:  make
 BuildRequires:  protobuf-compiler
 BuildRequires:  systemd-rpm-macros

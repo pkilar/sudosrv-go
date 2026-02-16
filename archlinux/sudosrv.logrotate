@@ -1,0 +1,23 @@
+/var/log/sudosrv/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 644 sudosrv sudosrv
+    postrotate
+        /bin/systemctl reload sudosrv.service > /dev/null 2>&1 || true
+    endscript
+}
+
+/var/spool/sudosrv-cache/*.log {
+    weekly
+    missingok
+    rotate 4
+    compress
+    delaycompress
+    notifempty
+    create 644 sudosrv sudosrv
+    maxage 30
+}
