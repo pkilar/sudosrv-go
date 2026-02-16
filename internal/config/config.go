@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -82,7 +83,7 @@ func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("Warning: Config file not found at %s. Using default values.\n", path)
+			slog.Warn("Config file not found, using defaults", "path", path)
 			return config, nil
 		}
 		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
@@ -92,7 +93,41 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config YAML: %w", err)
 	}
 
+	// Re-apply defaults for zero-valued fields that yaml may have cleared
+	// when a section is partially specified in the config file.
+	applyZeroValueDefaults(config)
+
 	return config, nil
+}
+
+// applyZeroValueDefaults restores default values for fields that yaml.Unmarshal
+// may have zeroed when a section was partially specified.
+func applyZeroValueDefaults(cfg *Config) {
+	if cfg.Server.IdleTimeout == 0 {
+		cfg.Server.IdleTimeout = 10 * time.Minute
+	}
+	if cfg.LocalStorage.DirPermissions == 0 {
+		cfg.LocalStorage.DirPermissions = 0750
+	}
+	if cfg.LocalStorage.FilePermissions == 0 {
+		cfg.LocalStorage.FilePermissions = 0640
+	}
+	if cfg.Relay.ConnectTimeout == 0 {
+		cfg.Relay.ConnectTimeout = 5 * time.Second
+	}
+	if cfg.Relay.MaxReconnectInterval == 0 {
+		cfg.Relay.MaxReconnectInterval = 1 * time.Minute
+	}
+
+	// Validate permission values — must be valid Unix file modes (max 0777)
+	if cfg.LocalStorage.DirPermissions > 0o777 {
+		slog.Warn("dir_permissions exceeds maximum 0777; YAML 1.2 treats 0750 as decimal — use 0o750 for octal",
+			"value", cfg.LocalStorage.DirPermissions)
+	}
+	if cfg.LocalStorage.FilePermissions > 0o777 {
+		slog.Warn("file_permissions exceeds maximum 0777; YAML 1.2 treats 0640 as decimal — use 0o640 for octal",
+			"value", cfg.LocalStorage.FilePermissions)
+	}
 }
 
 // Create an example config file if it doesn't exist

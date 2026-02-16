@@ -317,7 +317,8 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 
 	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.DirPermissions)); err != nil {
 		slog.Error("Failed to create reject event directory", "error", err, "path", rejectDir)
-		return nil, nil // Non-fatal
+		metrics.Global.IncrementMessageErrors()
+		return nil, nil
 	}
 
 	// Build the event record
@@ -355,13 +356,15 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	data, err := json.MarshalIndent(eventRecord, "", "  ")
 	if err != nil {
 		slog.Error("Failed to marshal reject event", "error", err)
-		return nil, nil // Non-fatal
+		metrics.Global.IncrementMessageErrors()
+		return nil, nil
 	}
 
 	logJSONPath := filepath.Join(rejectDir, "log.json")
 	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.FilePermissions)); err != nil {
 		slog.Error("Failed to write reject event log", "error", err, "path", logJSONPath)
-		return nil, nil // Non-fatal
+		metrics.Global.IncrementMessageErrors()
+		return nil, nil
 	}
 
 	slog.Info("Wrote reject event log", "path", logJSONPath, "reason", rejectMsg.GetReason())

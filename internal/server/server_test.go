@@ -117,11 +117,12 @@ local_storage:
 
 		srv.reload()
 
-		if srv.config.Server.ServerID != "TestServer/2.0" {
-			t.Errorf("Expected server_id 'TestServer/2.0', got '%s'", srv.config.Server.ServerID)
+		loadedCfg := srv.config.Load()
+		if loadedCfg.Server.ServerID != "TestServer/2.0" {
+			t.Errorf("Expected server_id 'TestServer/2.0', got '%s'", loadedCfg.Server.ServerID)
 		}
-		if srv.config.LocalStorage.LogDirectory != "/tmp/test-logs-v2" {
-			t.Errorf("Expected log_directory '/tmp/test-logs-v2', got '%s'", srv.config.LocalStorage.LogDirectory)
+		if loadedCfg.LocalStorage.LogDirectory != "/tmp/test-logs-v2" {
+			t.Errorf("Expected log_directory '/tmp/test-logs-v2', got '%s'", loadedCfg.LocalStorage.LogDirectory)
 		}
 		if logLevel.Level() != slog.LevelError {
 			t.Errorf("Expected log level ERROR, got %s", logLevel.Level())

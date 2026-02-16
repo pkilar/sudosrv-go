@@ -30,6 +30,19 @@ const (
 	shutdownTimeout = 30 * time.Second
 )
 
+// Error types for structured exit code classification.
+// Using errors.As instead of string matching for reliable error categorization.
+
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
+type serverError struct{ err error }
+
+func (e *serverError) Error() string { return e.err.Error() }
+func (e *serverError) Unwrap() error { return e.err }
+
 // CommandLineFlags encapsulates all command-line arguments
 type CommandLineFlags struct {
 	ConfigFile *string
@@ -93,7 +106,7 @@ func runApplication(flags *CommandLineFlags) error {
 	// Load and validate configuration
 	cfg, err := loadAndValidateConfig(*flags.ConfigFile)
 	if err != nil {
-		return fmt.Errorf("configuration error: %w", err)
+		return &configError{err: fmt.Errorf("configuration error: %w", err)}
 	}
 
 	// Handle validation-only mode
@@ -105,7 +118,7 @@ func runApplication(flags *CommandLineFlags) error {
 	// Setup structured logging with enhanced configuration
 	logLevel, err := setupStructuredLogging(cfg, *flags.LogLevel)
 	if err != nil {
-		return fmt.Errorf("logging setup error: %w", err)
+		return &configError{err: fmt.Errorf("logging setup error: %w", err)}
 	}
 
 	slog.Info("Application starting",
@@ -123,7 +136,7 @@ func runApplication(flags *CommandLineFlags) error {
 
 	// Initialize relay cache cleanup if in relay mode
 	if err := initializeRelayMode(cfg); err != nil {
-		return fmt.Errorf("relay initialization error: %w", err)
+		return &configError{err: fmt.Errorf("relay initialization error: %w", err)}
 	}
 
 	// Create and start the server with proper lifecycle management
@@ -200,9 +213,10 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 		Level:     logLevel,
 		AddSource: parsedLevel <= slog.LevelDebug, // Add source info for debug level
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			// Add timestamp formatting and other enhancements
 			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(time.Now().Format(time.RFC3339))
+				if t, ok := a.Value.Any().(time.Time); ok {
+					a.Value = slog.StringValue(t.Format(time.RFC3339))
+				}
 			}
 			return a
 		},
@@ -244,7 +258,7 @@ func initializeRelayMode(cfg *config.Config) error {
 	slog.Info("Initializing relay mode", "cache_directory", cfg.Relay.RelayCacheDirectory)
 
 	// Ensure cache directory exists
-	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0750); err != nil {
 		return fmt.Errorf("failed to create relay cache directory: %w", err)
 	}
 
@@ -263,12 +277,12 @@ func runServerWithGracefulShutdown(cfg *config.Config, configPath string, logLev
 	// Create server instance
 	srv, err := server.NewServer(cfg, configPath, logLevel)
 	if err != nil {
-		return fmt.Errorf("failed to create server: %w", err)
+		return &serverError{err: fmt.Errorf("failed to create server: %w", err)}
 	}
 
 	// Start server
 	if err := srv.Start(); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
+		return &serverError{err: fmt.Errorf("failed to start server: %w", err)}
 	}
 
 	slog.Info("Server started successfully")
@@ -286,10 +300,10 @@ func handleApplicationError(err error) {
 
 	// Determine appropriate exit code based on error type
 	switch {
-	case strings.Contains(err.Error(), "configuration"):
+	case errors.As(err, new(*configError)):
 		exitCode = exitConfig
 		slog.Error("Configuration error", "error", err)
-	case strings.Contains(err.Error(), "server"):
+	case errors.As(err, new(*serverError)):
 		exitCode = exitServer
 		slog.Error("Server error", "error", err)
 	default:

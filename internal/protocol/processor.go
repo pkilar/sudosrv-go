@@ -103,15 +103,17 @@ func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(outBytes)))
-
-	if _, err := writer.Write(lenBuf); err != nil {
-		return fmt.Errorf("failed to send message length: %w", err)
+	if len(outBytes) > maxMessageSize {
+		return fmt.Errorf("outgoing message size %d exceeds limit of %d", len(outBytes), maxMessageSize)
 	}
 
-	if _, err := writer.Write(outBytes); err != nil {
-		return fmt.Errorf("failed to send message payload: %w", err)
+	// Combine length prefix and payload into a single write for atomicity
+	buf := make([]byte, 4+len(outBytes))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(outBytes)))
+	copy(buf[4:], outBytes)
+
+	if _, err := writer.Write(buf); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
 	}
 	return nil
 }

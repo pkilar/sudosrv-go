@@ -42,6 +42,7 @@ type Session struct {
 	passwordFilter  *PasswordFilter // Password filtering for security
 	lastCommitTime  time.Time       // Tracks when last commit point was sent
 	fileMux         sync.Mutex
+	closeOnce       sync.Once
 	isInitialized   bool
 }
 
@@ -421,7 +422,29 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 }
 
 // initialize sets up all the files for the session log.
-func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
+func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
+	// Clean up partially-opened files if initialization fails
+	defer func() {
+		if retErr != nil {
+			for _, gzWriter := range s.gzipWriters {
+				gzWriter.Close()
+			}
+			for _, f := range s.files {
+				f.Close()
+			}
+			if s.logJSONFile != nil {
+				s.logJSONFile.Close()
+				s.logJSONFile = nil
+			}
+			if s.timingFile != nil {
+				s.timingFile.Close()
+				s.timingFile = nil
+			}
+			s.files = make(map[string]*os.File)
+			s.gzipWriters = make(map[string]*gzip.Writer)
+		}
+	}()
+
 	// Create a map of info messages for easy lookup of string values.
 	infoMap := make(map[string]string)
 
@@ -525,7 +548,7 @@ func (s *Session) ensureStreamFile(streamName string) error {
 		return fmt.Errorf("unknown stream name: %s", streamName)
 	}
 	filePath := filepath.Join(s.sessionDir, streamInfo.filename)
-	f, err := os.Create(filePath)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
@@ -624,7 +647,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		streamInfo.marker,
 		delay.TvSec,
 		delay.TvNsec,
-		len(data))
+		len(dataToWrite))
 	slog.Debug("Writing timing entry", "log_id", s.logID, "stream", streamName, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -1019,40 +1042,48 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 }
 
 // Close closes all open file handles for the session.
+// Safe to call multiple times; only the first call performs cleanup.
 func (s *Session) Close() error {
 	var lastErr error
+	s.closeOnce.Do(func() {
+		// First, close all gzip writers to ensure all data is flushed
+		for name, gzWriter := range s.gzipWriters {
+			slog.Debug("Closing gzip writer", "log_id", s.logID, "stream", name)
+			if err := gzWriter.Close(); err != nil {
+				slog.Error("Failed to close gzip writer", "log_id", s.logID, "stream", name, "error", err)
+				lastErr = err
+			}
+		}
 
-	// First, close all gzip writers to ensure all data is flushed
-	for name, gzWriter := range s.gzipWriters {
-		slog.Debug("Closing gzip writer", "log_id", s.logID, "stream", name)
-		if err := gzWriter.Close(); err != nil {
-			slog.Error("Failed to close gzip writer", "log_id", s.logID, "stream", name, "error", err)
-			lastErr = err
+		// Then close the underlying file handles
+		for name, f := range s.files {
+			slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
+			if err := f.Close(); err != nil {
+				slog.Error("Failed to close stream file", "log_id", s.logID, "stream", name, "error", err)
+				lastErr = err
+			}
 		}
-	}
+		if s.logJSONFile != nil {
+			slog.Debug("Closing log.json file", "log_id", s.logID)
+			if err := s.logJSONFile.Close(); err != nil {
+				slog.Error("Failed to close log.json file", "log_id", s.logID, "error", err)
+				lastErr = err
+			}
+		}
+		if s.timingFile != nil {
+			slog.Debug("Closing timing file", "log_id", s.logID)
+			if err := s.timingFile.Close(); err != nil {
+				slog.Error("Failed to close timing file", "log_id", s.logID, "error", err)
+				lastErr = err
+			}
+		}
 
-	// Then close the underlying file handles
-	for name, f := range s.files {
-		slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
-		if err := f.Close(); err != nil {
-			slog.Error("Failed to close stream file", "log_id", s.logID, "stream", name, "error", err)
-			lastErr = err
-		}
-	}
-	if s.logJSONFile != nil {
-		slog.Debug("Closing log.json file", "log_id", s.logID)
-		if err := s.logJSONFile.Close(); err != nil {
-			slog.Error("Failed to close log.json file", "log_id", s.logID, "error", err)
-			lastErr = err
-		}
-	}
-	if s.timingFile != nil {
-		slog.Debug("Closing timing file", "log_id", s.logID)
-		if err := s.timingFile.Close(); err != nil {
-			slog.Error("Failed to close timing file", "log_id", s.logID, "error", err)
-			lastErr = err
-		}
-	}
-	slog.Info("Closed all log files for session", "log_id", s.logID)
+		// Nil out to prevent use-after-close
+		s.files = nil
+		s.gzipWriters = nil
+		s.logJSONFile = nil
+		s.timingFile = nil
+		slog.Info("Closed all log files for session", "log_id", s.logID)
+	})
 	return lastErr
 }
