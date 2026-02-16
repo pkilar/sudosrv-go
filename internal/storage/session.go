@@ -69,6 +69,12 @@ var streamMap = map[string]struct {
 	"ttyout": {filename: "ttyout", marker: IO_EVENT_TTYOUT},
 }
 
+// preCreateStreams lists I/O streams that are created at session initialization.
+// stdin and ttyin are created on-demand when data arrives, matching C sudo_logsrvd behavior.
+var preCreateStreams = map[string]bool{
+	"stdout": true, "stderr": true, "ttyout": true,
+}
+
 // validSuspendSignals is the set of signal names allowed in CommandSuspend messages,
 // matching the C sudo_logsrvd validation (signals sent without "SIG" prefix).
 var validSuspendSignals = map[string]bool{
@@ -439,6 +445,14 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 	}
 	slog.Debug("--- End AcceptMessage InfoMsgs ---")
 
+	// Apply defaults for absent optional fields, matching C sudo_logsrvd behavior.
+	for _, field := range []string{"submitcwd", "submitgroup", "ttyname"} {
+		if infoMap[field] == "" {
+			infoMap[field] = "unknown"
+			s.logMeta[field] = "unknown"
+		}
+	}
+
 	s.logMeta["server_log_id"] = s.logID // Add our own server-side log ID for reference
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
@@ -490,21 +504,36 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) error {
 		return fmt.Errorf("failed to write initial metadata to log.json: %w", err)
 	}
 
-	// Create I/O stream files
-	for streamName, streamInfo := range streamMap {
-		filePath := filepath.Join(s.sessionDir, streamInfo.filename)
-		f, err := os.Create(filePath)
-		if err != nil {
+	// Create pre-initialized I/O stream files (stdout, stderr, ttyout).
+	// stdin and ttyin are created on-demand when data arrives, matching C sudo_logsrvd.
+	for streamName := range preCreateStreams {
+		if err := s.ensureStreamFile(streamName); err != nil {
 			return err
 		}
-		slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath, "compressed", s.config.Compress)
-		s.files[streamName] = f
+	}
+	return nil
+}
 
-		// If compression is enabled, wrap the file with a gzip writer
-		if s.config.Compress {
-			gzWriter := gzip.NewWriter(f)
-			s.gzipWriters[streamName] = gzWriter
-		}
+// ensureStreamFile creates the I/O stream file if it doesn't already exist.
+// This supports on-demand creation for stdin/ttyin, matching C sudo_logsrvd behavior.
+func (s *Session) ensureStreamFile(streamName string) error {
+	if _, exists := s.files[streamName]; exists {
+		return nil
+	}
+	streamInfo, ok := streamMap[streamName]
+	if !ok {
+		return fmt.Errorf("unknown stream name: %s", streamName)
+	}
+	filePath := filepath.Join(s.sessionDir, streamInfo.filename)
+	f, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath, "compressed", s.config.Compress)
+	s.files[streamName] = f
+
+	if s.config.Compress {
+		s.gzipWriters[streamName] = gzip.NewWriter(f)
 	}
 	return nil
 }
@@ -546,13 +575,20 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, fmt.Errorf("unknown stream name: %s", streamName)
 	}
 
-	// Apply password filtering if enabled
+	// Ensure the stream file exists (on-demand creation for stdin/ttyin)
+	if err := s.ensureStreamFile(streamName); err != nil {
+		return nil, fmt.Errorf("failed to create stream file %s: %w", streamName, err)
+	}
+
+	// Apply password filtering if enabled.
+	// C sudo_logsrvd runs filtering on both TTY and non-TTY streams:
+	// prompt detection on ttyout/stdout, input masking on ttyin/stdin.
 	dataToWrite := data
 	if s.passwordFilter != nil {
-		if streamName == "ttyout" {
+		if streamName == "ttyout" || streamName == "stdout" {
 			// Check output for password prompts
 			s.passwordFilter.CheckOutput(data)
-		} else if streamName == "ttyin" {
+		} else if streamName == "ttyin" || streamName == "stdin" {
 			// Filter input if password prompt was detected
 			dataToWrite = s.passwordFilter.FilterInput(data)
 			if len(dataToWrite) != len(data) || string(dataToWrite) != string(data) {
@@ -580,13 +616,14 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		}
 	}
 
-	// Write timing info
+	// Write timing info using integer format matching C sudo_logsrvd: "%d %lld.%09d %zu\n"
 	delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
 	s.cumulativeDelay[streamName] += delayDur
 
-	timingRecord := fmt.Sprintf("%d %.9f %d\n",
+	timingRecord := fmt.Sprintf("%d %d.%09d %d\n",
 		streamInfo.marker,
-		delayDur.Seconds(),
+		delay.TvSec,
+		delay.TvNsec,
 		len(data))
 	slog.Debug("Writing timing entry", "log_id", s.logID, "stream", streamName, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
@@ -610,8 +647,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
-	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
-	timingRecord := fmt.Sprintf("%d %.9f %d %d\n", IO_EVENT_WINSIZE, delay.Seconds(), event.Rows, event.Cols)
+	timingRecord := fmt.Sprintf("%d %d.%09d %d %d\n", IO_EVENT_WINSIZE, event.Delay.TvSec, event.Delay.TvNsec, event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -626,10 +662,8 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 		return nil, fmt.Errorf("invalid CommandSuspend signal: %q", event.Signal)
 	}
 
-	delay := time.Duration(event.Delay.TvSec)*time.Second + time.Duration(event.Delay.TvNsec)*time.Nanosecond
-
 	// Sudo uses marker 7 for all suspend/resume events; signal name differentiates them
-	timingRecord := fmt.Sprintf("%d %.9f %s\n", IO_EVENT_SUSPEND, delay.Seconds(), event.Signal)
+	timingRecord := fmt.Sprintf("%d %d.%09d %s\n", IO_EVENT_SUSPEND, event.Delay.TvSec, event.Delay.TvNsec, event.Signal)
 	slog.Debug("Writing suspend/resume entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
 		return nil, err
@@ -864,10 +898,14 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("failed to read existing log.json: %w", err)
 	}
 
-	// Open I/O stream files in append mode
+	// Open existing I/O stream files in append mode.
+	// stdin/ttyin may not exist (on-demand creation), so only open files that are present.
 	files := make(map[string]*os.File)
 	for streamName, streamInfo := range streamMap {
 		filePath := filepath.Join(sessionDir, streamInfo.filename)
+		if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+			continue // On-demand file not yet created, will be created on first write
+		}
 		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
 		if err != nil {
 			// Clean up already opened files

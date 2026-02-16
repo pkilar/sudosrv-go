@@ -204,8 +204,17 @@ func TestConnectionHandler(t *testing.T) {
 
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
 
-		// Client sends Accept
-		acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
+		// Client sends Accept (with required fields)
+		acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+			ExpectIobufs: true,
+			SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix(), TvNsec: 0},
+			InfoMsgs: []*pb.InfoMessage{
+				{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+				{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+				{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+				{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+			},
+		}}}
 		clientProc.WriteClientMessage(acceptMsg)
 		clientProc.ReadServerMessage()
 
@@ -688,8 +697,17 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 
 	clientProc := protocol.NewProcessor(clientConn, clientConn)
 
-	// Start a session with AcceptMessage
-	acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{ExpectIobufs: true}}}
+	// Start a session with AcceptMessage (must include required fields)
+	acceptMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+		ExpectIobufs: true,
+		SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix(), TvNsec: 0},
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}}}
 	clientProc.WriteClientMessage(acceptMsg)
 	clientProc.ReadServerMessage() // Read log_id
 
@@ -741,6 +759,214 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 			t.Errorf("Message %d: expected '%s', got '%s'", i, expected, messagesReceived[i])
 		}
 	}
+}
+
+func TestClientHelloValidation(t *testing.T) {
+	t.Run("EmptyClientIdRejected", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				Mode:        "local",
+				IdleTimeout: 1 * time.Second,
+				ServerID:    "TestSrv",
+			},
+		}
+
+		handler := NewHandler(serverConn, cfg)
+		go handler.Handle()
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+		// Send ClientHello with empty client_id
+		helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: ""}}}
+		if err := clientProc.WriteClientMessage(helloMsg); err != nil {
+			t.Fatalf("Client failed to write Hello: %v", err)
+		}
+
+		// Should receive an error response
+		resp, err := clientProc.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("Client failed to read response: %v", err)
+		}
+		if resp.GetError() == "" {
+			t.Fatal("Expected error response for empty client_id, got non-error")
+		}
+
+		serverConn.Close()
+	})
+
+	t.Run("ValidClientIdAccepted", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				Mode:        "local",
+				IdleTimeout: 1 * time.Second,
+				ServerID:    "TestSrv",
+			},
+		}
+
+		handler := NewHandler(serverConn, cfg)
+		go handler.Handle()
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+		// Send ClientHello with valid client_id
+		helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "sudo 1.9.14p2"}}}
+		if err := clientProc.WriteClientMessage(helloMsg); err != nil {
+			t.Fatalf("Client failed to write Hello: %v", err)
+		}
+
+		resp, err := clientProc.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("Client failed to read response: %v", err)
+		}
+		if resp.GetHello() == nil {
+			t.Fatal("Expected ServerHello response")
+		}
+
+		serverConn.Close()
+	})
+}
+
+func TestRequiredFieldValidation(t *testing.T) {
+	requiredFields := []string{"submituser", "submithost", "runuser", "command"}
+
+	for _, missingField := range requiredFields {
+		t.Run("Missing_"+missingField, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+
+			tmpDir := t.TempDir()
+			cfg := &config.Config{
+				Server: config.ServerConfig{
+					Mode:        "local",
+					IdleTimeout: 1 * time.Second,
+					ServerID:    "TestSrv",
+				},
+				LocalStorage: config.LocalStorageConfig{
+					LogDirectory:    tmpDir,
+					DirPermissions:  0755,
+					FilePermissions: 0644,
+				},
+			}
+
+			handler := NewHandler(serverConn, cfg)
+			go handler.Handle()
+
+			clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+			// Build InfoMsgs with one required field missing
+			allFields := map[string]string{
+				"submituser": "testuser",
+				"submithost": "testhost",
+				"runuser":    "root",
+				"command":    "/bin/ls",
+			}
+
+			var infoMsgs []*pb.InfoMessage
+			for key, val := range allFields {
+				if key == missingField {
+					continue // Skip the one we're testing
+				}
+				infoMsgs = append(infoMsgs, &pb.InfoMessage{
+					Key:   key,
+					Value: &pb.InfoMessage_Strval{Strval: val},
+				})
+			}
+
+			acceptMsg := &pb.ClientMessage{
+				Type: &pb.ClientMessage_AcceptMsg{
+					AcceptMsg: &pb.AcceptMessage{
+						SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix(), TvNsec: 0},
+						ExpectIobufs: true,
+						InfoMsgs:     infoMsgs,
+					},
+				},
+			}
+			if err := clientProc.WriteClientMessage(acceptMsg); err != nil {
+				t.Fatalf("Client failed to write AcceptMsg: %v", err)
+			}
+
+			// Should receive an error response
+			resp, err := clientProc.ReadServerMessage()
+			if err != nil {
+				t.Fatalf("Client failed to read response: %v", err)
+			}
+			if resp.GetError() == "" {
+				t.Fatalf("Expected error response for missing %s, got non-error", missingField)
+			}
+
+			serverConn.Close()
+		})
+	}
+
+	t.Run("AllRequiredFieldsPresent", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		tmpDir := t.TempDir()
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				Mode:        "local",
+				IdleTimeout: 1 * time.Second,
+				ServerID:    "TestSrv",
+			},
+			LocalStorage: config.LocalStorageConfig{
+				LogDirectory:    tmpDir,
+				DirPermissions:  0755,
+				FilePermissions: 0644,
+			},
+		}
+
+		handler := NewHandler(serverConn, cfg)
+
+		// Use a mock so we don't need real file I/O
+		handler.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+			return &mockSessionHandler{
+				t: t,
+				HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "test-id"}}, nil
+				},
+				CloseFn: func() error { return nil },
+			}, nil
+		}
+
+		go handler.Handle()
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+
+		acceptMsg := &pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{
+				AcceptMsg: &pb.AcceptMessage{
+					SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix(), TvNsec: 0},
+					ExpectIobufs: true,
+					InfoMsgs: []*pb.InfoMessage{
+						{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+						{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+						{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+						{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+					},
+				},
+			},
+		}
+		if err := clientProc.WriteClientMessage(acceptMsg); err != nil {
+			t.Fatalf("Client failed to write AcceptMsg: %v", err)
+		}
+
+		resp, err := clientProc.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("Client failed to read response: %v", err)
+		}
+		if resp.GetLogId() == "" {
+			t.Fatal("Expected log_id response for valid AcceptMessage")
+		}
+
+		serverConn.Close()
+	})
 }
 
 func TestSetOrUpdateInfoMessage_UpdateExisting(t *testing.T) {

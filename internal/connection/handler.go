@@ -163,6 +163,9 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 	// Handle pre-session messages
 	switch event := clientMsg.Type.(type) {
 	case *pb.ClientMessage_HelloMsg:
+		if event.HelloMsg.ClientId == "" {
+			return nil, fmt.Errorf("ClientHello missing required client_id")
+		}
 		slog.Info("Received ClientHello", "client_id", event.HelloMsg.ClientId, "remote_addr", h.conn.RemoteAddr())
 		return h.handleHello()
 
@@ -397,6 +400,19 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 
 	// Apply the three-tier runcwd fallback logic before processing
 	h.applyRuncwdFallback(acceptMsg)
+
+	// Validate required fields, matching C sudo_logsrvd behavior.
+	infoMap := make(map[string]string)
+	for _, info := range acceptMsg.InfoMsgs {
+		if strval := info.GetStrval(); strval != "" {
+			infoMap[info.GetKey()] = strval
+		}
+	}
+	for _, field := range []string{"submituser", "submithost", "runuser", "command"} {
+		if infoMap[field] == "" {
+			return nil, fmt.Errorf("AcceptMessage missing required field: %s", field)
+		}
+	}
 
 	sessionUUID := uuid.New()
 	h.logID = sessionUUID.String() // Store UUID string for logging
