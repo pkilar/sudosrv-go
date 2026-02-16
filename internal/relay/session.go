@@ -42,6 +42,7 @@ type Session struct {
 	initialAcceptMsg *pb.AcceptMessage
 	fromClientChan   chan *pb.ClientMessage
 	wg               sync.WaitGroup
+	closeOnce        sync.Once
 	cacheFileName    string
 	cumulativeDelay  map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
 	lastCommitTime   time.Time               // When last commit point was sent to client
@@ -245,9 +246,12 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 
 // Close is called by the connection handler when the client disconnects.
 // It signals the messageWriter to stop accepting new messages.
+// Safe to call multiple times; only the first call closes the channel.
 func (s *Session) Close() error {
-	slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
-	close(s.fromClientChan) // Signal the messageWriter loop to terminate.
+	s.closeOnce.Do(func() {
+		slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
+		close(s.fromClientChan) // Signal the messageWriter loop to terminate.
+	})
 
 	// Wait for goroutine to finish, but don't cancel context yet to allow natural completion
 	s.wg.Wait()
@@ -260,14 +264,14 @@ func (s *Session) Close() error {
 // ---- Standalone Flusher for Orphaned Files ----
 
 // FlushOrphanedFile connects to upstream and sends the content of a single file.
-func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
+func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
 	slog.Info("Found orphaned relay file, attempting to flush", "path", filePath)
 
 	// Rename file to prevent another process from picking it up
 	flushingFileName := filePath + flushingSuffix
 	if err := os.Rename(filePath, flushingFileName); err != nil {
 		slog.Error("Could not rename orphaned file for flushing", "path", filePath, "error", err)
-		return
+		return fmt.Errorf("could not rename orphaned file %s: %w", filePath, err)
 	}
 
 	proc, err := connectToUpstream(cfg)
@@ -276,7 +280,7 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
 		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
 			slog.Error("Failed to rename orphaned file back after connection failure", "path", flushingFileName, "error", renameErr)
 		}
-		return
+		return fmt.Errorf("failed to connect to upstream for %s: %w", filePath, err)
 	}
 
 	err = flushFile(proc, flushingFileName)
@@ -286,9 +290,10 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) {
 		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
 			slog.Error("Failed to rename orphaned file back after flush failure", "path", flushingFileName, "error", renameErr)
 		}
-		return
+		return fmt.Errorf("failed to flush orphaned file %s: %w", filePath, err)
 	}
 	slog.Info("Successfully flushed orphaned relay file", "path", flushingFileName)
+	return nil
 }
 
 func flushFile(proc protocol.Processor, filePath string) error {
@@ -330,7 +335,7 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify}
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS12}
 		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, tlsConfig)
 	} else {
 		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)
@@ -355,17 +360,21 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 }
 
 // writeProtoMessage serializes and writes a single protobuf message with its length prefix.
+// Length prefix and payload are combined into a single write for atomicity — a partial
+// write (e.g., process crash) won't leave a length prefix without a payload.
 func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
-	if _, err := w.Write(lenBuf); err != nil {
-		return err
+	l := len(data)
+	if uint32(l) > maxMessageSize {
+		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, maxMessageSize)
 	}
-	_, err = w.Write(data)
+	buf := make([]byte, 4+l)
+	binary.BigEndian.PutUint32(buf[:4], uint32(l))
+	copy(buf[4:], data)
+	_, err = w.Write(buf)
 	return err
 }
 

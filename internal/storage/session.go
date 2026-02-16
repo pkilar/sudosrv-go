@@ -477,6 +477,9 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	}
 
 	s.logMeta["server_log_id"] = s.logID // Add our own server-side log ID for reference
+	if acceptMsg.SubmitTime == nil {
+		return fmt.Errorf("AcceptMessage missing required submit_time")
+	}
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
@@ -593,6 +596,10 @@ func (s *Session) updateLogJSON() error {
 
 // writeIoEntry writes I/O data and a corresponding timing entry.
 func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byte) (*pb.ServerMessage, error) {
+	if delay == nil {
+		return nil, fmt.Errorf("missing delay in %s I/O buffer", streamName)
+	}
+
 	streamInfo, ok := streamMap[streamName]
 	if !ok {
 		return nil, fmt.Errorf("unknown stream name: %s", streamName)
@@ -670,6 +677,9 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
+	if event.Delay == nil {
+		return nil, fmt.Errorf("missing delay in ChangeWindowSize event")
+	}
 	timingRecord := fmt.Sprintf("%d %d.%09d %d %d\n", IO_EVENT_WINSIZE, event.Delay.TvSec, event.Delay.TvNsec, event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
@@ -680,6 +690,9 @@ func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, 
 }
 
 func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, error) {
+	if event.Delay == nil {
+		return nil, fmt.Errorf("missing delay in CommandSuspend event")
+	}
 	// Validate signal against allowed set, matching C sudo_logsrvd behavior.
 	if !validSuspendSignals[event.Signal] {
 		return nil, fmt.Errorf("invalid CommandSuspend signal: %q", event.Signal)

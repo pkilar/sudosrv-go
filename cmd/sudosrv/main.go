@@ -343,23 +343,22 @@ func flushOrphanedRelayFiles(cfg *config.RelayConfig) error {
 			defer func() { <-semaphore }() // Release semaphore
 
 			slog.Debug("Flushing orphaned relay file", "file", filename)
-			relay.FlushOrphanedFile(filename, cfg)
-			errChan <- nil
+			errChan <- relay.FlushOrphanedFile(filename, cfg)
 		}(file)
 	}
 
 	// Wait for all operations to complete and collect errors
-	var errors []error
+	var flushErrors []error
 	for i := 0; i < len(files); i++ {
 		if err := <-errChan; err != nil {
-			errors = append(errors, err)
+			flushErrors = append(flushErrors, err)
 		}
 	}
 
-	if len(errors) > 0 {
-		slog.Warn("Some orphaned relay files could not be flushed", "error_count", len(errors))
+	if len(flushErrors) > 0 {
+		slog.Warn("Some orphaned relay files could not be flushed", "error_count", len(flushErrors))
 		// Return first error for simplicity, but log all
-		return errors[0]
+		return flushErrors[0]
 	}
 
 	slog.Info("Successfully flushed all orphaned relay files", "count", len(files))
