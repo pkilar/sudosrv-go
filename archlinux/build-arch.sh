@@ -25,17 +25,12 @@ SOURCE_DIR="$WORK_DIR/${PACKAGE_NAME}-${VERSION}"
 mkdir -p "$SOURCE_DIR"
 
 rsync -a \
-    --exclude='.git' \
-    --exclude='rpm/RPMS' \
-    --exclude='rpm/SRPMS' \
-    --exclude='rpm/BUILD' \
-    --exclude='rpm/BUILDROOT' \
-    --exclude='rpm/SOURCES/*.tar.gz' \
-    --exclude='deb/' \
-    --exclude='debian/sudosrv/' \
-    --exclude='debian/.debhelper/' \
-    --exclude='sudosrv' \
-    --exclude='sudosrv-linux-*' \
+    --exclude='/.git' \
+    --exclude='/deb' \
+    --exclude='/debian' \
+    --exclude='/rpm' \
+    --exclude='/sudosrv' \
+    --exclude='/sudosrv-linux-*' \
     "$BUILD_ROOT/" "$SOURCE_DIR/"
 
 cd "$WORK_DIR"

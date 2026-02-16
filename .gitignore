@@ -33,6 +33,7 @@ test.coverprofile
 deb/
 /debian/.debhelper
 /debian/sudosrv
+/archlinux/pkg
 
 # OS-specific files
 .DS_Store
