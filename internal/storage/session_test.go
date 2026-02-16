@@ -162,7 +162,7 @@ func TestStorageSession(t *testing.T) {
 			t.Errorf("ttyout content mismatch: expected '%s', got '%s'", string(ttyoutData), string(content))
 		}
 
-		// Verify timing file content
+		// Verify timing file content uses integer format (seconds.nanoseconds)
 		timingFile := filepath.Join(sessDir, "timing")
 		timingContent, err := os.ReadFile(timingFile)
 		if err != nil {
@@ -171,6 +171,11 @@ func TestStorageSession(t *testing.T) {
 		expectedTiming := fmt.Sprintf("%d 1.500000000 11\n", IO_EVENT_TTYOUT)
 		if !strings.Contains(string(timingContent), expectedTiming) {
 			t.Errorf("timing file content mismatch: expected to contain '%s', got '%s'", expectedTiming, string(timingContent))
+		}
+
+		// Verify format is integer-based (N.NNNNNNNNN), not float-based
+		if strings.Contains(string(timingContent), "1.5000000") && !strings.Contains(string(timingContent), "1.500000000") {
+			t.Errorf("timing file uses float format instead of integer format: %s", string(timingContent))
 		}
 	})
 
@@ -1291,6 +1296,290 @@ func TestPathWithinBase(t *testing.T) {
 			t.Fatalf("expected %q to be rejected as outside %q", target, logRoot)
 		}
 	})
+}
+
+func TestOnDemandIoFileCreation(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	// Initialize session
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+	_, err = session.HandleClientMessage(acceptClientMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
+	}
+
+	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+
+	// stdout, stderr, ttyout should exist after initialization
+	for _, name := range []string{"stdout", "stderr", "ttyout"} {
+		if _, err := os.Stat(filepath.Join(sessDir, name)); os.IsNotExist(err) {
+			t.Errorf("Expected pre-created stream file %s to exist", name)
+		}
+	}
+
+	// stdin, ttyin should NOT exist after initialization (on-demand)
+	for _, name := range []string{"stdin", "ttyin"} {
+		if _, err := os.Stat(filepath.Join(sessDir, name)); !os.IsNotExist(err) {
+			t.Errorf("Expected on-demand stream file %s to NOT exist after init, but it does", name)
+		}
+	}
+
+	// Write to ttyin — should create the file on demand
+	ttyinMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyinBuf{
+			TtyinBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+				Data:  []byte("input"),
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(ttyinMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(TtyinBuf) failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sessDir, "ttyin")); os.IsNotExist(err) {
+		t.Error("Expected ttyin file to be created on first write")
+	}
+
+	// Write to stdin — should create the file on demand
+	stdinMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_StdinBuf{
+			StdinBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 0},
+				Data:  []byte("stdin input"),
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(stdinMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(StdinBuf) failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sessDir, "stdin")); os.IsNotExist(err) {
+		t.Error("Expected stdin file to be created on first write")
+	}
+}
+
+func TestDefaultValuesForAbsentFields(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	// Create AcceptMessage WITHOUT submitgroup, ttyname, and submitcwd
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix(), TvNsec: 0},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+			{Key: "lines", Value: &pb.InfoMessage_Numval{Numval: 24}},
+			{Key: "columns", Value: &pb.InfoMessage_Numval{Numval: 80}},
+			// Intentionally omitting: submitcwd, submitgroup, ttyname
+		},
+	}
+
+	session, err := NewSession(sessionUUID, acceptMsg, storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	// Initialize session
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}}
+	_, err = session.HandleClientMessage(acceptClientMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
+	}
+
+	// Read log.json and verify defaults
+	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+	logJSONPath := filepath.Join(sessDir, "log.json")
+	data, err := os.ReadFile(logJSONPath)
+	if err != nil {
+		t.Fatalf("Failed to read log.json: %v", err)
+	}
+	var logMeta map[string]interface{}
+	if err := json.Unmarshal(data, &logMeta); err != nil {
+		t.Fatalf("Failed to unmarshal log.json: %v", err)
+	}
+
+	for _, field := range []string{"submitcwd", "submitgroup", "ttyname"} {
+		val, ok := logMeta[field]
+		if !ok {
+			t.Errorf("Expected default value for %s in log.json, but field is missing", field)
+		} else if val != "unknown" {
+			t.Errorf("Expected %s='unknown', got '%v'", field, val)
+		}
+	}
+}
+
+func TestTimingFileIntegerFormat(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+	_, _ = session.HandleClientMessage(acceptClientMsg)
+
+	// Write I/O with specific delay values to test format
+	ttyoutMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{
+			TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 3, TvNsec: 123456789},
+				Data:  []byte("test"),
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(ttyoutMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(TtyoutBuf) failed: %v", err)
+	}
+
+	// Write winsize event
+	winsizeMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_WinsizeEvent{
+			WinsizeEvent: &pb.ChangeWindowSize{
+				Delay: &pb.TimeSpec{TvSec: 5, TvNsec: 7000000},
+				Rows:  30,
+				Cols:  120,
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(winsizeMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(WinsizeEvent) failed: %v", err)
+	}
+
+	// Write suspend event
+	suspendMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_SuspendEvent{
+			SuspendEvent: &pb.CommandSuspend{
+				Delay:  &pb.TimeSpec{TvSec: 10, TvNsec: 500000000},
+				Signal: "STOP",
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(suspendMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(SuspendEvent) failed: %v", err)
+	}
+
+	// Read and verify timing file
+	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+	timingContent, err := os.ReadFile(filepath.Join(sessDir, "timing"))
+	if err != nil {
+		t.Fatalf("Failed to read timing file: %v", err)
+	}
+
+	content := string(timingContent)
+
+	// Verify I/O entry: "4 3.123456789 4\n"
+	expectedIO := fmt.Sprintf("%d 3.123456789 4\n", IO_EVENT_TTYOUT)
+	if !strings.Contains(content, expectedIO) {
+		t.Errorf("Expected timing to contain %q, got: %s", expectedIO, content)
+	}
+
+	// Verify winsize entry: "5 5.007000000 30 120\n"
+	expectedWinsize := fmt.Sprintf("%d 5.007000000 30 120\n", IO_EVENT_WINSIZE)
+	if !strings.Contains(content, expectedWinsize) {
+		t.Errorf("Expected timing to contain %q, got: %s", expectedWinsize, content)
+	}
+
+	// Verify suspend entry: "7 10.500000000 STOP\n"
+	expectedSuspend := fmt.Sprintf("%d 10.500000000 STOP\n", IO_EVENT_SUSPEND)
+	if !strings.Contains(content, expectedSuspend) {
+		t.Errorf("Expected timing to contain %q, got: %s", expectedSuspend, content)
+	}
+}
+
+func TestPasswordFilteringStdoutStdin(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+		PasswordFilter:  true,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
+	_, _ = session.HandleClientMessage(acceptClientMsg)
+
+	// Send password prompt via stdout (non-TTY)
+	stdoutMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_StdoutBuf{
+			StdoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 100000000},
+				Data:  []byte("Password: "),
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(stdoutMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(StdoutBuf) failed: %v", err)
+	}
+
+	// Send password via stdin (non-TTY) — should be masked
+	stdinMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_StdinBuf{
+			StdinBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 200000000},
+				Data:  []byte("secret\n"),
+			},
+		},
+	}
+	_, err = session.HandleClientMessage(stdinMsg)
+	if err != nil {
+		t.Fatalf("HandleClientMessage(StdinBuf) failed: %v", err)
+	}
+
+	// Verify stdin file contains masked data, not "secret"
+	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
+	stdinContent, err := os.ReadFile(filepath.Join(sessDir, "stdin"))
+	if err != nil {
+		t.Fatalf("Failed to read stdin file: %v", err)
+	}
+
+	if strings.Contains(string(stdinContent), "secret") {
+		t.Errorf("stdin file contains unmasked password 'secret': %s", string(stdinContent))
+	}
+	// Should contain asterisks and the newline
+	if !strings.Contains(string(stdinContent), "******") {
+		t.Errorf("Expected masked content with asterisks in stdin, got: %q", string(stdinContent))
+	}
 }
 
 func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
