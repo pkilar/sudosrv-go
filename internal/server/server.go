@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
 	"sudosrv/internal/metrics"
@@ -26,7 +25,6 @@ type Server struct {
 	logLevel   *slog.LevelVar
 	waitGroup  sync.WaitGroup
 	listeners  []net.Listener
-	quit       chan struct{}
 	ctx        context.Context
 	cancel     context.CancelFunc
 }
@@ -40,7 +38,6 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 		configPath: configPath,
 		logLevel:   logLevel,
 		listeners:  make([]net.Listener, 0),
-		quit:       make(chan struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -119,9 +116,6 @@ func (s *Server) acceptLoop(listener net.Listener) {
 	for {
 		select {
 		case <-s.ctx.Done():
-			slog.Info("Stopping accept loop due to context cancellation", "address", listener.Addr())
-			return
-		case <-s.quit:
 			slog.Info("Stopping accept loop", "address", listener.Addr())
 			return
 		default:
@@ -132,9 +126,7 @@ func (s *Server) acceptLoop(listener net.Listener) {
 			// Check if the error is due to the listener being closed.
 			select {
 			case <-s.ctx.Done():
-				return // Context cancelled
-			case <-s.quit:
-				return // Normal shutdown
+				return // Context cancelled, listener was closed
 			default:
 				metrics.Global.IncrementFailedConnections()
 				slog.Error("Failed to accept connection", "error", err, "failed_connections", metrics.Global.GetFailedConnections())
@@ -182,9 +174,6 @@ func (s *Server) Wait() {
 	// Cancel context to signal all goroutines to stop
 	s.cancel()
 
-	// Signal goroutines to stop
-	close(s.quit)
-
 	// Close all listeners to unblock acceptLoop
 	for _, l := range s.listeners {
 		if err := l.Close(); err != nil {
@@ -214,7 +203,7 @@ func (s *Server) reload() {
 		if newLevelStr == "" {
 			newLevelStr = "info"
 		}
-		newLevel, err := parseLogLevel(newLevelStr)
+		newLevel, err := config.ParseLogLevel(newLevelStr)
 		if err != nil {
 			slog.Error("Config reload: invalid log level, keeping current", "level", newLevelStr, "error", err)
 		} else if s.logLevel.Level() != newLevel {
@@ -247,22 +236,6 @@ func (s *Server) reload() {
 	slog.Info("Config reload complete", "path", s.configPath)
 }
 
-// parseLogLevel converts string log level to slog.Level with validation.
-func parseLogLevel(levelStr string) (slog.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(levelStr)) {
-	case "debug":
-		return slog.LevelDebug, nil
-	case "info":
-		return slog.LevelInfo, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return slog.LevelInfo, fmt.Errorf("unknown log level: %s", levelStr)
-	}
-}
-
 // logMetricsPeriodically logs server metrics every 5 minutes for operational visibility.
 func (s *Server) logMetricsPeriodically() {
 	defer s.waitGroup.Done()
@@ -272,9 +245,6 @@ func (s *Server) logMetricsPeriodically() {
 	for {
 		select {
 		case <-s.ctx.Done():
-			slog.Info("Stopping metrics logging due to context cancellation")
-			return
-		case <-s.quit:
 			slog.Info("Stopping metrics logging")
 			return
 		case <-ticker.C:

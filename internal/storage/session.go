@@ -86,7 +86,12 @@ var validSuspendSignals = map[string]bool{
 	"TTOU": true,
 }
 
-// Per-directory mutexes for sequence file access to reduce contention
+// seqMutexMap holds per-directory mutexes for sequence file access to reduce
+// contention. Entries are never removed because the set of distinct log
+// directories is expected to be small and stable (typically one per
+// iolog_dir template). If the deployment creates directories dynamically
+// at a high rate, this map will grow unboundedly; in that scenario consider
+// adding an eviction policy.
 var seqMutexMap = make(map[string]*sync.Mutex)
 var seqMutexMapLock sync.RWMutex
 

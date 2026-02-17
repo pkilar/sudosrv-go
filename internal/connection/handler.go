@@ -71,7 +71,7 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 		return storage.NewSession(sessionUUID, acceptMsg, localCfg)
 	}
 	h.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
-		return relay.NewSession(sessionUUID, acceptMsg, relayCfg)
+		return relay.NewSession(h.ctx, sessionUUID, acceptMsg, relayCfg)
 	}
 	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
 		return storage.NewRestartSession(restartMsg, localCfg)
@@ -303,6 +303,12 @@ func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value
 
 // handleReject logs a rejected command event. In local mode, it persists a
 // log.json event record to disk. In relay mode, it only logs via slog.
+//
+// Errors during directory creation, JSON marshaling, or file writing are
+// logged and counted as message errors, but return (nil, nil) to avoid
+// tearing down the connection. Reject logging is best-effort — the client
+// has already been denied, so a server-side persistence failure should not
+// escalate into a protocol error.
 func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
 	if h.config.Server.Mode != "local" {
 		slog.Info("Reject event in non-local mode, logging only", "reason", rejectMsg.GetReason())
