@@ -44,14 +44,17 @@ type Session struct {
 	wg               sync.WaitGroup
 	closeOnce        sync.Once
 	cacheFileName    string
-	cumulativeDelay  map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
-	lastCommitTime   time.Time               // When last commit point was sent to client
+	mu               sync.Mutex               // Protects cumulativeDelay and lastCommitTime
+	cumulativeDelay  map[string]time.Duration  // Tracks cumulative I/O delay per stream for commit points
+	lastCommitTime   time.Time                // When last commit point was sent to client
 	ctx              context.Context
 	cancel           context.CancelFunc
 }
 
 // NewSession creates a new relay session handler.
-func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
+// The provided ctx is used as the parent context; cancelling it will stop the
+// session's background goroutine after the current operation completes.
+func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
 	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0750); err != nil {
 		return nil, fmt.Errorf("could not create relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
 	}
@@ -63,7 +66,7 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	// Relay has no local path, matching journal mode behavior (empty path).
 	logID := base64.StdEncoding.EncodeToString(sessionUUID[:])
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	s := &Session{
 		logID:            logID,
 		config:           cfg,
@@ -154,19 +157,28 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		return
 	}
 
-	// This loop continues until the client disconnects and the HandleClientMessage channel is closed by its owner.
-	for msg := range s.fromClientChan {
-		if err := writeProtoMessage(file, msg); err != nil {
-			slog.Error("Failed to write message to relay cache, aborting write phase", "log_id", s.logID, "error", err)
+	// This loop continues until the client disconnects (channel closed),
+	// or the session context is cancelled (e.g., server shutdown).
+	for {
+		select {
+		case msg, ok := <-s.fromClientChan:
+			if !ok {
+				// The channel was closed, meaning the client connection handler terminated.
+				return false
+			}
+			if err := writeProtoMessage(file, msg); err != nil {
+				slog.Error("Failed to write message to relay cache, aborting write phase", "log_id", s.logID, "error", err)
+				return false
+			}
+			if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
+				slog.Debug("ExitMessage received and cached. Ending write phase.", "log_id", s.logID)
+				return true
+			}
+		case <-s.ctx.Done():
+			slog.Info("Relay session write phase cancelled by context", "log_id", s.logID)
 			return false
 		}
-		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
-			slog.Debug("ExitMessage received and cached. Ending write phase.", "log_id", s.logID)
-			return true
-		}
 	}
-	// The channel was closed, meaning the client connection handler terminated.
-	return false
 }
 
 func (s *Session) calculateBackoff(attempts int) time.Duration {
@@ -224,7 +236,10 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 
 	// Generate local commit points for relay clients on I/O events,
 	// throttled to commitPointInterval matching C sudo_logsrvd behavior.
+	// Lock protects cumulativeDelay and lastCommitTime which are also
+	// read by the run() goroutine's context (indirectly via Close/wg.Wait).
 	if streamName, delay, ok := extractIoDelay(msg); ok {
+		s.mu.Lock()
 		if delay != nil {
 			delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
 			s.cumulativeDelay[streamName] += delayDur
@@ -232,6 +247,7 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		if time.Since(s.lastCommitTime) >= commitPointInterval {
 			s.lastCommitTime = time.Now()
 			commitPoint := s.cumulativeDelay[streamName]
+			s.mu.Unlock()
 			return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
 				CommitPoint: &pb.TimeSpec{
 					TvSec:  int64(commitPoint.Seconds()),
@@ -239,6 +255,7 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 				},
 			}}, nil
 		}
+		s.mu.Unlock()
 	}
 
 	return nil, nil
@@ -368,7 +385,7 @@ func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 		return err
 	}
 	l := len(data)
-	if uint32(l) > maxMessageSize {
+	if l > maxMessageSize {
 		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, maxMessageSize)
 	}
 	buf := make([]byte, 4+l)

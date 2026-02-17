@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -119,14 +120,55 @@ func applyZeroValueDefaults(cfg *Config) {
 		cfg.Relay.MaxReconnectInterval = 1 * time.Minute
 	}
 
-	// Validate permission values — must be valid Unix file modes (max 0777)
-	if cfg.LocalStorage.DirPermissions > 0o777 {
-		slog.Warn("dir_permissions exceeds maximum 0777; YAML 1.2 treats 0750 as decimal — use 0o750 for octal",
-			"value", cfg.LocalStorage.DirPermissions)
+	// YAML 1.2 (gopkg.in/yaml.v3) treats 0750 as decimal 750, not octal.
+	// Auto-correct values where all digits are 0-7, which strongly indicates
+	// the user intended octal (e.g., decimal 750 → octal 0750 = 488).
+	cfg.LocalStorage.DirPermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.DirPermissions, "dir_permissions")
+	cfg.LocalStorage.FilePermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.FilePermissions, "file_permissions")
+}
+
+// reinterpretDecimalAsOctal detects values where YAML 1.2 parsed an intended
+// octal literal (e.g., 0750) as decimal 750 and converts it to the correct
+// octal value (0o750 = 488). Only converts when every decimal digit is 0-7,
+// which is a strong signal the user intended octal notation. Values already
+// within 0-0o777 (0-511) are returned unchanged.
+func reinterpretDecimalAsOctal(val uint32, fieldName string) uint32 {
+	if val <= 0o777 {
+		return val // Already a valid permission value
 	}
-	if cfg.LocalStorage.FilePermissions > 0o777 {
-		slog.Warn("file_permissions exceeds maximum 0777; YAML 1.2 treats 0640 as decimal — use 0o640 for octal",
-			"value", cfg.LocalStorage.FilePermissions)
+	// Check if all decimal digits are 0-7 (i.e., looks like an octal literal)
+	tmp := val
+	var octalVal uint32
+	multiplier := uint32(1)
+	for tmp > 0 {
+		digit := tmp % 10
+		if digit > 7 {
+			// Contains 8 or 9 — not an octal literal, just a bad value
+			slog.Warn(fmt.Sprintf("%s value %d exceeds maximum 0777 and contains non-octal digits; please use quoted octal (e.g., 0o750)", fieldName, val))
+			return val
+		}
+		octalVal += digit * multiplier
+		multiplier *= 8
+		tmp /= 10
+	}
+	slog.Warn(fmt.Sprintf("%s: auto-corrected YAML 1.2 decimal %d to octal 0o%o (%d); consider using quoted 0o notation in config", fieldName, val, octalVal, octalVal))
+	return octalVal
+}
+
+// ParseLogLevel converts a string log level to slog.Level with validation.
+// Exported for use by main.go and server.go to avoid duplication.
+func ParseLogLevel(levelStr string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(levelStr)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unknown log level: %s (supported: debug, info, warn, error)", levelStr)
 	}
 }
 

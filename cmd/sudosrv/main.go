@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/relay"
 	"sudosrv/internal/server"
@@ -199,7 +198,7 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 		logLevelStr = logLevelOverride
 	}
 
-	parsedLevel, err := parseLogLevel(logLevelStr)
+	parsedLevel, err := config.ParseLogLevel(logLevelStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid log level: %w", err)
 	}
@@ -231,22 +230,6 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 		"source_enabled", handlerOpts.AddSource)
 
 	return logLevel, nil
-}
-
-// parseLogLevel converts string log level to slog.Level with validation
-func parseLogLevel(levelStr string) (slog.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(levelStr)) {
-	case "debug":
-		return slog.LevelDebug, nil
-	case "info":
-		return slog.LevelInfo, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return slog.LevelInfo, fmt.Errorf("unknown log level: %s (supported: debug, info, warn, error)", levelStr)
-	}
 }
 
 // initializeRelayMode handles relay-specific initialization
