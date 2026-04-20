@@ -213,14 +213,11 @@ func (s *Session) calculateBackoff(attempts int) time.Duration {
 	if maxInterval <= 0 {
 		maxInterval = time.Minute
 	}
-	exp := attempts
-	if exp > maxBackoffExponent {
-		exp = maxBackoffExponent
-	}
-	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(exp))
-	if backoff > float64(maxInterval) {
-		backoff = float64(maxInterval)
-	}
+	exp := min(attempts, maxBackoffExponent)
+	backoff := min(
+		float64(initialReconnectInterval)*math.Pow(2, float64(exp)),
+		float64(maxInterval),
+	)
 	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2).
 	// math/rand/v2 is auto-seeded per-process and safe for concurrent use.
 	half := time.Duration(backoff) / 2
