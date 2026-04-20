@@ -498,6 +498,9 @@ func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 	if l > protocol.MaxMessageSize {
 		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, protocol.MaxMessageSize)
 	}
+	if l > math.MaxInt-4 {
+		return fmt.Errorf("message too large: length %d overflows framed allocation", l)
+	}
 	buf := make([]byte, 4+l)
 	binary.BigEndian.PutUint32(buf[:4], uint32(l))
 	copy(buf[4:], data)
