@@ -36,7 +36,7 @@ type Session struct {
 	files           map[string]*os.File
 	gzipWriters     map[string]*gzip.Writer // Gzip writers for compressed streams
 	timingFile      *os.File
-	logJSONFile     *os.File
+	logJSONPath     string // path to log.json; writes go through writeFileAtomic
 	cumulativeDelay map[string]time.Duration
 	logMeta         map[string]interface{}
 	passwordFilter  *PasswordFilter // Password filtering for security
@@ -456,10 +456,6 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 			for _, f := range s.files {
 				f.Close()
 			}
-			if s.logJSONFile != nil {
-				s.logJSONFile.Close()
-				s.logJSONFile = nil
-			}
 			if s.timingFile != nil {
 				s.timingFile.Close()
 				s.timingFile = nil
@@ -544,13 +540,9 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	}
 	slog.Debug("Opened timing file for session", "log_id", s.logID, "path", timingFilePath)
 
-	// Create and initialize log.json file
-	logJSONPath := filepath.Join(s.sessionDir, "log.json")
-	s.logJSONFile, err = os.OpenFile(logJSONPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
-	if err != nil {
-		return fmt.Errorf("failed to create log.json file: %w", err)
-	}
-	slog.Debug("Created log.json file for session", "log_id", s.logID, "path", logJSONPath)
+	// Register the log.json path; writes go through writeFileAtomic.
+	s.logJSONPath = filepath.Join(s.sessionDir, "log.json")
+	slog.Debug("Registered log.json path for session", "log_id", s.logID, "path", s.logJSONPath)
 
 	// Write initial metadata to log.json
 	if err := s.updateLogJSON(); err != nil {
@@ -591,30 +583,47 @@ func (s *Session) ensureStreamFile(streamName string) error {
 	return nil
 }
 
-// updateLogJSON writes the current metadata to the log.json file incrementally.
-func (s *Session) updateLogJSON() error {
-	if s.logJSONFile == nil {
-		return fmt.Errorf("log.json file not initialized")
+// updateLogJSON writes the current metadata to log.json atomically.
+// A crash mid-write can only leave either the old or new complete file on
+// disk — never an empty or partial one. Implementation: marshal → write to
+// sibling ".tmp" → fsync → rename. The rename is atomic on POSIX when source
+// and destination are on the same filesystem.
+func (s *Session) updateLogJSON() (err error) {
+	if s.logJSONPath == "" {
+		return fmt.Errorf("log.json path not initialized")
 	}
 
-	// Seek to the beginning of the file and truncate it
-	if _, err := s.logJSONFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek to beginning of log.json: %w", err)
+	data, err := json.MarshalIndent(s.logMeta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode JSON for log.json: %w", err)
 	}
-	if err := s.logJSONFile.Truncate(0); err != nil {
-		return fmt.Errorf("failed to truncate log.json: %w", err)
-	}
+	data = append(data, '\n')
 
-	// Write the updated metadata
-	encoder := json.NewEncoder(s.logJSONFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(s.logMeta); err != nil {
-		return fmt.Errorf("failed to encode JSON to log.json: %w", err)
+	tmpPath := s.logJSONPath + ".tmp"
+	// Clobber any stale tempfile from a prior interrupted write.
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	if err != nil {
+		return fmt.Errorf("failed to open log.json tempfile: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmpPath) // best-effort cleanup on failure
+		}
+	}()
 
-	// Flush the data to disk
-	if err := s.logJSONFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync log.json: %w", err)
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to write log.json tempfile: %w", err)
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to fsync log.json tempfile: %w", err)
+	}
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("failed to close log.json tempfile: %w", err)
+	}
+	if err = os.Rename(tmpPath, s.logJSONPath); err != nil {
+		return fmt.Errorf("failed to rename log.json tempfile into place: %w", err)
 	}
 
 	slog.Debug("Updated log.json", "log_id", s.logID)
@@ -945,22 +954,22 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
 	}
 
-	// Open log.json for reading existing metadata and subsequent updates
+	// Read existing log.json. O_NOFOLLOW guards against symlink swap between
+	// session finalize and restart; the subsequent atomic rewrite uses
+	// writeFileAtomic.
 	logJSONPath := filepath.Join(sessionDir, "log.json")
-	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDWR|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		timingFile.Close()
 		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
 	}
-
-	// Read existing metadata
 	logMeta := make(map[string]interface{})
-	decoder := json.NewDecoder(logJSONFile)
-	if err := decoder.Decode(&logMeta); err != nil {
-		timingFile.Close()
+	if err := json.NewDecoder(logJSONFile).Decode(&logMeta); err != nil {
 		logJSONFile.Close()
+		timingFile.Close()
 		return nil, fmt.Errorf("failed to read existing log.json: %w", err)
 	}
+	logJSONFile.Close()
 
 	// Open existing I/O stream files in append mode.
 	// stdin/ttyin may not exist (on-demand creation), so only open files that are present.
@@ -1003,7 +1012,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		cumulativeDelay: cumulativeDelay,
 		logMeta:         logMeta,
 		timingFile:      timingFile,
-		logJSONFile:     logJSONFile,
+		logJSONPath:     logJSONPath,
 		isInitialized:   true, // Already initialized from existing session
 	}
 
@@ -1096,18 +1105,12 @@ func (s *Session) Close() error {
 			}
 		}
 
-		// Then close the underlying file handles
+		// Then close the underlying file handles. log.json has no persistent
+		// fd — updateLogJSON writes it atomically by tempfile + rename.
 		for name, f := range s.files {
 			slog.Debug("Closing stream file", "log_id", s.logID, "stream", name)
 			if err := f.Close(); err != nil {
 				slog.Error("Failed to close stream file", "log_id", s.logID, "stream", name, "error", err)
-				lastErr = err
-			}
-		}
-		if s.logJSONFile != nil {
-			slog.Debug("Closing log.json file", "log_id", s.logID)
-			if err := s.logJSONFile.Close(); err != nil {
-				slog.Error("Failed to close log.json file", "log_id", s.logID, "error", err)
 				lastErr = err
 			}
 		}
@@ -1122,7 +1125,6 @@ func (s *Session) Close() error {
 		// Nil out to prevent use-after-close
 		s.files = nil
 		s.gzipWriters = nil
-		s.logJSONFile = nil
 		s.timingFile = nil
 		slog.Info("Closed all log files for session", "log_id", s.logID)
 	})

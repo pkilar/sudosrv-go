@@ -233,6 +233,10 @@ func (s *Server) reload() {
 		slog.Error("Config reload failed: could not load config", "path", s.configPath, "error", err)
 		return
 	}
+	if err := config.Validate(newCfg); err != nil {
+		slog.Error("Config reload rejected: validation failed; keeping previous config", "path", s.configPath, "error", err)
+		return
+	}
 
 	oldCfg := s.config.Load()
 

@@ -11,7 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,9 +32,6 @@ const (
 	FlushingSuffix = ".flushing"
 	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
 	commitPointInterval = 10 * time.Second
-	// maxMessageSize is the maximum allowed protobuf message size (2MB),
-	// matching the protocol spec in internal/protocol/processor.go.
-	maxMessageSize = 2 * 1024 * 1024
 )
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
@@ -224,10 +221,11 @@ func (s *Session) calculateBackoff(attempts int) time.Duration {
 	if backoff > float64(maxInterval) {
 		backoff = float64(maxInterval)
 	}
-	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2)
+	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2).
+	// math/rand/v2 is auto-seeded per-process and safe for concurrent use.
 	half := time.Duration(backoff) / 2
 	if half > 0 {
-		return half + time.Duration(rand.Int63n(int64(half)))
+		return half + time.Duration(rand.Int64N(int64(half)))
 	}
 	return time.Duration(backoff)
 }
@@ -426,8 +424,19 @@ func flushFile(proc protocol.Processor, filePath string) error {
 
 	for {
 		msg, err := readProtoMessage(f)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// All messages sent successfully — now safe to remove the cache file
+			if removeErr := os.Remove(filePath); removeErr != nil {
+				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
+			}
+			return nil
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			// Truncated tail (e.g., crash mid-write). Treat as end-of-stream for
+			// flush purposes so the file can be removed and recovery doesn't loop
+			// forever on corrupt trailing bytes.
+			slog.Warn("Cache file has truncated trailing record; flushing what was read",
+				"path", filePath, "error", err)
 			if removeErr := os.Remove(filePath); removeErr != nil {
 				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
 			}
@@ -489,8 +498,8 @@ func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 		return err
 	}
 	l := len(data)
-	if l > maxMessageSize {
-		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, maxMessageSize)
+	if l > protocol.MaxMessageSize {
+		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, protocol.MaxMessageSize)
 	}
 	buf := make([]byte, 4+l)
 	binary.BigEndian.PutUint32(buf[:4], uint32(l))
@@ -506,8 +515,8 @@ func readProtoMessage(r io.Reader) (*pb.ClientMessage, error) {
 		return nil, err
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
-	if msgLen > maxMessageSize {
-		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, maxMessageSize)
+	if msgLen > protocol.MaxMessageSize {
+		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, protocol.MaxMessageSize)
 	}
 	data := make([]byte, msgLen)
 	if _, err := io.ReadFull(r, data); err != nil {

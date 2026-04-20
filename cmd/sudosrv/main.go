@@ -155,43 +155,10 @@ func loadAndValidateConfig(configPath string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// validateConfiguration performs comprehensive configuration validation
+// validateConfiguration delegates to config.Validate so the same rules apply
+// to SIGHUP reload (see server.reload).
 func validateConfiguration(cfg *config.Config) error {
-	// Validate server mode
-	if cfg.Server.Mode != "local" && cfg.Server.Mode != "relay" {
-		return fmt.Errorf("invalid server mode: %s (must be 'local' or 'relay')", cfg.Server.Mode)
-	}
-
-	// Validate listen addresses
-	if cfg.Server.ListenAddress == "" && cfg.Server.ListenAddressTLS == "" {
-		return errors.New("at least one listen address must be configured")
-	}
-
-	// Validate TLS configuration
-	if cfg.Server.ListenAddressTLS != "" {
-		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
-			return errors.New("TLS certificate and key files must be specified for TLS listener")
-		}
-	}
-
-	// Validate relay-specific configuration
-	if cfg.Server.Mode == "relay" {
-		if cfg.Relay.UpstreamHost == "" {
-			return errors.New("upstream_host must be configured in relay mode")
-		}
-		if cfg.Relay.RelayCacheDirectory == "" {
-			return errors.New("relay_cache_directory must be configured in relay mode")
-		}
-	}
-
-	// Reject permission combinations that would expose sudo transcripts.
-	if cfg.Server.Mode == "local" {
-		if err := config.ValidatePermissions(&cfg.LocalStorage); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return config.Validate(cfg)
 }
 
 // setupStructuredLogging configures logging with enhanced options.

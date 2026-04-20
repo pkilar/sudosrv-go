@@ -132,6 +132,37 @@ func applyZeroValueDefaults(cfg *Config) {
 	cfg.LocalStorage.FilePermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.FilePermissions, "file_permissions")
 }
 
+// Validate performs structural and security validation on a loaded Config.
+// Called at startup and on SIGHUP reload so an incoherent reload can be
+// rejected without clobbering the running server's view of the world.
+func Validate(cfg *Config) error {
+	if cfg.Server.Mode != "local" && cfg.Server.Mode != "relay" {
+		return fmt.Errorf("invalid server mode: %s (must be 'local' or 'relay')", cfg.Server.Mode)
+	}
+	if cfg.Server.ListenAddress == "" && cfg.Server.ListenAddressTLS == "" {
+		return fmt.Errorf("at least one listen address must be configured")
+	}
+	if cfg.Server.ListenAddressTLS != "" {
+		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
+			return fmt.Errorf("TLS certificate and key files must be specified for TLS listener")
+		}
+	}
+	if cfg.Server.Mode == "relay" {
+		if cfg.Relay.UpstreamHost == "" {
+			return fmt.Errorf("upstream_host must be configured in relay mode")
+		}
+		if cfg.Relay.RelayCacheDirectory == "" {
+			return fmt.Errorf("relay_cache_directory must be configured in relay mode")
+		}
+	}
+	if cfg.Server.Mode == "local" {
+		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ValidatePermissions rejects permission combinations that would expose sudo
 // session transcripts to unprivileged users. Returns an error rather than a
 // warning — misconfigured permissions are a security incident waiting to
