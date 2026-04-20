@@ -104,6 +104,25 @@ func sanitizePathComponent(s string) string {
 	return strings.ReplaceAll(s, "/", "")
 }
 
+// writeNewFile is a symlink- and clobber-safe replacement for os.WriteFile used
+// for files that a session creates from scratch. O_EXCL refuses pre-existing
+// files and O_NOFOLLOW refuses to follow a symlink at the final path component,
+// blocking the classic symlink-redirect attack when sessionDir contains
+// attacker-controlled escape substitutions.
+func writeNewFile(path string, data []byte, perm os.FileMode) (err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, perm)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	_, err = f.Write(data)
+	return err
+}
+
 // containsDotDot checks whether a path contains a ".." component,
 // matching C sudo_logsrvd's contains_dot_dot() check.
 func containsDotDot(path string) bool {
@@ -489,8 +508,11 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
 	// --- Write the UUID file (matches C sudo_logsrvd's iolog_store_uuid) ---
+	// O_EXCL|O_NOFOLLOW refuses to overwrite pre-existing files and refuses to
+	// follow symlinks at the final path component — defends against a local
+	// attacker pre-planting a symlink inside a predictable sessionDir.
 	uuidPath := filepath.Join(s.sessionDir, "uuid")
-	if err := os.WriteFile(uuidPath, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeNewFile(uuidPath, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to write uuid file: %w", err)
 	}
 	slog.Debug("Created UUID file", "log_id", s.logID, "path", uuidPath)
@@ -508,7 +530,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 		infoMap["submitcwd"],
 		infoMap["command"],
 	)
-	if err := os.WriteFile(logSummaryPath, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeNewFile(logSummaryPath, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
@@ -516,7 +538,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	// --- Create timing and I/O stream files and initialize log.json ---
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
 	var err error
-	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
@@ -524,7 +546,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 
 	// Create and initialize log.json file
 	logJSONPath := filepath.Join(s.sessionDir, "log.json")
-	s.logJSONFile, err = os.OpenFile(logJSONPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
+	s.logJSONFile, err = os.OpenFile(logJSONPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return fmt.Errorf("failed to create log.json file: %w", err)
 	}
@@ -556,7 +578,7 @@ func (s *Session) ensureStreamFile(streamName string) error {
 		return fmt.Errorf("unknown stream name: %s", streamName)
 	}
 	filePath := filepath.Join(s.sessionDir, streamInfo.filename)
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
@@ -916,15 +938,16 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("restart not supported for compressed sessions")
 	}
 
-	// Open timing file in append mode
-	timingFile, err := os.OpenFile(timingPath, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+	// Open timing file in append mode. O_NOFOLLOW guards against an attacker
+	// swapping the timing file for a symlink between session finalize and restart.
+	timingFile, err := os.OpenFile(timingPath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
 	}
 
 	// Open log.json for reading existing metadata and subsequent updates
 	logJSONPath := filepath.Join(sessionDir, "log.json")
-	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDWR, os.FileMode(cfg.FilePermissions))
+	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDWR|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
 	if err != nil {
 		timingFile.Close()
 		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
@@ -947,7 +970,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
 			continue // On-demand file not yet created, will be created on first write
 		}
-		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
 		if err != nil {
 			// Clean up already opened files
 			for _, openFile := range files {
