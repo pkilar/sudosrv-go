@@ -12,6 +12,7 @@ import (
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
 	"sudosrv/internal/metrics"
+	"sudosrv/internal/relay"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -27,6 +28,9 @@ type Server struct {
 	listeners  []net.Listener
 	ctx        context.Context
 	cancel     context.CancelFunc
+	// connSem is a counting semaphore that caps the number of concurrent client
+	// connections. nil when unbounded (MaxConnections <= 0).
+	connSem chan struct{}
 }
 
 // NewServer creates a new server instance.
@@ -42,6 +46,9 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 		cancel:     cancel,
 	}
 	s.config.Store(cfg)
+	if max := cfg.Server.MaxConnections; max > 0 {
+		s.connSem = make(chan struct{}, max)
+	}
 	return s, nil
 }
 
@@ -74,7 +81,7 @@ func (s *Server) Start() error {
 		}
 		tlsConfig := &tls.Config{
 			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+			MinVersion:   tls.VersionTLS13,
 		}
 
 		tlsListener, err := tls.Listen("tcp", cfg.Server.ListenAddressTLS, tlsConfig)
@@ -95,6 +102,18 @@ func (s *Server) Start() error {
 	// Start metrics logging goroutine
 	s.waitGroup.Add(1)
 	go s.logMetricsPeriodically()
+
+	// Kick off orphan recovery for relay mode under the server's lifecycle
+	// so shutdown cancels any in-flight flush and waits for it to unwind.
+	if cfg.Server.Mode == "relay" {
+		s.waitGroup.Add(1)
+		go func() {
+			defer s.waitGroup.Done()
+			if err := relay.RecoverOrphans(s.ctx, &cfg.Relay); err != nil {
+				slog.Error("Orphan relay recovery reported errors", "error", err)
+			}
+		}()
+	}
 
 	return nil
 }
@@ -135,6 +154,23 @@ func (s *Server) acceptLoop(listener net.Listener) {
 			}
 			continue
 		}
+
+		// Enforce the connection cap, if configured. We attempt a non-blocking
+		// acquire first so an oversubscribed server rejects the connection
+		// immediately rather than queueing and tying up the peer's socket.
+		if s.connSem != nil {
+			select {
+			case s.connSem <- struct{}{}:
+			default:
+				metrics.Global.IncrementFailedConnections()
+				slog.Warn("Connection limit reached, rejecting new connection",
+					"remote_addr", conn.RemoteAddr(),
+					"limit", cap(s.connSem),
+					"failed_connections", metrics.Global.GetFailedConnections())
+				_ = conn.Close()
+				continue
+			}
+		}
 		metrics.Global.IncrementConnections()
 		slog.Info("Accepted new connection", "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr(),
 			"total_connections", metrics.Global.GetTotalConnections(), "active_connections", metrics.Global.GetActiveConnections())
@@ -142,6 +178,9 @@ func (s *Server) acceptLoop(listener net.Listener) {
 		s.waitGroup.Add(1)
 		go func() {
 			defer func() {
+				if s.connSem != nil {
+					<-s.connSem
+				}
 				s.waitGroup.Done()
 				metrics.Global.DecrementActiveConnections()
 			}()
@@ -158,6 +197,7 @@ func (s *Server) acceptLoop(listener net.Listener) {
 func (s *Server) Wait() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigChan)
 
 	for sig := range sigChan {
 		if sig == syscall.SIGHUP {
@@ -192,6 +232,10 @@ func (s *Server) reload() {
 	newCfg, err := config.LoadConfig(s.configPath)
 	if err != nil {
 		slog.Error("Config reload failed: could not load config", "path", s.configPath, "error", err)
+		return
+	}
+	if err := config.Validate(newCfg); err != nil {
+		slog.Error("Config reload rejected: validation failed; keeping previous config", "path", s.configPath, "error", err)
 		return
 	}
 

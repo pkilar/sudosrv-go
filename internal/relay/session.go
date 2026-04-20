@@ -6,11 +6,12 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,12 +27,11 @@ import (
 
 const (
 	initialReconnectInterval = time.Second
-	flushingSuffix           = ".flushing"
+	// FlushingSuffix is appended to a cache file while it is being flushed upstream.
+	// Exported so startup orphan recovery can identify mid-flush files.
+	FlushingSuffix = ".flushing"
 	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
 	commitPointInterval = 10 * time.Second
-	// maxMessageSize is the maximum allowed protobuf message size (2MB),
-	// matching the protocol spec in internal/protocol/processor.go.
-	maxMessageSize = 2 * 1024 * 1024
 )
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
@@ -126,10 +126,27 @@ func (s *Session) run() {
 		}
 
 		// Connection successful, now flush the file.
+		// Install a watchdog goroutine: if ctx cancels while we're blocked on
+		// upstream network I/O (which doesn't observe ctx), closing the processor
+		// forces any in-flight read/write to return with an error so run() can exit.
 		slog.Info("Upstream connection successful, flushing cache.", "log_id", s.logID, "file", s.cacheFileName)
+		watchdogDone := make(chan struct{})
+		go func() {
+			select {
+			case <-s.ctx.Done():
+				proc.Close()
+			case <-watchdogDone:
+			}
+		}()
 		err = flushFile(proc, s.cacheFileName)
-		proc.Close() // Always close the connection after flush attempt
+		close(watchdogDone)
+		proc.Close() // Idempotent close; safe after watchdog may have already closed.
 		if err != nil {
+			// If ctx was cancelled, the error is expected (we closed the conn).
+			if s.ctx.Err() != nil {
+				slog.Info("Relay flush aborted due to session cancellation", "log_id", s.logID)
+				return
+			}
 			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
 		} else {
 			slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
@@ -149,7 +166,12 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		slog.Error("CRITICAL: could not open cache file. Relay data for this session will be lost.", "log_id", s.logID, "error", err)
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Sync(); err != nil {
+			slog.Error("Failed to fsync relay cache file", "log_id", s.logID, "error", err)
+		}
+		file.Close()
+	}()
 
 	// Write the essential AcceptMessage first to ensure the cache file is valid for flushing.
 	if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
@@ -157,13 +179,13 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		return
 	}
 
-	// This loop continues until the client disconnects (channel closed),
-	// or the session context is cancelled (e.g., server shutdown).
+	// Loop until the session context is cancelled (server shutdown), the client
+	// channel is closed (connection handler exited), or an ExitMessage arrives.
 	for {
 		select {
 		case msg, ok := <-s.fromClientChan:
 			if !ok {
-				// The channel was closed, meaning the client connection handler terminated.
+				// Channel closed by Close(): the connection handler has exited.
 				return false
 			}
 			if err := writeProtoMessage(file, msg); err != nil {
@@ -181,19 +203,26 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 	}
 }
 
+// maxBackoffExponent caps the math.Pow(2, n) input to keep backoff from
+// overflowing float64 into +Inf during infinite-reconnect runs. 2^62ns is
+// already ~146 years — well past any realistic maxInterval.
+const maxBackoffExponent = 62
+
 func (s *Session) calculateBackoff(attempts int) time.Duration {
 	maxInterval := s.config.MaxReconnectInterval
 	if maxInterval <= 0 {
 		maxInterval = time.Minute
 	}
-	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(attempts))
-	if backoff > float64(maxInterval) {
-		backoff = float64(maxInterval)
-	}
-	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2)
+	exp := min(attempts, maxBackoffExponent)
+	backoff := min(
+		float64(initialReconnectInterval)*math.Pow(2, float64(exp)),
+		float64(maxInterval),
+	)
+	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2).
+	// math/rand/v2 is auto-seeded per-process and safe for concurrent use.
 	half := time.Duration(backoff) / 2
 	if half > 0 {
-		return half + time.Duration(rand.Int63n(int64(half)))
+		return half + time.Duration(rand.Int64N(int64(half)))
 	}
 	return time.Duration(backoff)
 }
@@ -261,31 +290,101 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	return nil, nil
 }
 
-// Close is called by the connection handler when the client disconnects.
-// It signals the messageWriter to stop accepting new messages.
-// Safe to call multiple times; only the first call closes the channel.
+// Close is called by the connection handler when the client disconnects. It
+// signals the write-phase loop that no more messages will arrive, allowing any
+// flush already in progress (phase 2) to complete naturally. Server shutdown
+// propagates via the parent context: when s.ctx cancels during phase-2 flush,
+// the watchdog installed in run() closes the upstream conn to abort blocked
+// network I/O. Safe to call multiple times.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
-		close(s.fromClientChan) // Signal the messageWriter loop to terminate.
+		close(s.fromClientChan)
 	})
-
-	// Wait for goroutine to finish, but don't cancel context yet to allow natural completion
 	s.wg.Wait()
-
-	// Now cancel context for cleanup
-	s.cancel()
+	s.cancel() // release the context's resources
 	return nil
 }
 
 // ---- Standalone Flusher for Orphaned Files ----
+
+// RecoverOrphans scans the relay cache directory for files left behind by prior
+// sessions (crash, shutdown mid-flush, or server restart with pending flush) and
+// replays them upstream. It handles two classes of files:
+//
+//   - *.log.flushing: renamed back to *.log so the normal recovery path picks them up
+//   - *.log: flushed upstream with bounded concurrency
+//
+// The supplied context governs goroutine lifetime; cancelling it aborts pending
+// flushes (the underlying cache file stays on disk for a future recovery pass).
+func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
+	slog.Info("Scanning for orphaned relay cache files", "directory", cfg.RelayCacheDirectory)
+
+	// Restore any mid-flush files from a prior crash by renaming them back to *.log.
+	flushingPattern := filepath.Join(cfg.RelayCacheDirectory, "*.log"+FlushingSuffix)
+	flushingFiles, err := filepath.Glob(flushingPattern)
+	if err != nil {
+		return fmt.Errorf("failed to scan for in-flight relay files: %w", err)
+	}
+	for _, f := range flushingFiles {
+		restored := f[:len(f)-len(FlushingSuffix)]
+		if err := os.Rename(f, restored); err != nil {
+			slog.Error("Failed to recover mid-flush cache file", "path", f, "error", err)
+			continue
+		}
+		slog.Info("Recovered mid-flush cache file for retry", "from", f, "to", restored)
+	}
+
+	pattern := filepath.Join(cfg.RelayCacheDirectory, "*.log")
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to scan relay cache directory: %w", err)
+	}
+	if len(files) == 0 {
+		slog.Info("No orphaned relay files found")
+		return nil
+	}
+	slog.Info("Found orphaned relay files", "count", len(files))
+
+	const maxConcurrentFlushes = 5
+	semaphore := make(chan struct{}, maxConcurrentFlushes)
+	errChan := make(chan error, len(files))
+
+	for _, file := range files {
+		go func(filename string) {
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				errChan <- ctx.Err()
+				return
+			}
+			defer func() { <-semaphore }()
+
+			slog.Debug("Flushing orphaned relay file", "file", filename)
+			errChan <- FlushOrphanedFile(filename, cfg)
+		}(file)
+	}
+
+	var flushErrors []error
+	for i := 0; i < len(files); i++ {
+		if err := <-errChan; err != nil {
+			flushErrors = append(flushErrors, err)
+		}
+	}
+	if len(flushErrors) > 0 {
+		slog.Warn("Some orphaned relay files could not be flushed", "error_count", len(flushErrors))
+		return errors.Join(flushErrors...)
+	}
+	slog.Info("Successfully flushed all orphaned relay files", "count", len(files))
+	return nil
+}
 
 // FlushOrphanedFile connects to upstream and sends the content of a single file.
 func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
 	slog.Info("Found orphaned relay file, attempting to flush", "path", filePath)
 
 	// Rename file to prevent another process from picking it up
-	flushingFileName := filePath + flushingSuffix
+	flushingFileName := filePath + FlushingSuffix
 	if err := os.Rename(filePath, flushingFileName); err != nil {
 		slog.Error("Could not rename orphaned file for flushing", "path", filePath, "error", err)
 		return fmt.Errorf("could not rename orphaned file %s: %w", filePath, err)
@@ -322,8 +421,19 @@ func flushFile(proc protocol.Processor, filePath string) error {
 
 	for {
 		msg, err := readProtoMessage(f)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// All messages sent successfully — now safe to remove the cache file
+			if removeErr := os.Remove(filePath); removeErr != nil {
+				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
+			}
+			return nil
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			// Truncated tail (e.g., crash mid-write). Treat as end-of-stream for
+			// flush purposes so the file can be removed and recovery doesn't loop
+			// forever on corrupt trailing bytes.
+			slog.Warn("Cache file has truncated trailing record; flushing what was read",
+				"path", filePath, "error", err)
 			if removeErr := os.Remove(filePath); removeErr != nil {
 				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
 			}
@@ -352,7 +462,7 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS12}
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS13}
 		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, tlsConfig)
 	} else {
 		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)
@@ -385,8 +495,8 @@ func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
 		return err
 	}
 	l := len(data)
-	if l > maxMessageSize {
-		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, maxMessageSize)
+	if l > protocol.MaxMessageSize {
+		return fmt.Errorf("message too large: length %d exceeds limit of %d", l, protocol.MaxMessageSize)
 	}
 	buf := make([]byte, 4+l)
 	binary.BigEndian.PutUint32(buf[:4], uint32(l))
@@ -402,8 +512,8 @@ func readProtoMessage(r io.Reader) (*pb.ClientMessage, error) {
 		return nil, err
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
-	if msgLen > maxMessageSize {
-		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, maxMessageSize)
+	if msgLen > protocol.MaxMessageSize {
+		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, protocol.MaxMessageSize)
 	}
 	data := make([]byte, msgLen)
 	if _, err := io.ReadFull(r, data); err != nil {

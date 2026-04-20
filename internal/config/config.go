@@ -27,6 +27,7 @@ type ServerConfig struct {
 	TLSKeyFile                string        `yaml:"tls_key_file"`
 	ServerID                  string        `yaml:"server_id"`
 	IdleTimeout               time.Duration `yaml:"idle_timeout"`
+	MaxConnections            int           `yaml:"max_connections"`             // 0 disables the cap
 	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
 
@@ -61,6 +62,7 @@ func LoadConfig(path string) (*Config, error) {
 			ListenAddress:             "127.0.0.1:30343",
 			ServerID:                  "GoSudoLogSrv/1.0",
 			IdleTimeout:               10 * time.Minute,
+			MaxConnections:            10000,
 			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
@@ -107,6 +109,9 @@ func applyZeroValueDefaults(cfg *Config) {
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 10 * time.Minute
 	}
+	if cfg.Server.MaxConnections < 0 {
+		cfg.Server.MaxConnections = 0
+	}
 	if cfg.LocalStorage.DirPermissions == 0 {
 		cfg.LocalStorage.DirPermissions = 0750
 	}
@@ -125,6 +130,58 @@ func applyZeroValueDefaults(cfg *Config) {
 	// the user intended octal (e.g., decimal 750 → octal 0750 = 488).
 	cfg.LocalStorage.DirPermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.DirPermissions, "dir_permissions")
 	cfg.LocalStorage.FilePermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.FilePermissions, "file_permissions")
+}
+
+// Validate performs structural and security validation on a loaded Config.
+// Called at startup and on SIGHUP reload so an incoherent reload can be
+// rejected without clobbering the running server's view of the world.
+func Validate(cfg *Config) error {
+	if cfg.Server.Mode != "local" && cfg.Server.Mode != "relay" {
+		return fmt.Errorf("invalid server mode: %s (must be 'local' or 'relay')", cfg.Server.Mode)
+	}
+	if cfg.Server.ListenAddress == "" && cfg.Server.ListenAddressTLS == "" {
+		return fmt.Errorf("at least one listen address must be configured")
+	}
+	if cfg.Server.ListenAddressTLS != "" {
+		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
+			return fmt.Errorf("TLS certificate and key files must be specified for TLS listener")
+		}
+	}
+	if cfg.Server.Mode == "relay" {
+		if cfg.Relay.UpstreamHost == "" {
+			return fmt.Errorf("upstream_host must be configured in relay mode")
+		}
+		if cfg.Relay.RelayCacheDirectory == "" {
+			return fmt.Errorf("relay_cache_directory must be configured in relay mode")
+		}
+	}
+	if cfg.Server.Mode == "local" {
+		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidatePermissions rejects permission combinations that would expose sudo
+// session transcripts to unprivileged users. Returns an error rather than a
+// warning — misconfigured permissions are a security incident waiting to
+// happen and should block startup.
+func ValidatePermissions(cfg *LocalStorageConfig) error {
+	// World-writable (o+w, 0002) on any session artefact lets another local
+	// user tamper with audit logs.
+	if cfg.DirPermissions&0002 != 0 {
+		return fmt.Errorf("dir_permissions 0%o is world-writable; refusing to start", cfg.DirPermissions)
+	}
+	if cfg.FilePermissions&0002 != 0 {
+		return fmt.Errorf("file_permissions 0%o is world-writable; refusing to start", cfg.FilePermissions)
+	}
+	// World-readable (o+r, 0004) on file permissions exposes sudo transcripts
+	// (which may contain sensitive command output) to any local user.
+	if cfg.FilePermissions&0004 != 0 {
+		return fmt.Errorf("file_permissions 0%o is world-readable; sudo transcripts may contain secrets — refusing to start", cfg.FilePermissions)
+	}
+	return nil
 }
 
 // reinterpretDecimalAsOctal detects values where YAML 1.2 parsed an intended

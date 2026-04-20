@@ -11,7 +11,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const maxMessageSize = 2 * 1024 * 1024 // 2MB, as per sudo_logsrv.proto spec
+// MaxMessageSize is the maximum allowed length-prefixed protobuf message size
+// (2 MiB), as per the sudo_logsrv.proto specification. Exported so downstream
+// packages (relay, tests) can enforce the same limit without re-declaring it.
+const MaxMessageSize = 2 * 1024 * 1024
 
 // Processor handles reading and writing length-prefixed protobuf messages.
 type Processor interface {
@@ -54,8 +57,8 @@ func (p *processor) readMessage(reader io.Reader) ([]byte, error) {
 	}
 
 	msgLen := binary.BigEndian.Uint32(lenBuf)
-	if msgLen > maxMessageSize {
-		return nil, fmt.Errorf("message size %d exceeds limit of %d", msgLen, maxMessageSize)
+	if msgLen > MaxMessageSize {
+		return nil, fmt.Errorf("message size %d exceeds limit of %d", msgLen, MaxMessageSize)
 	}
 
 	msgBuf := make([]byte, msgLen)
@@ -103,8 +106,8 @@ func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	if len(outBytes) > maxMessageSize {
-		return fmt.Errorf("outgoing message size %d exceeds limit of %d", len(outBytes), maxMessageSize)
+	if len(outBytes) > MaxMessageSize {
+		return fmt.Errorf("outgoing message size %d exceeds limit of %d", len(outBytes), MaxMessageSize)
 	}
 
 	// Combine length prefix and payload into a single write for atomicity

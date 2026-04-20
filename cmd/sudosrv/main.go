@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sudosrv/internal/config"
-	"sudosrv/internal/relay"
 	"sudosrv/internal/server"
 	"time"
 )
@@ -157,36 +155,10 @@ func loadAndValidateConfig(configPath string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// validateConfiguration performs comprehensive configuration validation
+// validateConfiguration delegates to config.Validate so the same rules apply
+// to SIGHUP reload (see server.reload).
 func validateConfiguration(cfg *config.Config) error {
-	// Validate server mode
-	if cfg.Server.Mode != "local" && cfg.Server.Mode != "relay" {
-		return fmt.Errorf("invalid server mode: %s (must be 'local' or 'relay')", cfg.Server.Mode)
-	}
-
-	// Validate listen addresses
-	if cfg.Server.ListenAddress == "" && cfg.Server.ListenAddressTLS == "" {
-		return errors.New("at least one listen address must be configured")
-	}
-
-	// Validate TLS configuration
-	if cfg.Server.ListenAddressTLS != "" {
-		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
-			return errors.New("TLS certificate and key files must be specified for TLS listener")
-		}
-	}
-
-	// Validate relay-specific configuration
-	if cfg.Server.Mode == "relay" {
-		if cfg.Relay.UpstreamHost == "" {
-			return errors.New("upstream_host must be configured in relay mode")
-		}
-		if cfg.Relay.RelayCacheDirectory == "" {
-			return errors.New("relay_cache_directory must be configured in relay mode")
-		}
-	}
-
-	return nil
+	return config.Validate(cfg)
 }
 
 // setupStructuredLogging configures logging with enhanced options.
@@ -232,7 +204,9 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 	return logLevel, nil
 }
 
-// initializeRelayMode handles relay-specific initialization
+// initializeRelayMode handles relay-specific filesystem setup.
+// Orphaned file recovery is started by the Server during Start(), so it runs
+// under the server's waitGroup and context (see server.Server.Start).
 func initializeRelayMode(cfg *config.Config) error {
 	if cfg.Server.Mode != "relay" {
 		return nil
@@ -240,17 +214,15 @@ func initializeRelayMode(cfg *config.Config) error {
 
 	slog.Info("Initializing relay mode", "cache_directory", cfg.Relay.RelayCacheDirectory)
 
-	// Ensure cache directory exists
+	if cfg.Relay.UseTLS && cfg.Relay.TLSSkipVerify {
+		slog.Warn("INSECURE: relay.tls_skip_verify is enabled — upstream TLS certificate validation is DISABLED. "+
+			"This exposes sudo session transcripts to man-in-the-middle attacks and MUST only be used for testing.",
+			"upstream_host", cfg.Relay.UpstreamHost)
+	}
+
 	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0750); err != nil {
 		return fmt.Errorf("failed to create relay cache directory: %w", err)
 	}
-
-	// Start orphaned file cleanup in background
-	go func() {
-		if err := flushOrphanedRelayFiles(&cfg.Relay); err != nil {
-			slog.Error("Failed to flush orphaned relay files", "error", err)
-		}
-	}()
 
 	return nil
 }
@@ -277,16 +249,19 @@ func runServerWithGracefulShutdown(cfg *config.Config, configPath string, logLev
 	return nil
 }
 
-// handleApplicationError provides centralized error handling with appropriate exit codes
+// handleApplicationError provides centralized error handling with appropriate exit codes.
 func handleApplicationError(err error) {
-	var exitCode int
+	var (
+		ce *configError
+		se *serverError
+	)
 
-	// Determine appropriate exit code based on error type
+	var exitCode int
 	switch {
-	case errors.As(err, new(*configError)):
+	case errors.As(err, &ce):
 		exitCode = exitConfig
 		slog.Error("Configuration error", "error", err)
-	case errors.As(err, new(*serverError)):
+	case errors.As(err, &se):
 		exitCode = exitServer
 		slog.Error("Server error", "error", err)
 	default:
@@ -297,53 +272,3 @@ func handleApplicationError(err error) {
 	os.Exit(exitCode)
 }
 
-// flushOrphanedRelayFiles cleans up orphaned relay cache files with enhanced error handling
-func flushOrphanedRelayFiles(cfg *config.RelayConfig) error {
-	slog.Info("Scanning for orphaned relay cache files", "directory", cfg.RelayCacheDirectory)
-
-	// Use more specific pattern and handle potential errors
-	pattern := filepath.Join(cfg.RelayCacheDirectory, "*.log")
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return fmt.Errorf("failed to scan relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
-	}
-
-	if len(files) == 0 {
-		slog.Info("No orphaned relay files found")
-		return nil
-	}
-
-	slog.Info("Found orphaned relay files", "count", len(files))
-
-	// Process files with controlled concurrency and error tracking
-	const maxConcurrentFlushes = 5
-	semaphore := make(chan struct{}, maxConcurrentFlushes)
-	errChan := make(chan error, len(files))
-
-	for _, file := range files {
-		go func(filename string) {
-			semaphore <- struct{}{}        // Acquire semaphore
-			defer func() { <-semaphore }() // Release semaphore
-
-			slog.Debug("Flushing orphaned relay file", "file", filename)
-			errChan <- relay.FlushOrphanedFile(filename, cfg)
-		}(file)
-	}
-
-	// Wait for all operations to complete and collect errors
-	var flushErrors []error
-	for i := 0; i < len(files); i++ {
-		if err := <-errChan; err != nil {
-			flushErrors = append(flushErrors, err)
-		}
-	}
-
-	if len(flushErrors) > 0 {
-		slog.Warn("Some orphaned relay files could not be flushed", "error_count", len(flushErrors))
-		// Return first error for simplicity, but log all
-		return flushErrors[0]
-	}
-
-	slog.Info("Successfully flushed all orphaned relay files", "count", len(files))
-	return nil
-}
