@@ -206,12 +206,21 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 	}
 }
 
+// maxBackoffExponent caps the math.Pow(2, n) input to keep backoff from
+// overflowing float64 into +Inf during infinite-reconnect runs. 2^62ns is
+// already ~146 years — well past any realistic maxInterval.
+const maxBackoffExponent = 62
+
 func (s *Session) calculateBackoff(attempts int) time.Duration {
 	maxInterval := s.config.MaxReconnectInterval
 	if maxInterval <= 0 {
 		maxInterval = time.Minute
 	}
-	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(attempts))
+	exp := attempts
+	if exp > maxBackoffExponent {
+		exp = maxBackoffExponent
+	}
+	backoff := float64(initialReconnectInterval) * math.Pow(2, float64(exp))
 	if backoff > float64(maxInterval) {
 		backoff = float64(maxInterval)
 	}
@@ -447,7 +456,7 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS12}
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS13}
 		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, tlsConfig)
 	} else {
 		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)

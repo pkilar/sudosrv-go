@@ -132,6 +132,27 @@ func applyZeroValueDefaults(cfg *Config) {
 	cfg.LocalStorage.FilePermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.FilePermissions, "file_permissions")
 }
 
+// ValidatePermissions rejects permission combinations that would expose sudo
+// session transcripts to unprivileged users. Returns an error rather than a
+// warning — misconfigured permissions are a security incident waiting to
+// happen and should block startup.
+func ValidatePermissions(cfg *LocalStorageConfig) error {
+	// World-writable (o+w, 0002) on any session artefact lets another local
+	// user tamper with audit logs.
+	if cfg.DirPermissions&0002 != 0 {
+		return fmt.Errorf("dir_permissions 0%o is world-writable; refusing to start", cfg.DirPermissions)
+	}
+	if cfg.FilePermissions&0002 != 0 {
+		return fmt.Errorf("file_permissions 0%o is world-writable; refusing to start", cfg.FilePermissions)
+	}
+	// World-readable (o+r, 0004) on file permissions exposes sudo transcripts
+	// (which may contain sensitive command output) to any local user.
+	if cfg.FilePermissions&0004 != 0 {
+		return fmt.Errorf("file_permissions 0%o is world-readable; sudo transcripts may contain secrets — refusing to start", cfg.FilePermissions)
+	}
+	return nil
+}
+
 // reinterpretDecimalAsOctal detects values where YAML 1.2 parsed an intended
 // octal literal (e.g., 0750) as decimal 750 and converts it to the correct
 // octal value (0o750 = 488). Only converts when every decimal digit is 0-7,

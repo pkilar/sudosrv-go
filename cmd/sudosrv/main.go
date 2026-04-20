@@ -184,6 +184,13 @@ func validateConfiguration(cfg *config.Config) error {
 		}
 	}
 
+	// Reject permission combinations that would expose sudo transcripts.
+	if cfg.Server.Mode == "local" {
+		if err := config.ValidatePermissions(&cfg.LocalStorage); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -239,6 +246,12 @@ func initializeRelayMode(cfg *config.Config) error {
 	}
 
 	slog.Info("Initializing relay mode", "cache_directory", cfg.Relay.RelayCacheDirectory)
+
+	if cfg.Relay.UseTLS && cfg.Relay.TLSSkipVerify {
+		slog.Warn("INSECURE: relay.tls_skip_verify is enabled — upstream TLS certificate validation is DISABLED. "+
+			"This exposes sudo session transcripts to man-in-the-middle attacks and MUST only be used for testing.",
+			"upstream_host", cfg.Relay.UpstreamHost)
+	}
 
 	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0750); err != nil {
 		return fmt.Errorf("failed to create relay cache directory: %w", err)
