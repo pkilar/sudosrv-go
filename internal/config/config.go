@@ -27,6 +27,7 @@ type ServerConfig struct {
 	TLSKeyFile                string        `yaml:"tls_key_file"`
 	ServerID                  string        `yaml:"server_id"`
 	IdleTimeout               time.Duration `yaml:"idle_timeout"`
+	MaxConnections            int           `yaml:"max_connections"`             // 0 disables the cap
 	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
 
@@ -61,6 +62,7 @@ func LoadConfig(path string) (*Config, error) {
 			ListenAddress:             "127.0.0.1:30343",
 			ServerID:                  "GoSudoLogSrv/1.0",
 			IdleTimeout:               10 * time.Minute,
+			MaxConnections:            10000,
 			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
@@ -106,6 +108,9 @@ func LoadConfig(path string) (*Config, error) {
 func applyZeroValueDefaults(cfg *Config) {
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 10 * time.Minute
+	}
+	if cfg.Server.MaxConnections < 0 {
+		cfg.Server.MaxConnections = 0
 	}
 	if cfg.LocalStorage.DirPermissions == 0 {
 		cfg.LocalStorage.DirPermissions = 0750

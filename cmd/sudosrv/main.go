@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sudosrv/internal/config"
-	"sudosrv/internal/relay"
 	"sudosrv/internal/server"
 	"time"
 )
@@ -232,7 +230,9 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 	return logLevel, nil
 }
 
-// initializeRelayMode handles relay-specific initialization
+// initializeRelayMode handles relay-specific filesystem setup.
+// Orphaned file recovery is started by the Server during Start(), so it runs
+// under the server's waitGroup and context (see server.Server.Start).
 func initializeRelayMode(cfg *config.Config) error {
 	if cfg.Server.Mode != "relay" {
 		return nil
@@ -240,17 +240,9 @@ func initializeRelayMode(cfg *config.Config) error {
 
 	slog.Info("Initializing relay mode", "cache_directory", cfg.Relay.RelayCacheDirectory)
 
-	// Ensure cache directory exists
 	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0750); err != nil {
 		return fmt.Errorf("failed to create relay cache directory: %w", err)
 	}
-
-	// Start orphaned file cleanup in background
-	go func() {
-		if err := flushOrphanedRelayFiles(&cfg.Relay); err != nil {
-			slog.Error("Failed to flush orphaned relay files", "error", err)
-		}
-	}()
 
 	return nil
 }
@@ -297,53 +289,3 @@ func handleApplicationError(err error) {
 	os.Exit(exitCode)
 }
 
-// flushOrphanedRelayFiles cleans up orphaned relay cache files with enhanced error handling
-func flushOrphanedRelayFiles(cfg *config.RelayConfig) error {
-	slog.Info("Scanning for orphaned relay cache files", "directory", cfg.RelayCacheDirectory)
-
-	// Use more specific pattern and handle potential errors
-	pattern := filepath.Join(cfg.RelayCacheDirectory, "*.log")
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return fmt.Errorf("failed to scan relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
-	}
-
-	if len(files) == 0 {
-		slog.Info("No orphaned relay files found")
-		return nil
-	}
-
-	slog.Info("Found orphaned relay files", "count", len(files))
-
-	// Process files with controlled concurrency and error tracking
-	const maxConcurrentFlushes = 5
-	semaphore := make(chan struct{}, maxConcurrentFlushes)
-	errChan := make(chan error, len(files))
-
-	for _, file := range files {
-		go func(filename string) {
-			semaphore <- struct{}{}        // Acquire semaphore
-			defer func() { <-semaphore }() // Release semaphore
-
-			slog.Debug("Flushing orphaned relay file", "file", filename)
-			errChan <- relay.FlushOrphanedFile(filename, cfg)
-		}(file)
-	}
-
-	// Wait for all operations to complete and collect errors
-	var flushErrors []error
-	for i := 0; i < len(files); i++ {
-		if err := <-errChan; err != nil {
-			flushErrors = append(flushErrors, err)
-		}
-	}
-
-	if len(flushErrors) > 0 {
-		slog.Warn("Some orphaned relay files could not be flushed", "error_count", len(flushErrors))
-		// Return first error for simplicity, but log all
-		return flushErrors[0]
-	}
-
-	slog.Info("Successfully flushed all orphaned relay files", "count", len(files))
-	return nil
-}

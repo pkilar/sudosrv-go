@@ -31,10 +31,10 @@ type Handler struct {
 	logID     string
 	session   SessionHandler
 	isTLS     bool
-	// Rate limiting
-	messageCount    int64
-	lastMessageTime time.Time
-	rateLimitMutex  sync.Mutex
+	// Rate limiting: token bucket refilled at rateRefillPerSec up to rateBurst.
+	rateTokens     float64
+	rateLastRefill time.Time
+	rateLimitMutex sync.Mutex
 	// sessionFactories allows for injecting mock session creators during tests.
 	sessionFactories struct {
 		newLocalStorageSession func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
@@ -42,6 +42,13 @@ type Handler struct {
 		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 	}
 }
+
+// Rate limiter parameters. A single client connection is allowed to sustain
+// rateRefillPerSec messages per second with room for a short burst of rateBurst.
+const (
+	rateRefillPerSec = 100.0
+	rateBurst        = 100.0
+)
 
 // SessionHandler defines the interface for handling session data (either locally or by relay).
 type SessionHandler interface {
@@ -58,12 +65,13 @@ func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config) *Handler {
 	_, isTLS := conn.(*tls.Conn)
 	h := &Handler{
-		ctx:             ctx,
-		conn:            conn,
-		config:          cfg,
-		processor:       protocol.NewProcessorWithCloser(conn, conn, conn),
-		isTLS:           isTLS,
-		lastMessageTime: time.Now(),
+		ctx:            ctx,
+		conn:           conn,
+		config:         cfg,
+		processor:      protocol.NewProcessorWithCloser(conn, conn, conn),
+		isTLS:          isTLS,
+		rateTokens:     rateBurst,
+		rateLastRefill: time.Now(),
 	}
 
 	// Initialize factories to point to the real session creation functions.
@@ -215,30 +223,28 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
 
-// checkRateLimit implements simple rate limiting to prevent memory exhaustion attacks.
-// Limits to 100 messages per second per connection.
+// checkRateLimit implements token-bucket rate limiting to prevent memory
+// exhaustion attacks. Each connection is refilled at rateRefillPerSec tokens/sec
+// up to rateBurst; each processed message consumes one token. Unlike a simple
+// windowed counter, this correctly smooths bursts that straddle second boundaries.
 func (h *Handler) checkRateLimit() bool {
 	h.rateLimitMutex.Lock()
 	defer h.rateLimitMutex.Unlock()
 
 	now := time.Now()
-	timeDiff := now.Sub(h.lastMessageTime)
-
-	// Reset counter if more than 1 second has passed
-	if timeDiff >= time.Second {
-		h.messageCount = 1
-		h.lastMessageTime = now
-		return true
+	elapsed := now.Sub(h.rateLastRefill).Seconds()
+	if elapsed > 0 {
+		h.rateTokens += elapsed * rateRefillPerSec
+		if h.rateTokens > rateBurst {
+			h.rateTokens = rateBurst
+		}
+		h.rateLastRefill = now
 	}
 
-	h.messageCount++
-
-	// Allow up to 100 messages per second
-	const maxMessagesPerSecond = 100
-	if h.messageCount > maxMessagesPerSecond {
+	if h.rateTokens < 1 {
 		return false
 	}
-
+	h.rateTokens--
 	return true
 }
 
