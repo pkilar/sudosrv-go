@@ -570,6 +570,8 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 	handler := NewHandler(serverConn, cfg)
 	var mu sync.Mutex
 	messagesReceived := make([]string, 0)
+	// Signals each silent (no-response) message the mock processes.
+	silentProcessed := make(chan struct{}, 4)
 
 	// Override session factory to track messages
 	handler.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
@@ -584,9 +586,11 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "test-id"}}, nil
 				case *pb.ClientMessage_RejectMsg:
 					messagesReceived = append(messagesReceived, "reject")
+					silentProcessed <- struct{}{}
 					return nil, nil
 				case *pb.ClientMessage_AlertMsg:
 					messagesReceived = append(messagesReceived, "alert")
+					silentProcessed <- struct{}{}
 					return nil, nil
 				default:
 					return nil, nil
@@ -596,7 +600,8 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		}, nil
 	}
 
-	go handler.Handle()
+	var wg sync.WaitGroup
+	wg.Go(handler.Handle)
 
 	clientProc := protocol.NewProcessor(clientConn, clientConn)
 
@@ -634,8 +639,7 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		},
 	}
 	clientProc.WriteClientMessage(subRejectMsg)
-	// No response for reject, send another message to confirm processing
-	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+	<-silentProcessed
 
 	// Send an alert (should be routed to session)
 	alertMsg := &pb.ClientMessage{
@@ -646,10 +650,10 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		},
 	}
 	clientProc.WriteClientMessage(alertMsg)
-	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+	<-silentProcessed
 
 	serverConn.Close()
-	time.Sleep(100 * time.Millisecond) // Allow handler to process
+	wg.Wait()
 
 	// Verify all messages were routed to the active session
 	// First accept is the initial session setup, second is the sub-command

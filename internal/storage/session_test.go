@@ -877,17 +877,14 @@ func TestNoLogJSONRewriteOnIoEvents(t *testing.T) {
 	acceptClientMsg := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()}}
 	_, _ = session.HandleClientMessage(acceptClientMsg)
 
-	// Record log.json mod time after initialization
+	// Pin log.json mtime to a known past value; any subsequent write would
+	// update it to "now", detectably different even at coarse FS resolution.
 	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
 	logJSONPath := filepath.Join(sessDir, "log.json")
-	initInfo, err := os.Stat(logJSONPath)
-	if err != nil {
-		t.Fatalf("Failed to stat log.json: %v", err)
+	pinnedTime := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(logJSONPath, pinnedTime, pinnedTime); err != nil {
+		t.Fatalf("Failed to pin log.json mtime: %v", err)
 	}
-	initModTime := initInfo.ModTime()
-
-	// Wait briefly to ensure any write would produce a different mtime
-	time.Sleep(50 * time.Millisecond)
 
 	// Send I/O events, winsize, and suspend — none should update log.json
 	ioMsg := &pb.ClientMessage{
@@ -925,9 +922,9 @@ func TestNoLogJSONRewriteOnIoEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to stat log.json after events: %v", err)
 	}
-	if afterInfo.ModTime() != initModTime {
-		t.Errorf("log.json was rewritten during I/O hot path; expected modtime %v, got %v",
-			initModTime, afterInfo.ModTime())
+	if !afterInfo.ModTime().Equal(pinnedTime) {
+		t.Errorf("log.json was rewritten during I/O hot path; mtime moved from %v to %v",
+			pinnedTime, afterInfo.ModTime())
 	}
 }
 
