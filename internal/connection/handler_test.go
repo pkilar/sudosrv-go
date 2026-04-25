@@ -3,7 +3,6 @@ package connection
 
 import (
 	"encoding/json"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -37,101 +36,6 @@ func (m *mockSessionHandler) Close() error {
 		return m.CloseFn()
 	}
 	return nil
-}
-
-// mockUpstreamServer simulates a real sudo_logsrvd server for testing the relay.
-type mockUpstreamServer struct {
-	listener     net.Listener
-	wg           sync.WaitGroup
-	receivedMsgs chan *pb.ClientMessage
-	t            *testing.T
-}
-
-func newMockUpstreamServer(t *testing.T, addr string) (*mockUpstreamServer, error) {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	s := &mockUpstreamServer{
-		listener:     l,
-		receivedMsgs: make(chan *pb.ClientMessage, 100),
-		t:            t,
-	}
-	s.wg.Add(1)
-	go s.acceptLoop()
-	return s, nil
-}
-
-func (s *mockUpstreamServer) acceptLoop() {
-	defer s.wg.Done()
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			return // Listener was closed
-		}
-		s.wg.Add(1)
-		go func(c net.Conn) {
-			defer s.wg.Done()
-			s.handleConnection(c)
-		}(conn)
-	}
-}
-
-// handleConnection now robustly handles the full handshake and subsequent message flush.
-func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	proc := protocol.NewProcessor(conn, conn)
-
-	// 1. Handle handshake from connectToUpstream
-	if _, err := proc.ReadClientMessage(); err != nil { // Read ClientHello
-		s.t.Logf("Mock server: failed to read ClientHello: %v", err)
-		return
-	}
-	if err := proc.WriteServerMessage(&pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: &pb.ServerHello{}}}); err != nil {
-		s.t.Logf("Mock server: failed to write ServerHello: %v", err)
-		return
-	}
-
-	// 2. Handle the flush from flushFile.
-	// This will receive all messages from the cache file, starting with the AcceptMessage.
-	for {
-		msg, err := proc.ReadClientMessage()
-		if err != nil {
-			if err == io.EOF {
-				return // Expected when the flushing client disconnects.
-			}
-			s.t.Logf("mock upstream server read error: %v", err)
-			return
-		}
-
-		// Send to channel in a non-blocking way to avoid deadlock
-		select {
-		case s.receivedMsgs <- msg:
-		default:
-			s.t.Logf("Mock server: receivedMsgs channel full, dropping message")
-		}
-
-		// Respond like a real server would to keep the client happy.
-		switch msg.Type.(type) {
-		case *pb.ClientMessage_AcceptMsg:
-			if err := proc.WriteServerMessage(&pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "mock-log-id"}}); err != nil {
-				s.t.Logf("Mock server: failed to write LogId response: %v", err)
-				return
-			}
-		case *pb.ClientMessage_ExitMsg:
-			return // Exit after processing exit message
-		}
-	}
-}
-
-func (s *mockUpstreamServer) Close() {
-	s.listener.Close()
-	s.wg.Wait()
-	close(s.receivedMsgs)
-}
-
-func (s *mockUpstreamServer) Addr() string {
-	return s.listener.Addr().String()
 }
 
 func TestConnectionHandler(t *testing.T) {
