@@ -229,7 +229,7 @@ func (s *Server) Wait() {
 // updated at runtime. New connections pick up the updated config; existing
 // connections continue with the config they were created with.
 func (s *Server) reload() {
-	newCfg, err := config.LoadConfig(s.configPath)
+	newCfg, err := config.LoadConfigRequired(s.configPath)
 	if err != nil {
 		slog.Error("Config reload failed: could not load config", "path", s.configPath, "error", err)
 		return
@@ -240,6 +240,12 @@ func (s *Server) reload() {
 	}
 
 	oldCfg := s.config.Load()
+	if reason := restartRequiredReloadChange(oldCfg, newCfg); reason != "" {
+		slog.Error("Config reload rejected: change requires restart; keeping previous config",
+			"path", s.configPath,
+			"reason", reason)
+		return
+	}
 
 	// Update log level dynamically
 	if s.logLevel != nil {
@@ -257,27 +263,29 @@ func (s *Server) reload() {
 		}
 	}
 
-	// Warn about changes that require a restart
-	if oldCfg.Server.ListenAddress != newCfg.Server.ListenAddress {
-		slog.Warn("Config reload: listen_address changed; restart required to take effect",
-			"old", oldCfg.Server.ListenAddress, "new", newCfg.Server.ListenAddress)
-	}
-	if oldCfg.Server.ListenAddressTLS != newCfg.Server.ListenAddressTLS {
-		slog.Warn("Config reload: listen_address_tls changed; restart required to take effect",
-			"old", oldCfg.Server.ListenAddressTLS, "new", newCfg.Server.ListenAddressTLS)
-	}
-	if oldCfg.Server.TLSCertFile != newCfg.Server.TLSCertFile || oldCfg.Server.TLSKeyFile != newCfg.Server.TLSKeyFile {
-		slog.Warn("Config reload: TLS certificate/key changed; restart required to take effect")
-	}
-	if oldCfg.Server.Mode != newCfg.Server.Mode {
-		slog.Warn("Config reload: server mode changed; restart required to take effect",
-			"old", oldCfg.Server.Mode, "new", newCfg.Server.Mode)
-	}
-
 	// Update config pointer — new connections will use the new config
 	s.config.Store(newCfg)
 
 	slog.Info("Config reload complete", "path", s.configPath)
+}
+
+func restartRequiredReloadChange(oldCfg, newCfg *config.Config) string {
+	switch {
+	case oldCfg.Server.Mode != newCfg.Server.Mode:
+		return fmt.Sprintf("server.mode changed from %q to %q", oldCfg.Server.Mode, newCfg.Server.Mode)
+	case oldCfg.Server.ListenAddress != newCfg.Server.ListenAddress:
+		return fmt.Sprintf("server.listen_address changed from %q to %q", oldCfg.Server.ListenAddress, newCfg.Server.ListenAddress)
+	case oldCfg.Server.ListenAddressTLS != newCfg.Server.ListenAddressTLS:
+		return fmt.Sprintf("server.listen_address_tls changed from %q to %q", oldCfg.Server.ListenAddressTLS, newCfg.Server.ListenAddressTLS)
+	case oldCfg.Server.TLSCertFile != newCfg.Server.TLSCertFile:
+		return "server.tls_cert_file changed"
+	case oldCfg.Server.TLSKeyFile != newCfg.Server.TLSKeyFile:
+		return "server.tls_key_file changed"
+	case oldCfg.Server.MaxConnections != newCfg.Server.MaxConnections:
+		return fmt.Sprintf("server.max_connections changed from %d to %d", oldCfg.Server.MaxConnections, newCfg.Server.MaxConnections)
+	default:
+		return ""
+	}
 }
 
 // logMetricsPeriodically logs server metrics every 5 minutes for operational visibility.

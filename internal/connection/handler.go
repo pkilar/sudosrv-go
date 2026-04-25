@@ -407,12 +407,6 @@ func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessag
 
 // handleAccept sets up a session for an accepted command.
 func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
-	if !acceptMsg.ExpectIobufs {
-		// Event-only logging, no session needed.
-		slog.Info("Handling event-only log (no I/O buffers expected)", "remote_addr", h.conn.RemoteAddr())
-		return nil, nil // No server response required for event-only logs
-	}
-
 	// Apply the three-tier runcwd fallback logic before processing
 	h.applyRuncwdFallback(acceptMsg)
 
@@ -432,6 +426,10 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	sessionUUID := uuid.New()
 	h.logID = sessionUUID.String() // Store UUID string for logging
 	var err error
+
+	if !acceptMsg.ExpectIobufs {
+		return h.handleEventOnlyAccept(sessionUUID, acceptMsg)
+	}
 
 	// Initialize the correct session handler based on server mode
 	switch h.config.Server.Mode {
@@ -462,4 +460,36 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	// The first message to the session handler is the AcceptMessage itself
 	// to allow it to initialize and send back the initial log_id.
 	return h.session.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}})
+}
+
+func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
+	slog.Info("Handling event-only log (no I/O buffers expected)", "remote_addr", h.conn.RemoteAddr())
+
+	switch h.config.Server.Mode {
+	case "local":
+		session, err := storage.NewEventSession(sessionUUID, acceptMsg, &h.config.LocalStorage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create local event-only session: %w", err)
+		}
+		h.session = session
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementLocalSessions()
+		slog.Info("Started local event-only session", "log_id", h.logID,
+			"total_sessions", metrics.Global.GetTotalSessions(), "local_sessions", metrics.Global.GetLocalSessions())
+	case "relay":
+		session, err := h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create relay event-only session: %w", err)
+		}
+		h.session = session
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementRelaySessions()
+		slog.Info("Started relay event-only session", "log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
+			"total_sessions", metrics.Global.GetTotalSessions(), "relay_sessions", metrics.Global.GetRelaySessions())
+	default:
+		return nil, fmt.Errorf("unknown server mode: %s", h.config.Server.Mode)
+	}
+
+	// sudo clients do not expect a log_id response for event-only accepts.
+	return nil, nil
 }

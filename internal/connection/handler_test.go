@@ -495,6 +495,153 @@ func TestPreSessionRejectEventLogging(t *testing.T) {
 	}
 }
 
+func TestEventOnlyAcceptLocalLogging(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "local",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+		LocalStorage: config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			IologDir:        "%{LIVEDIR}/%{user}",
+			IologFile:       "%{seq}",
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	var wg sync.WaitGroup
+	wg.Go(handler.Handle)
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+	acceptMsg := &pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{
+			AcceptMsg: &pb.AcceptMessage{
+				SubmitTime:   &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+				ExpectIobufs: false,
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+					{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+					{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/id"}},
+				},
+			},
+		},
+	}
+	if err := clientProc.WriteClientMessage(acceptMsg); err != nil {
+		t.Fatalf("Client failed to write event-only AcceptMsg: %v", err)
+	}
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 7}},
+	}); err != nil {
+		t.Fatalf("Client failed to write event-only ExitMsg: %v", err)
+	}
+
+	clientConn.Close()
+	wg.Wait()
+
+	var eventRecord map[string]any
+	filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.Name() != "log.json" {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Errorf("ReadFile(%s): %v", path, readErr)
+			return nil
+		}
+		if err := json.Unmarshal(data, &eventRecord); err != nil {
+			t.Errorf("Failed to unmarshal event-only log: %v", err)
+		}
+		return nil
+	})
+	if eventRecord == nil {
+		t.Fatal("No log.json event-only accept file was created")
+	}
+	if eventRecord["event_type"] != "accept" {
+		t.Errorf("Expected event_type 'accept', got %v", eventRecord["event_type"])
+	}
+	if eventRecord["command"] != "/bin/id" {
+		t.Errorf("Expected command '/bin/id', got %v", eventRecord["command"])
+	}
+	if eventRecord["exit_value"] != float64(7) {
+		t.Errorf("Expected exit_value 7, got %v", eventRecord["exit_value"])
+	}
+}
+
+func TestEventOnlyAcceptRelayRoutesExitWithoutLogIDResponse(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "relay",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+		Relay: config.RelayConfig{
+			UpstreamHost:        "127.0.0.1:30344",
+			RelayCacheDirectory: t.TempDir(),
+		},
+	}
+
+	handler := NewHandler(serverConn, cfg)
+	exitRouted := make(chan struct{}, 1)
+	handler.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
+		return &mockSessionHandler{
+			t: t,
+			HandleClientFn: func(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+				if msg.GetExitMsg() != nil {
+					exitRouted <- struct{}{}
+				}
+				return nil, nil
+			},
+			CloseFn: func() error { return nil },
+		}, nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(handler.Handle)
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{
+			AcceptMsg: &pb.AcceptMessage{
+				SubmitTime:   &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+				ExpectIobufs: false,
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "testuser"}},
+					{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "testhost"}},
+					{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/id"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Client failed to write event-only AcceptMsg: %v", err)
+	}
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	}); err != nil {
+		t.Fatalf("Client failed to write event-only ExitMsg: %v", err)
+	}
+
+	select {
+	case <-exitRouted:
+	case <-time.After(time.Second):
+		t.Fatal("event-only ExitMsg was not routed to relay session")
+	}
+
+	serverConn.Close()
+	wg.Wait()
+}
+
 func TestRestartMessageStartsSession(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()

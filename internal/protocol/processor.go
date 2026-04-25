@@ -2,11 +2,13 @@
 package protocol
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -19,9 +21,13 @@ const MaxMessageSize = 2 * 1024 * 1024
 // Processor handles reading and writing length-prefixed protobuf messages.
 type Processor interface {
 	ReadClientMessage() (*pb.ClientMessage, error)
+	ReadClientMessageContext(context.Context) (*pb.ClientMessage, error)
 	WriteServerMessage(*pb.ServerMessage) error
+	WriteServerMessageContext(context.Context, *pb.ServerMessage) error
 	ReadServerMessage() (*pb.ServerMessage, error)
+	ReadServerMessageContext(context.Context) (*pb.ServerMessage, error)
 	WriteClientMessage(*pb.ClientMessage) error
+	WriteClientMessageContext(context.Context, *pb.ClientMessage) error
 	Close() error
 }
 
@@ -30,6 +36,14 @@ type processor struct {
 	writer   io.Writer
 	writeMux sync.Mutex
 	closer   io.Closer // Optional closer for the underlying connection
+}
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
 }
 
 // NewProcessor creates a new protocol processor.
@@ -49,10 +63,103 @@ func NewProcessorWithCloser(r io.Reader, w io.Writer, c io.Closer) Processor {
 	}
 }
 
+func withReadContext(ctx context.Context, reader io.Reader, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	setter, ok := reader.(readDeadlineSetter)
+	if !ok {
+		err := fn()
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			_ = setter.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	err := fn()
+	close(done)
+	<-watcherDone
+	_ = setter.SetReadDeadline(time.Time{})
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func withWriteContext(ctx context.Context, writer io.Writer, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	setter, ok := writer.(writeDeadlineSetter)
+	if !ok {
+		err := fn()
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			_ = setter.SetWriteDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	err := fn()
+	close(done)
+	<-watcherDone
+	_ = setter.SetWriteDeadline(time.Time{})
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func writeFull(writer io.Writer, buf []byte) error {
+	for len(buf) > 0 {
+		n, err := writer.Write(buf)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		buf = buf[n:]
+	}
+	return nil
+}
+
 // readMessage is a generic helper to read a length-prefixed message.
-func (p *processor) readMessage(reader io.Reader) ([]byte, error) {
+func (p *processor) readMessage(ctx context.Context, reader io.Reader) ([]byte, error) {
 	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(reader, lenBuf); err != nil {
+	if err := withReadContext(ctx, reader, func() error {
+		_, err := io.ReadFull(reader, lenBuf)
+		return err
+	}); err != nil {
 		return nil, fmt.Errorf("failed to read message length: %w", err)
 	}
 
@@ -62,7 +169,10 @@ func (p *processor) readMessage(reader io.Reader) ([]byte, error) {
 	}
 
 	msgBuf := make([]byte, msgLen)
-	if _, err := io.ReadFull(reader, msgBuf); err != nil {
+	if err := withReadContext(ctx, reader, func() error {
+		_, err := io.ReadFull(reader, msgBuf)
+		return err
+	}); err != nil {
 		return nil, fmt.Errorf("failed to read message payload: %w", err)
 	}
 
@@ -71,7 +181,13 @@ func (p *processor) readMessage(reader io.Reader) ([]byte, error) {
 
 // ReadClientMessage reads one length-prefixed message from the reader and unmarshals it.
 func (p *processor) ReadClientMessage() (*pb.ClientMessage, error) {
-	msgBuf, err := p.readMessage(p.reader)
+	return p.ReadClientMessageContext(context.Background())
+}
+
+// ReadClientMessageContext reads one length-prefixed ClientMessage and aborts
+// promptly when ctx is cancelled if the underlying reader supports deadlines.
+func (p *processor) ReadClientMessageContext(ctx context.Context) (*pb.ClientMessage, error) {
+	msgBuf, err := p.readMessage(ctx, p.reader)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +202,13 @@ func (p *processor) ReadClientMessage() (*pb.ClientMessage, error) {
 
 // ReadServerMessage reads one length-prefixed message and unmarshals it as a ServerMessage.
 func (p *processor) ReadServerMessage() (*pb.ServerMessage, error) {
-	msgBuf, err := p.readMessage(p.reader)
+	return p.ReadServerMessageContext(context.Background())
+}
+
+// ReadServerMessageContext reads one length-prefixed ServerMessage and aborts
+// promptly when ctx is cancelled if the underlying reader supports deadlines.
+func (p *processor) ReadServerMessageContext(ctx context.Context) (*pb.ServerMessage, error) {
+	msgBuf, err := p.readMessage(ctx, p.reader)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +222,7 @@ func (p *processor) ReadServerMessage() (*pb.ServerMessage, error) {
 }
 
 // writeMessage is a generic helper to write a length-prefixed message.
-func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
+func (p *processor) writeMessage(ctx context.Context, writer io.Writer, msg proto.Message) error {
 	outBytes, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
@@ -115,7 +237,9 @@ func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 	binary.BigEndian.PutUint32(buf[:4], uint32(len(outBytes)))
 	copy(buf[4:], outBytes)
 
-	if _, err := writer.Write(buf); err != nil {
+	if err := withWriteContext(ctx, writer, func() error {
+		return writeFull(writer, buf)
+	}); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 	return nil
@@ -123,16 +247,28 @@ func (p *processor) writeMessage(writer io.Writer, msg proto.Message) error {
 
 // WriteServerMessage marshals a ServerMessage and writes it to the writer with a length prefix.
 func (p *processor) WriteServerMessage(msg *pb.ServerMessage) error {
+	return p.WriteServerMessageContext(context.Background(), msg)
+}
+
+// WriteServerMessageContext marshals a ServerMessage and writes it with a
+// length prefix, aborting promptly when ctx is cancelled if possible.
+func (p *processor) WriteServerMessageContext(ctx context.Context, msg *pb.ServerMessage) error {
 	p.writeMux.Lock()
 	defer p.writeMux.Unlock()
-	return p.writeMessage(p.writer, msg)
+	return p.writeMessage(ctx, p.writer, msg)
 }
 
 // WriteClientMessage marshals a ClientMessage and writes it to the writer with a length prefix.
 func (p *processor) WriteClientMessage(msg *pb.ClientMessage) error {
+	return p.WriteClientMessageContext(context.Background(), msg)
+}
+
+// WriteClientMessageContext marshals a ClientMessage and writes it with a
+// length prefix, aborting promptly when ctx is cancelled if possible.
+func (p *processor) WriteClientMessageContext(ctx context.Context, msg *pb.ClientMessage) error {
 	p.writeMux.Lock()
 	defer p.writeMux.Unlock()
-	return p.writeMessage(p.writer, msg)
+	return p.writeMessage(ctx, p.writer, msg)
 }
 
 // Close closes the underlying connection if available.

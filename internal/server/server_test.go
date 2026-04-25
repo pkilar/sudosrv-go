@@ -511,13 +511,15 @@ local_storage:
 	t.Run("MissingConfigFile", func(t *testing.T) {
 		logLevel.Set(slog.LevelError)
 		srv.configPath = filepath.Join(tmpDir, "nonexistent.yaml")
+		beforeCfg := srv.config.Load()
 
 		srv.reload()
 
-		// With the current config.LoadConfig behavior, missing file returns defaults
-		// but log level should still be updated based on the default ("info")
-		if logLevel.Level() != slog.LevelInfo {
-			t.Errorf("Expected log level INFO from defaults after missing config reload, got %s", logLevel.Level())
+		if logLevel.Level() != slog.LevelError {
+			t.Errorf("Expected log level ERROR to remain after missing config reload, got %s", logLevel.Level())
+		}
+		if got := srv.config.Load(); got != beforeCfg {
+			t.Error("Expected missing config reload to keep previous config pointer")
 		}
 
 		// Restore path
@@ -551,6 +553,90 @@ local_storage:
 			t.Errorf("Expected log level ERROR, got %s", logLevel.Level())
 		}
 	})
+}
+
+func TestReload_RejectsRestartRequiredChanges(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	initial := `server:
+  mode: "local"
+  listen_address: "127.0.0.1:30343"
+  server_id: "Initial"
+  max_connections: 10
+local_storage:
+  log_directory: "/tmp/test-logs"
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		update string
+	}{
+		{
+			name: "mode",
+			update: `server:
+  mode: "relay"
+  listen_address: "127.0.0.1:30343"
+  server_id: "Changed"
+  max_connections: 10
+relay:
+  upstream_host: "127.0.0.1:30344"
+  relay_cache_directory: "/tmp/cache"
+local_storage:
+  log_directory: "/tmp/test-logs"
+`,
+		},
+		{
+			name: "listen address",
+			update: `server:
+  mode: "local"
+  listen_address: "127.0.0.1:40404"
+  server_id: "Changed"
+  max_connections: 10
+local_storage:
+  log_directory: "/tmp/test-logs"
+`,
+		},
+		{
+			name: "max connections",
+			update: `server:
+  mode: "local"
+  listen_address: "127.0.0.1:30343"
+  server_id: "Changed"
+  max_connections: 20
+local_storage:
+  log_directory: "/tmp/test-logs"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logLevel := new(slog.LevelVar)
+			srv, err := NewServer(cfg, configPath, logLevel)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			t.Cleanup(srv.cancel)
+
+			if err := os.WriteFile(configPath, []byte(tt.update), 0600); err != nil {
+				t.Fatalf("write update: %v", err)
+			}
+			srv.reload()
+
+			loaded := srv.config.Load()
+			if loaded.Server.ServerID != "Initial" {
+				t.Errorf("ServerID after rejected reload: got %q, want Initial", loaded.Server.ServerID)
+			}
+		})
+	}
 }
 
 // --- tiny helpers (kept private to this test file) ---

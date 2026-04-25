@@ -150,6 +150,21 @@ func (s *mockUpstreamServer) Addr() string {
 	return s.listener.Addr().String()
 }
 
+func waitRelaySession(t *testing.T, session *Session, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		session.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatalf("relay session did not finish within %s", timeout)
+	}
+}
+
 func TestRelaySession_CacheAndFlush(t *testing.T) {
 	// 1. Start a mock upstream server
 	mockServer, err := newMockUpstreamServer(t, "127.0.0.1:0")
@@ -194,18 +209,7 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 	session.Close()
 
 	// 6. Wait for the session's background goroutine to finish with a timeout
-	done := make(chan struct{})
-	go func() {
-		session.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Session completed successfully
-	case <-time.After(10 * time.Second):
-		t.Fatal("Session goroutine did not complete within timeout")
-	}
+	waitRelaySession(t, session, 10*time.Second)
 
 	// 7. Verify the upstream server received the messages
 	expectedMsgCount := 4 // Accept, Ttyout1, Ttyout2, Exit
@@ -320,6 +324,7 @@ func TestRelayCommitPoints(t *testing.T) {
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
 	})
 	session.Close()
+	waitRelaySession(t, session, 2*time.Second)
 }
 
 func TestRelayCommitPointThrottling(t *testing.T) {
@@ -390,4 +395,42 @@ func TestRelayCommitPointThrottling(t *testing.T) {
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
 	})
 	session.Close()
+	waitRelaySession(t, session, 2*time.Second)
+}
+
+func TestRelaySession_CloseDoesNotWaitForFlush(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relayCfg := &config.RelayConfig{
+		RelayCacheDirectory:  tmpDir,
+		ReconnectAttempts:    -1,
+		MaxReconnectInterval: time.Second,
+		ConnectTimeout:       50 * time.Millisecond,
+		UpstreamHost:         "127.0.0.1:1",
+	}
+
+	sessionUUID := uuid.MustParse("d4e5f6a7-b8c9-4d5e-af60-2b3c4d5e6f70")
+	session, err := NewSession(ctx, sessionUUID, createTestAcceptMessage(), relayCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(ExitMsg) failed: %v", err)
+	}
+
+	start := time.Now()
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Close() waited for relay flush: elapsed=%s", elapsed)
+	}
+
+	cancel()
+	waitRelaySession(t, session, 2*time.Second)
 }

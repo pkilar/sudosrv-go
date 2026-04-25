@@ -210,6 +210,204 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	return session, nil
 }
 
+// EventSession persists accepted commands that do not have I/O buffers. These
+// commands still need an audit record and final exit status, but they should not
+// create sudoreplay stream/timing files.
+type EventSession struct {
+	logID       string
+	config      *config.LocalStorageConfig
+	sessionDir  string
+	logJSONPath string
+	logMeta     map[string]any
+	closeOnce   sync.Once
+}
+
+// NewEventSession creates a local metadata-only session for an accepted command
+// where ExpectIobufs is false.
+func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*EventSession, error) {
+	sessionDir, err := buildSessionPath(sessionUUID, cfg, acceptMsg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build event session path: %w", err)
+	}
+	relativePath := deriveLogIDRelativePath(cfg.LogDirectory, sessionDir)
+	logID := generateLogID(sessionUUID, relativePath)
+
+	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
+		return nil, fmt.Errorf("failed to create event session directory %s: %w", sessionDir, err)
+	}
+
+	event := &EventSession{
+		logID:       logID,
+		config:      cfg,
+		sessionDir:  sessionDir,
+		logJSONPath: filepath.Join(sessionDir, "log.json"),
+		logMeta:     make(map[string]any),
+	}
+	event.addInfoMessages(acceptMsg.GetInfoMsgs())
+	event.logMeta["event_type"] = "accept"
+	event.logMeta["server_log_id"] = logID
+	event.logMeta["expect_iobufs"] = false
+	if acceptMsg.SubmitTime == nil {
+		return nil, fmt.Errorf("AcceptMessage missing required submit_time")
+	}
+	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
+	event.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
+
+	uuidPath := filepath.Join(sessionDir, "uuid")
+	if err := writeNewFile(uuidPath, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
+		return nil, fmt.Errorf("failed to write event uuid file: %w", err)
+	}
+	if err := event.updateLogJSON(); err != nil {
+		return nil, fmt.Errorf("failed to write event log.json: %w", err)
+	}
+
+	slog.Info("Started local event-only session", "log_id", logID, "path", sessionDir)
+	return event, nil
+}
+
+func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_ExitMsg:
+		s.finalize(event.ExitMsg)
+		return nil, nil
+	case *pb.ClientMessage_AlertMsg:
+		alert := map[string]any{"reason": event.AlertMsg.GetReason()}
+		if alertTime := event.AlertMsg.GetAlertTime(); alertTime != nil {
+			alert["alert_time"] = time.Unix(alertTime.TvSec, int64(alertTime.TvNsec)).UTC().Format(time.RFC3339Nano)
+		}
+		info := make(map[string]any)
+		addInfoMessagesToMap(info, event.AlertMsg.GetInfoMsgs())
+		if len(info) > 0 {
+			alert["info"] = info
+		}
+		alerts, _ := s.logMeta["alerts"].([]any)
+		alerts = append(alerts, alert)
+		s.logMeta["alerts"] = alerts
+		return nil, s.updateLogJSON()
+	case *pb.ClientMessage_AcceptMsg:
+		entry := map[string]any{"event_type": "accept"}
+		addInfoMessagesToMap(entry, event.AcceptMsg.GetInfoMsgs())
+		entry["event_type"] = "accept"
+		if st := event.AcceptMsg.GetSubmitTime(); st != nil {
+			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+		}
+		subCmds, _ := s.logMeta["sub_commands"].([]any)
+		subCmds = append(subCmds, entry)
+		s.logMeta["sub_commands"] = subCmds
+		return nil, s.updateLogJSON()
+	case *pb.ClientMessage_RejectMsg:
+		entry := map[string]any{
+			"event_type": "reject",
+			"reason":     event.RejectMsg.GetReason(),
+		}
+		addInfoMessagesToMap(entry, event.RejectMsg.GetInfoMsgs())
+		entry["event_type"] = "reject"
+		entry["reason"] = event.RejectMsg.GetReason()
+		if st := event.RejectMsg.GetSubmitTime(); st != nil {
+			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+		}
+		subCmds, _ := s.logMeta["sub_commands"].([]any)
+		subCmds = append(subCmds, entry)
+		s.logMeta["sub_commands"] = subCmds
+		return nil, s.updateLogJSON()
+	default:
+		return nil, fmt.Errorf("event-only session received unexpected message type %T", event)
+	}
+}
+
+func (s *EventSession) Close() error {
+	s.closeOnce.Do(func() {
+		slog.Info("Closed local event-only session", "log_id", s.logID)
+	})
+	return nil
+}
+
+func (s *EventSession) addInfoMessages(infos []*pb.InfoMessage) {
+	addInfoMessagesToMap(s.logMeta, infos)
+}
+
+func addInfoMessagesToMap(dst map[string]any, infos []*pb.InfoMessage) {
+	for _, info := range infos {
+		key := info.GetKey()
+		if key == "" {
+			continue
+		}
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			dst[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			dst[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			dst[key] = v.Strlistval.GetStrings()
+		}
+	}
+}
+
+func (s *EventSession) finalize(exitMsg *pb.ExitMessage) {
+	s.logMeta["exit_value"] = exitMsg.GetExitValue()
+	if runTime := exitMsg.GetRunTime(); runTime != nil {
+		s.logMeta["run_time"] = struct {
+			Seconds     int64 `json:"seconds"`
+			Nanoseconds int32 `json:"nanoseconds"`
+		}{
+			Seconds:     runTime.GetTvSec(),
+			Nanoseconds: runTime.GetTvNsec(),
+		}
+	}
+	now := time.Now()
+	s.logMeta["timestamp"] = struct {
+		Seconds     int64 `json:"seconds"`
+		Nanoseconds int32 `json:"nanoseconds"`
+	}{
+		Seconds:     now.Unix(),
+		Nanoseconds: int32(now.Nanosecond()),
+	}
+	if exitMsg.GetSignal() != "" {
+		s.logMeta["signal"] = exitMsg.GetSignal()
+	}
+	if exitMsg.GetDumpedCore() {
+		s.logMeta["dumped_core"] = true
+	}
+	if err := s.updateLogJSON(); err != nil {
+		slog.Error("Failed to update event-only log.json with final exit information", "log_id", s.logID, "error", err)
+	}
+}
+
+func (s *EventSession) updateLogJSON() (err error) {
+	data, err := json.MarshalIndent(s.logMeta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode JSON for event log.json: %w", err)
+	}
+	data = append(data, '\n')
+
+	tmpPath := s.logJSONPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	if err != nil {
+		return fmt.Errorf("failed to open event log.json tempfile: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to write event log.json tempfile: %w", err)
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to fsync event log.json tempfile: %w", err)
+	}
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("failed to close event log.json tempfile: %w", err)
+	}
+	if err = os.Rename(tmpPath, s.logJSONPath); err != nil {
+		return fmt.Errorf("failed to rename event log.json tempfile into place: %w", err)
+	}
+	return nil
+}
+
 // randomAlphanumericString generates a cryptographically secure random alphanumeric string of length n.
 func randomAlphanumericString(n int) (string, error) {
 	b := make([]byte, n)
