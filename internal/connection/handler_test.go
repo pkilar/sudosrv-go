@@ -55,11 +55,7 @@ func TestConnectionHandler(t *testing.T) {
 
 		handler := NewHandler(serverConn, cfg)
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			handler.Handle()
-		}()
+		wg.Go(handler.Handle)
 
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
 
@@ -472,7 +468,7 @@ func TestPreSessionRejectEventLogging(t *testing.T) {
 		if info.Name() == "log.json" {
 			found = true
 			data, _ := os.ReadFile(path)
-			var eventRecord map[string]interface{}
+			var eventRecord map[string]any
 			if err := json.Unmarshal(data, &eventRecord); err != nil {
 				t.Errorf("Failed to unmarshal reject event log: %v", err)
 				return nil
