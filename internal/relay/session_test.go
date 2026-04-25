@@ -158,9 +158,6 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 	}
 	defer mockServer.Close()
 
-	// Give the mock server a moment to start listening
-	time.Sleep(50 * time.Millisecond)
-
 	// 2. Setup config for the relay session
 	tmpDir := t.TempDir()
 	relayCfg := &config.RelayConfig{

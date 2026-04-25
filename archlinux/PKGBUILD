@@ -7,7 +7,7 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/pkilar/sudosrv'
 license=('MIT')
 depends=('glibc')
-makedepends=('go>=1.25' 'protobuf')
+makedepends=('go>=1.26' 'protobuf')
 optdepends=('sudo: sudo client (>= 1.9.0)')
 backup=('etc/sudosrv/config.yaml'
         'etc/logrotate.d/sudosrv')

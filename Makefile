@@ -79,10 +79,10 @@ proto:
 	@echo "Generating protobuf Go code from $(PROTO_SRC_FILE)..."
 	$(PROTOC) --proto_path=$(PROTO_SRC_DIR) --go_out=$(PROTO_GO_OUT_DIR) --go_opt=paths=source_relative $(PROTO_SRC_FILE)
 
-# Run all unit tests verbosely
+# Run all unit tests verbosely with race detection
 test:
 	@echo "Running tests..."
-	$(GOTEST) -timeout 30s -v ./...
+	$(GOTEST) -race -timeout 60s -v ./...
 
 # Tidy Go module dependencies
 deps:

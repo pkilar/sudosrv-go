@@ -3,7 +3,6 @@ package connection
 
 import (
 	"encoding/json"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -39,101 +38,6 @@ func (m *mockSessionHandler) Close() error {
 	return nil
 }
 
-// mockUpstreamServer simulates a real sudo_logsrvd server for testing the relay.
-type mockUpstreamServer struct {
-	listener     net.Listener
-	wg           sync.WaitGroup
-	receivedMsgs chan *pb.ClientMessage
-	t            *testing.T
-}
-
-func newMockUpstreamServer(t *testing.T, addr string) (*mockUpstreamServer, error) {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	s := &mockUpstreamServer{
-		listener:     l,
-		receivedMsgs: make(chan *pb.ClientMessage, 100),
-		t:            t,
-	}
-	s.wg.Add(1)
-	go s.acceptLoop()
-	return s, nil
-}
-
-func (s *mockUpstreamServer) acceptLoop() {
-	defer s.wg.Done()
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			return // Listener was closed
-		}
-		s.wg.Add(1)
-		go func(c net.Conn) {
-			defer s.wg.Done()
-			s.handleConnection(c)
-		}(conn)
-	}
-}
-
-// handleConnection now robustly handles the full handshake and subsequent message flush.
-func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	proc := protocol.NewProcessor(conn, conn)
-
-	// 1. Handle handshake from connectToUpstream
-	if _, err := proc.ReadClientMessage(); err != nil { // Read ClientHello
-		s.t.Logf("Mock server: failed to read ClientHello: %v", err)
-		return
-	}
-	if err := proc.WriteServerMessage(&pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: &pb.ServerHello{}}}); err != nil {
-		s.t.Logf("Mock server: failed to write ServerHello: %v", err)
-		return
-	}
-
-	// 2. Handle the flush from flushFile.
-	// This will receive all messages from the cache file, starting with the AcceptMessage.
-	for {
-		msg, err := proc.ReadClientMessage()
-		if err != nil {
-			if err == io.EOF {
-				return // Expected when the flushing client disconnects.
-			}
-			s.t.Logf("mock upstream server read error: %v", err)
-			return
-		}
-
-		// Send to channel in a non-blocking way to avoid deadlock
-		select {
-		case s.receivedMsgs <- msg:
-		default:
-			s.t.Logf("Mock server: receivedMsgs channel full, dropping message")
-		}
-
-		// Respond like a real server would to keep the client happy.
-		switch msg.Type.(type) {
-		case *pb.ClientMessage_AcceptMsg:
-			if err := proc.WriteServerMessage(&pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "mock-log-id"}}); err != nil {
-				s.t.Logf("Mock server: failed to write LogId response: %v", err)
-				return
-			}
-		case *pb.ClientMessage_ExitMsg:
-			return // Exit after processing exit message
-		}
-	}
-}
-
-func (s *mockUpstreamServer) Close() {
-	s.listener.Close()
-	s.wg.Wait()
-	close(s.receivedMsgs)
-}
-
-func (s *mockUpstreamServer) Addr() string {
-	return s.listener.Addr().String()
-}
-
 func TestConnectionHandler(t *testing.T) {
 	// Default test config
 	cfg := &config.Config{
@@ -151,11 +55,7 @@ func TestConnectionHandler(t *testing.T) {
 
 		handler := NewHandler(serverConn, cfg)
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			handler.Handle()
-		}()
+		wg.Go(handler.Handle)
 
 		clientProc := protocol.NewProcessor(clientConn, clientConn)
 
@@ -568,7 +468,7 @@ func TestPreSessionRejectEventLogging(t *testing.T) {
 		if info.Name() == "log.json" {
 			found = true
 			data, _ := os.ReadFile(path)
-			var eventRecord map[string]interface{}
+			var eventRecord map[string]any
 			if err := json.Unmarshal(data, &eventRecord); err != nil {
 				t.Errorf("Failed to unmarshal reject event log: %v", err)
 				return nil
@@ -670,6 +570,8 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 	handler := NewHandler(serverConn, cfg)
 	var mu sync.Mutex
 	messagesReceived := make([]string, 0)
+	// Signals each silent (no-response) message the mock processes.
+	silentProcessed := make(chan struct{}, 4)
 
 	// Override session factory to track messages
 	handler.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error) {
@@ -684,9 +586,11 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "test-id"}}, nil
 				case *pb.ClientMessage_RejectMsg:
 					messagesReceived = append(messagesReceived, "reject")
+					silentProcessed <- struct{}{}
 					return nil, nil
 				case *pb.ClientMessage_AlertMsg:
 					messagesReceived = append(messagesReceived, "alert")
+					silentProcessed <- struct{}{}
 					return nil, nil
 				default:
 					return nil, nil
@@ -696,7 +600,8 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		}, nil
 	}
 
-	go handler.Handle()
+	var wg sync.WaitGroup
+	wg.Go(handler.Handle)
 
 	clientProc := protocol.NewProcessor(clientConn, clientConn)
 
@@ -734,8 +639,7 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		},
 	}
 	clientProc.WriteClientMessage(subRejectMsg)
-	// No response for reject, send another message to confirm processing
-	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+	<-silentProcessed
 
 	// Send an alert (should be routed to session)
 	alertMsg := &pb.ClientMessage{
@@ -746,10 +650,10 @@ func TestSubCommandRoutingToActiveSession(t *testing.T) {
 		},
 	}
 	clientProc.WriteClientMessage(alertMsg)
-	time.Sleep(50 * time.Millisecond) // Small delay to ensure processing
+	<-silentProcessed
 
 	serverConn.Close()
-	time.Sleep(100 * time.Millisecond) // Allow handler to process
+	wg.Wait()
 
 	// Verify all messages were routed to the active session
 	// First accept is the initial session setup, second is the sub-command
