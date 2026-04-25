@@ -3,9 +3,13 @@ package protocol
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"net"
 	"sudosrv/pkg/sudosrv_proto"
 	"testing"
+	"time"
 )
 
 func TestProcessor(t *testing.T) {
@@ -181,6 +185,41 @@ func TestProcessor(t *testing.T) {
 		_, err := proc.ReadClientMessage()
 		if err == nil {
 			t.Fatal("ReadClientMessage() should have failed with invalid protobuf data")
+		}
+	})
+
+	t.Run("ReadServerMessageContextCancellation", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		proc := NewProcessor(serverConn, serverConn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		_, err := proc.ReadServerMessageContext(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ReadServerMessageContext error: got %v, want context deadline", err)
+		}
+	})
+
+	t.Run("WriteClientMessageContextCancellation", func(t *testing.T) {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		proc := NewProcessor(serverConn, serverConn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		msg := &sudosrv_proto.ClientMessage{
+			Type: &sudosrv_proto.ClientMessage_HelloMsg{
+				HelloMsg: &sudosrv_proto.ClientHello{ClientId: "test"},
+			},
+		}
+		err := proc.WriteClientMessageContext(ctx, msg)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WriteClientMessageContext error: got %v, want context deadline", err)
 		}
 	})
 }

@@ -27,7 +27,7 @@ type ServerConfig struct {
 	TLSKeyFile                string        `yaml:"tls_key_file"`
 	ServerID                  string        `yaml:"server_id"`
 	IdleTimeout               time.Duration `yaml:"idle_timeout"`
-	MaxConnections            int           `yaml:"max_connections"`             // 0 disables the cap
+	MaxConnections            int           `yaml:"max_connections"`              // 0 disables the cap
 	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
 
@@ -55,8 +55,44 @@ type LocalStorageConfig struct {
 
 // LoadConfig reads the configuration from a YAML file.
 func LoadConfig(path string) (*Config, error) {
-	config := &Config{
-		// Default values
+	config := defaultConfig()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Warn("Config file not found, using defaults", "path", path)
+			return config, nil
+		}
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
+
+	if err := unmarshalConfig(data, config); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// LoadConfigRequired reads the configuration from a YAML file and fails if the
+// file is missing. This is used for SIGHUP reloads so a transient deployment
+// mistake cannot silently replace the running config with defaults.
+func LoadConfigRequired(path string) (*Config, error) {
+	config := defaultConfig()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
+
+	if err := unmarshalConfig(data, config); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func defaultConfig() *Config {
+	return &Config{
 		Server: ServerConfig{
 			Mode:                      "local",
 			ListenAddress:             "127.0.0.1:30343",
@@ -82,25 +118,18 @@ func LoadConfig(path string) (*Config, error) {
 			PasswordFilter:  true,                 // Password filtering enabled by default for security
 		},
 	}
+}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Warn("Config file not found, using defaults", "path", path)
-			return config, nil
-		}
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
-	}
-
+func unmarshalConfig(data []byte, config *Config) error {
 	if err := yaml.Unmarshal(data, config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config YAML: %w", err)
+		return fmt.Errorf("failed to unmarshal config YAML: %w", err)
 	}
 
 	// Re-apply defaults for zero-valued fields that yaml may have cleared
 	// when a section is partially specified in the config file.
 	applyZeroValueDefaults(config)
 
-	return config, nil
+	return nil
 }
 
 // applyZeroValueDefaults restores default values for fields that yaml.Unmarshal

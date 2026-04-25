@@ -141,4 +141,3 @@ func (f *PasswordFilter) IsFiltering() bool {
 	defer f.mu.Unlock()
 	return f.isFiltering
 }
-

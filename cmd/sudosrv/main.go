@@ -271,4 +271,3 @@ func handleApplicationError(err error) {
 
 	os.Exit(exitCode)
 }
-

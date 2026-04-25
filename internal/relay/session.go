@@ -45,7 +45,7 @@ type Session struct {
 	closeOnce        sync.Once
 	cacheFileName    string
 	mu               sync.Mutex               // Protects cumulativeDelay and lastCommitTime
-	cumulativeDelay  map[string]time.Duration  // Tracks cumulative I/O delay per stream for commit points
+	cumulativeDelay  map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
 	lastCommitTime   time.Time                // When last commit point was sent to client
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -89,6 +89,7 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 // it proceeds to persistently try to flush that file to the upstream server.
 func (s *Session) run() {
 	defer s.wg.Done()
+	defer s.cancel()
 	slog.Debug("Relay session runner started", "log_id", s.logID)
 
 	// Phase 1: Write all incoming messages to the local cache file.
@@ -109,7 +110,7 @@ func (s *Session) run() {
 		default:
 		}
 
-		proc, err := connectToUpstream(s.config)
+		proc, err := connectToUpstream(s.ctx, s.config)
 		if err != nil {
 			slog.Warn("Upstream connection attempt failed", "log_id", s.logID, "error", err)
 			backoff := s.calculateBackoff(attempt)
@@ -125,22 +126,11 @@ func (s *Session) run() {
 			}
 		}
 
-		// Connection successful, now flush the file.
-		// Install a watchdog goroutine: if ctx cancels while we're blocked on
-		// upstream network I/O (which doesn't observe ctx), closing the processor
-		// forces any in-flight read/write to return with an error so run() can exit.
+		// Connection successful, now flush the file. Protocol operations use
+		// context-aware reads/writes, so shutdown can interrupt stalled upstream I/O.
 		slog.Info("Upstream connection successful, flushing cache.", "log_id", s.logID, "file", s.cacheFileName)
-		watchdogDone := make(chan struct{})
-		go func() {
-			select {
-			case <-s.ctx.Done():
-				proc.Close()
-			case <-watchdogDone:
-			}
-		}()
-		err = flushFile(proc, s.cacheFileName)
-		close(watchdogDone)
-		proc.Close() // Idempotent close; safe after watchdog may have already closed.
+		err = flushFile(s.ctx, proc, s.cacheFileName, s.config)
+		proc.Close()
 		if err != nil {
 			// If ctx was cancelled, the error is expected (we closed the conn).
 			if s.ctx.Err() != nil {
@@ -291,19 +281,22 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 }
 
 // Close is called by the connection handler when the client disconnects. It
-// signals the write-phase loop that no more messages will arrive, allowing any
-// flush already in progress (phase 2) to complete naturally. Server shutdown
-// propagates via the parent context: when s.ctx cancels during phase-2 flush,
-// the watchdog installed in run() closes the upstream conn to abort blocked
-// network I/O. Safe to call multiple times.
+// signals the write-phase loop that no more messages will arrive and then
+// returns immediately; durable upstream flushing continues in the background.
+// Server shutdown propagates via the parent context. Safe to call multiple times.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
 		close(s.fromClientChan)
 	})
-	s.wg.Wait()
-	s.cancel() // release the context's resources
 	return nil
+}
+
+// Wait blocks until the background cache writer/flusher exits. Production
+// connection cleanup deliberately does not call this; tests and coordinated
+// shutdown paths can use it when they own the session lifecycle.
+func (s *Session) Wait() {
+	s.wg.Wait()
 }
 
 // ---- Standalone Flusher for Orphaned Files ----
@@ -361,7 +354,7 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 			defer func() { <-semaphore }()
 
 			slog.Debug("Flushing orphaned relay file", "file", filename)
-			errChan <- FlushOrphanedFile(filename, cfg)
+			errChan <- FlushOrphanedFile(ctx, filename, cfg)
 		}(file)
 	}
 
@@ -380,7 +373,7 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 }
 
 // FlushOrphanedFile connects to upstream and sends the content of a single file.
-func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
+func FlushOrphanedFile(ctx context.Context, filePath string, cfg *config.RelayConfig) error {
 	slog.Info("Found orphaned relay file, attempting to flush", "path", filePath)
 
 	// Rename file to prevent another process from picking it up
@@ -390,7 +383,7 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
 		return fmt.Errorf("could not rename orphaned file %s: %w", filePath, err)
 	}
 
-	proc, err := connectToUpstream(cfg)
+	proc, err := connectToUpstream(ctx, cfg)
 	if err != nil {
 		slog.Error("Failed to connect to upstream for orphaned file flush", "path", flushingFileName, "error", err)
 		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
@@ -399,7 +392,7 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
 		return fmt.Errorf("failed to connect to upstream for %s: %w", filePath, err)
 	}
 
-	err = flushFile(proc, flushingFileName)
+	err = flushFile(ctx, proc, flushingFileName, cfg)
 	proc.Close()
 	if err != nil {
 		slog.Error("Failed to flush orphaned file, renaming back", "path", flushingFileName, "error", err)
@@ -412,7 +405,7 @@ func FlushOrphanedFile(filePath string, cfg *config.RelayConfig) error {
 	return nil
 }
 
-func flushFile(proc protocol.Processor, filePath string) error {
+func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cfg *config.RelayConfig) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open cache file for flushing: %w", err)
@@ -443,19 +436,24 @@ func flushFile(proc protocol.Processor, filePath string) error {
 			return fmt.Errorf("error reading message from cache during flush: %w", err)
 		}
 
-		if err := proc.WriteClientMessage(msg); err != nil {
+		if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
+			return proc.WriteClientMessageContext(opCtx, msg)
+		}); err != nil {
 			return fmt.Errorf("failed to send flushed message to upstream: %w", err)
 		}
 
 		if msg.GetAcceptMsg() != nil {
-			if _, err := proc.ReadServerMessage(); err != nil {
+			if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
+				_, err := proc.ReadServerMessageContext(opCtx)
+				return err
+			}); err != nil {
 				return fmt.Errorf("did not get log_id response from upstream: %w", err)
 			}
 		}
 	}
 }
 
-func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
+func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.Processor, error) {
 	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
 	var conn net.Conn
 	var err error
@@ -463,9 +461,10 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
 		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS13}
-		conn, err = tls.DialWithDialer(dialer, "tcp", cfg.UpstreamHost, tlsConfig)
+		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
 	} else {
-		conn, err = dialer.Dial("tcp", cfg.UpstreamHost)
+		conn, err = dialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
 	}
 
 	if err != nil {
@@ -475,15 +474,36 @@ func connectToUpstream(cfg *config.RelayConfig) (protocol.Processor, error) {
 	proc := protocol.NewProcessorWithCloser(conn, conn, conn)
 	slog.Debug("Starting handshake with upstream")
 	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
-	if err := proc.WriteClientMessage(helloMsg); err != nil {
+	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
+		return proc.WriteClientMessageContext(opCtx, helloMsg)
+	}); err != nil {
 		proc.Close()
 		return nil, fmt.Errorf("failed to send ClientHello to upstream: %w", err)
 	}
-	if _, err = proc.ReadServerMessage(); err != nil {
+	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
+		_, err = proc.ReadServerMessageContext(opCtx)
+		return err
+	}); err != nil {
 		proc.Close()
 		return nil, fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
 	}
 	return proc, nil
+}
+
+func operationTimeout(cfg *config.RelayConfig) time.Duration {
+	if cfg.ConnectTimeout > 0 {
+		return cfg.ConnectTimeout
+	}
+	return 5 * time.Second
+}
+
+func withOperationTimeout(parent context.Context, cfg *config.RelayConfig, fn func(context.Context) error) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, operationTimeout(cfg))
+	defer cancel()
+	return fn(ctx)
 }
 
 // writeProtoMessage serializes and writes a single protobuf message with its length prefix.
