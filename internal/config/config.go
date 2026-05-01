@@ -16,6 +16,7 @@ type Config struct {
 	Server       ServerConfig       `yaml:"server"`
 	Relay        RelayConfig        `yaml:"relay"`
 	LocalStorage LocalStorageConfig `yaml:"local_storage"`
+	API          APIConfig          `yaml:"api"`
 }
 
 // ServerConfig holds server-specific settings.
@@ -40,6 +41,25 @@ type RelayConfig struct {
 	RelayCacheDirectory  string        `yaml:"relay_cache_directory"`
 	ReconnectAttempts    int           `yaml:"reconnect_attempts"`
 	MaxReconnectInterval time.Duration `yaml:"max_reconnect_interval"`
+}
+
+// APIConfig holds settings for the optional management HTTP API. An empty
+// ListenAddress disables the API entirely.
+//
+// Authentication is required when the API is enabled: AuthTokenFile (preferred)
+// points at a file whose contents are the bearer token; AuthToken (discouraged
+// in production) provides the token inline. If both are set, AuthTokenFile
+// wins. Whitespace surrounding a file's contents is trimmed at load time.
+//
+// TLS is optional. When TLSCertFile and TLSKeyFile are set, the API listener
+// terminates TLS using those credentials; otherwise it serves plaintext HTTP
+// (intended for localhost-only deployments).
+type APIConfig struct {
+	ListenAddress string `yaml:"listen_address"`  // empty disables the API
+	AuthToken     string `yaml:"auth_token"`      // inline (discouraged)
+	AuthTokenFile string `yaml:"auth_token_file"` // path to file containing the token (preferred)
+	TLSCertFile   string `yaml:"tls_cert_file"`
+	TLSKeyFile    string `yaml:"tls_key_file"`
 }
 
 // LocalStorageConfig holds settings for local storage mode.
@@ -187,6 +207,14 @@ func Validate(cfg *Config) error {
 	if cfg.Server.Mode == "local" {
 		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
 			return err
+		}
+	}
+	if cfg.API.ListenAddress != "" {
+		if cfg.API.AuthToken == "" && cfg.API.AuthTokenFile == "" {
+			return fmt.Errorf("api.listen_address is set but neither api.auth_token nor api.auth_token_file is configured")
+		}
+		if (cfg.API.TLSCertFile == "") != (cfg.API.TLSKeyFile == "") {
+			return fmt.Errorf("api.tls_cert_file and api.tls_key_file must both be set or both empty")
 		}
 	}
 	return nil

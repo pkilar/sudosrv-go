@@ -14,6 +14,7 @@ import (
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/relay"
+	"sudosrv/internal/sessions"
 	"sudosrv/internal/storage"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
@@ -29,7 +30,10 @@ type Handler struct {
 	config    *config.Config
 	processor protocol.Processor
 	logID     string
+	sessionID string // registry key; matches sessionUUID.String() for new sessions
 	session   SessionHandler
+	registry  *sessions.Registry // optional; nil when the management API is disabled
+	startedAt time.Time          // server-side connection start time
 	isTLS     bool
 	// Rate limiting: token bucket refilled at rateRefillPerSec up to rateBurst.
 	rateTokens     float64
@@ -41,6 +45,25 @@ type Handler struct {
 		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
 		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 	}
+}
+
+// logIDProvider exposes a session's stable base64 log_id for the management
+// registry. storage.Session, storage.EventSession, and relay.Session all
+// implement it; sessions that do not are registered with an empty ServerLogID.
+type logIDProvider interface {
+	LogID() string
+}
+
+// doneNotifier marks a session whose lifecycle outlives the client connection
+// (currently relay sessions, which keep flushing upstream after the client
+// disconnects). Implementers handle their own deregistration via an onDone
+// callback fired from a background goroutine; the connection handler must
+// therefore not deregister them on disconnect, and must guard against the
+// race where IsDone() returns true before registerSession has added the
+// session to the registry — in that case onDone's Deregister was a no-op
+// and the handler must clean up.
+type doneNotifier interface {
+	IsDone() bool
 }
 
 // Rate limiter parameters. A single client connection is allowed to sustain
@@ -56,19 +79,25 @@ type SessionHandler interface {
 	Close() error
 }
 
-// NewHandler creates a new handler for a connection.
+// NewHandler creates a new handler for a connection. The session registry is
+// nil; tests and callers that don't need management-API integration can use
+// this form.
 func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
-	return NewHandlerWithContext(context.Background(), conn, cfg)
+	return NewHandlerWithContext(context.Background(), conn, cfg, nil)
 }
 
-// NewHandlerWithContext creates a new handler for a connection with context support.
-func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config) *Handler {
+// NewHandlerWithContext creates a new handler for a connection with context
+// support. Pass a non-nil registry to make the connection's session visible to
+// the management API; pass nil to disable that integration.
+func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config, registry *sessions.Registry) *Handler {
 	_, isTLS := conn.(*tls.Conn)
 	h := &Handler{
 		ctx:            ctx,
 		conn:           conn,
 		config:         cfg,
 		processor:      protocol.NewProcessorWithCloser(conn, conn, conn),
+		registry:       registry,
+		startedAt:      time.Now(),
 		isTLS:          isTLS,
 		rateTokens:     rateBurst,
 		rateLastRefill: time.Now(),
@@ -79,7 +108,15 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 		return storage.NewSession(sessionUUID, acceptMsg, localCfg)
 	}
 	h.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
-		return relay.NewSession(h.ctx, sessionUUID, acceptMsg, relayCfg)
+		// onDone is invoked from the relay's background runner goroutine
+		// after it finishes (including any upstream-flush retries) — not
+		// here at construction time. The connection-side defer skips
+		// deregistering relay sessions for this reason; deregister via
+		// onDone so "phase: flushing" stays visible in the management API
+		// until the flush truly completes.
+		sid := sessionUUID.String()
+		onDone := func() { h.registry.Deregister(sid) }
+		return relay.NewSession(h.ctx, sessionUUID, acceptMsg, relayCfg, onDone)
 	}
 	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
 		return storage.NewRestartSession(restartMsg, localCfg)
@@ -91,6 +128,15 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 func (h *Handler) Handle() {
 	defer func() {
 		if h.session != nil {
+			// Local sessions are fully closed by Close(); deregister now.
+			// Self-deregistering sessions (relay) own the registry entry's
+			// lifetime via their onDone callback, which fires when their
+			// background flusher exits — possibly long after the connection
+			// closes. Hiding the "phase: flushing" record on disconnect
+			// would defeat the management API's purpose.
+			if _, selfDeregistering := h.session.(doneNotifier); !selfDeregistering && h.registry != nil {
+				h.registry.Deregister(h.sessionID)
+			}
 			metrics.Global.DecrementActiveSessions()
 			if err := h.session.Close(); err != nil {
 				slog.Error("Failed to close session", "error", err, "remote_addr", h.conn.RemoteAddr())
@@ -212,6 +258,94 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		slog.Warn("Received unexpected message before session start", "type", fmt.Sprintf("%T", event), "remote_addr", h.conn.RemoteAddr())
 		return &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Protocol error: unexpected message"}}, nil
 	}
+}
+
+// flattenInfoMsgs converts repeated InfoMessage entries into a JSON-friendly
+// map[string]any keyed by InfoMessage.key. Mirrors the per-type switch used
+// when persisting log.json so the management API and the on-disk record carry
+// the same shape.
+func flattenInfoMsgs(infos []*pb.InfoMessage) map[string]any {
+	out := make(map[string]any, len(infos))
+	for _, info := range infos {
+		key := info.GetKey()
+		if key == "" {
+			continue
+		}
+		switch v := info.Value.(type) {
+		case *pb.InfoMessage_Strval:
+			out[key] = v.Strval
+		case *pb.InfoMessage_Numval:
+			out[key] = v.Numval
+		case *pb.InfoMessage_Strlistval:
+			out[key] = v.Strlistval.GetStrings()
+		}
+	}
+	return out
+}
+
+// registerSession adds the just-created session to the registry, if one is
+// configured. Static fields are populated from the AcceptMessage; the live
+// MetadataProvider hook is set when the session implements it. ServerLogID is
+// pulled from the session at register time via the optional logIDProvider
+// interface, so the registered record is complete before any concurrent API
+// reader can observe it.
+func (h *Handler) registerSession(sessionUUID uuid.UUID, mode string, acceptMsg *pb.AcceptMessage) {
+	if h.registry == nil || h.session == nil {
+		return
+	}
+	h.sessionID = sessionUUID.String()
+	info := sessions.SessionInfo{
+		SessionID:    h.sessionID,
+		SessionUUID:  sessionUUID,
+		Mode:         mode,
+		RemoteAddr:   h.conn.RemoteAddr().String(),
+		StartedAt:    h.startedAt,
+		ExpectIobufs: acceptMsg.GetExpectIobufs(),
+		Info:         flattenInfoMsgs(acceptMsg.GetInfoMsgs()),
+	}
+	if st := acceptMsg.GetSubmitTime(); st != nil {
+		info.SubmitTime = time.Unix(st.TvSec, int64(st.TvNsec)).UTC()
+	}
+	if l, ok := h.session.(logIDProvider); ok {
+		info.ServerLogID = l.LogID()
+	}
+	if p, ok := h.session.(sessions.MetadataProvider); ok {
+		info.Provider = p
+	}
+	h.registry.Register(info)
+	// Race protection: if a self-deregistering session's background runner
+	// finished before we registered (e.g. relay cache write failed in
+	// NewSession's goroutine), its onDone callback's Deregister was a no-op
+	// because the registry entry did not yet exist. Detect that and
+	// deregister our just-added entry now.
+	if d, ok := h.session.(doneNotifier); ok && d.IsDone() {
+		h.registry.Deregister(h.sessionID)
+	}
+}
+
+// registerRestartSession is the restart-path equivalent of registerSession.
+// Restart sessions resume an existing log, so the base64 log_id is provided
+// up-front by the client and used as the registry key directly.
+func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
+	if h.registry == nil || h.session == nil {
+		return
+	}
+	h.sessionID = restartMsg.GetLogId()
+	info := sessions.SessionInfo{
+		SessionID:   h.sessionID,
+		ServerLogID: restartMsg.GetLogId(),
+		Mode:        "local",
+		RemoteAddr:  h.conn.RemoteAddr().String(),
+		StartedAt:   h.startedAt,
+		Info:        map[string]any{"event_type": "restart"},
+	}
+	if rt := restartMsg.GetResumePoint(); rt != nil {
+		info.Info["resume_point"] = time.Unix(rt.TvSec, int64(rt.TvNsec)).UTC().Format(time.RFC3339Nano)
+	}
+	if p, ok := h.session.(sessions.MetadataProvider); ok {
+		info.Provider = p
+	}
+	h.registry.Register(info)
 }
 
 // handleHello responds to a ClientHello.
@@ -396,6 +530,7 @@ func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessag
 
 	h.session = session
 	h.logID = restartMsg.GetLogId()
+	h.registerRestartSession(restartMsg)
 	metrics.Global.IncrementSessions()
 	metrics.Global.IncrementLocalSessions()
 	slog.Info("Resumed local storage session via restart",
@@ -438,6 +573,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local storage session: %w", err)
 		}
+		h.registerSession(sessionUUID, "local", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementLocalSessions()
 		slog.Info("Started local storage session", "log_id", h.logID,
@@ -448,6 +584,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
+		h.registerSession(sessionUUID, "relay", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementRelaySessions()
 		slog.Info("Started relay session", "log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
@@ -458,7 +595,9 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	}
 
 	// The first message to the session handler is the AcceptMessage itself
-	// to allow it to initialize and send back the initial log_id.
+	// to allow it to initialize and send back the initial log_id. The log_id
+	// is also captured at registerSession time via the logIDProvider getter,
+	// so we don't need to update the registry on the response.
 	return h.session.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}})
 }
 
@@ -472,6 +611,7 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 			return nil, fmt.Errorf("failed to create local event-only session: %w", err)
 		}
 		h.session = session
+		h.registerSession(sessionUUID, "local", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementLocalSessions()
 		slog.Info("Started local event-only session", "log_id", h.logID,
@@ -482,6 +622,7 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 			return nil, fmt.Errorf("failed to create relay event-only session: %w", err)
 		}
 		h.session = session
+		h.registerSession(sessionUUID, "relay", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementRelaySessions()
 		slog.Info("Started relay event-only session", "log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
