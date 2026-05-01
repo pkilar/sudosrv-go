@@ -15,12 +15,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sudosrv/internal/config"
+	"sudosrv/internal/sessions"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 )
 
 // commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
@@ -44,6 +47,12 @@ type Session struct {
 	fileMux         sync.Mutex
 	closeOnce       sync.Once
 	isInitialized   bool
+	// Live stats exposed to the management API. Updated with atomic ops so
+	// the API's read path never blocks on fileMux held by the write path.
+	// Writes themselves still happen while fileMux is held by HandleClientMessage.
+	msgCount      atomic.Int64
+	bytesReceived atomic.Int64
+	lastActivity  atomic.Pointer[time.Time]
 }
 
 // IO event types for the timing file, matching native sudo implementation.
@@ -220,6 +229,10 @@ type EventSession struct {
 	logJSONPath string
 	logMeta     map[string]any
 	closeOnce   sync.Once
+	// Live stats exposed to the management API.
+	msgCount      atomic.Int64
+	bytesReceived atomic.Int64
+	lastActivity  atomic.Pointer[time.Time]
 }
 
 // NewEventSession creates a local metadata-only session for an accepted command
@@ -265,7 +278,28 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	return event, nil
 }
 
+// LogID returns the base64-encoded sudo log_id assigned when the event session
+// was created. It is stable for the lifetime of the session.
+func (s *EventSession) LogID() string { return s.logID }
+
+// LiveStats returns a snapshot of mutable counters for the management API.
+func (s *EventSession) LiveStats() sessions.LiveStats {
+	stats := sessions.LiveStats{
+		MessagesReceived: s.msgCount.Load(),
+		BytesReceived:    s.bytesReceived.Load(),
+		SessionDir:       s.sessionDir,
+	}
+	if t := s.lastActivity.Load(); t != nil {
+		stats.LastActivity = *t
+	}
+	return stats
+}
+
 func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	s.msgCount.Add(1)
+	s.bytesReceived.Add(int64(proto.Size(msg)))
+	now := time.Now()
+	s.lastActivity.Store(&now)
 	switch event := msg.Type.(type) {
 	case *pb.ClientMessage_ExitMsg:
 		s.finalize(event.ExitMsg)
@@ -595,8 +629,37 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	return seqStr, nil
 }
 
+// LogID returns the base64-encoded sudo log_id assigned when the session was
+// created. It is stable for the lifetime of the session.
+func (s *Session) LogID() string { return s.logID }
+
+// LiveStats returns a snapshot of mutable counters for the management API.
+// Counters are read with atomic loads; this method does not contend with the
+// file-write fileMux.
+func (s *Session) LiveStats() sessions.LiveStats {
+	stats := sessions.LiveStats{
+		MessagesReceived: s.msgCount.Load(),
+		BytesReceived:    s.bytesReceived.Load(),
+		SessionDir:       s.sessionDir,
+	}
+	if t := s.lastActivity.Load(); t != nil {
+		stats.LastActivity = *t
+	}
+	return stats
+}
+
+// recordActivity updates the live counters used by the management API. Called
+// from HandleClientMessage on every message.
+func (s *Session) recordActivity(msg *pb.ClientMessage) {
+	s.msgCount.Add(1)
+	s.bytesReceived.Add(int64(proto.Size(msg)))
+	now := time.Now()
+	s.lastActivity.Store(&now)
+}
+
 // HandleClientMessage processes a message from the client.
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	s.recordActivity(msg)
 	s.fileMux.Lock()
 	defer s.fileMux.Unlock()
 

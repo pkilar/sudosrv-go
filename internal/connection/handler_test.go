@@ -2,12 +2,14 @@
 package connection
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
+	"sudosrv/internal/sessions"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
 	"testing"
@@ -1052,4 +1054,88 @@ func TestSetOrUpdateInfoMessage_UpdateExisting(t *testing.T) {
 	if count != 1 {
 		t.Errorf("Expected exactly 1 'existing' info message, got %d", count)
 	}
+}
+
+// fakeDoneRelaySession implements SessionHandler plus the doneNotifier and
+// logIDProvider markers. It pretends to be a relay session whose background
+// runner has already exited (IsDone returns true) and has already fired its
+// onDone callback before the connection handler called registerSession.
+type fakeDoneRelaySession struct{}
+
+func (fakeDoneRelaySession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	if msg.GetAcceptMsg() != nil {
+		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: "fake-log-id"}}, nil
+	}
+	return nil, nil
+}
+func (fakeDoneRelaySession) Close() error  { return nil }
+func (fakeDoneRelaySession) IsDone() bool  { return true }
+func (fakeDoneRelaySession) LogID() string { return "fake-log-id" }
+
+// TestRelay_DoneBeforeRegisterDoesNotOrphan reproduces the race the codex
+// adversarial review flagged: a relay session's background runner exits and
+// fires onDone before registerSession adds the entry, leaving an orphan
+// registry record that the connection-close path then never cleans up
+// (because relay sessions are skipped by the disconnect-time deregister).
+// The fix detects an already-done session immediately after register and
+// removes the entry inside registerSession.
+func TestRelay_DoneBeforeRegisterDoesNotOrphan(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Mode:        "relay",
+			IdleTimeout: 1 * time.Second,
+			ServerID:    "TestSrv",
+		},
+		Relay: config.RelayConfig{
+			UpstreamHost:        "127.0.0.1:0",
+			RelayCacheDirectory: t.TempDir(),
+		},
+	}
+
+	registry := sessions.NewRegistry()
+	handler := NewHandlerWithContext(context.Background(), serverConn, cfg, registry)
+	handler.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, _ *pb.AcceptMessage, _ *config.RelayConfig) (SessionHandler, error) {
+		// Simulate the race: the runner finished and called Deregister
+		// before registerSession had a chance to add the entry. The
+		// Deregister here is a no-op because the entry does not yet
+		// exist — this is exactly the orphan-producing situation.
+		registry.Deregister(sessionUUID.String())
+		return fakeDoneRelaySession{}, nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(handler.Handle)
+
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{
+			AcceptMsg: &pb.AcceptMessage{
+				SubmitTime:   &pb.TimeSpec{TvSec: 1700000000, TvNsec: 0},
+				ExpectIobufs: true,
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "alice"}},
+					{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "host01"}},
+					{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/id"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("client write AcceptMsg: %v", err)
+	}
+	// Wait for the LogId response. By the time it arrives, registerSession
+	// has finished (it runs before HandleClientMessage in handleAccept).
+	if _, err := clientProc.ReadServerMessage(); err != nil {
+		t.Fatalf("client read LogId: %v", err)
+	}
+
+	if got := registry.Len(); got != 0 {
+		t.Fatalf("registry should be empty after done-before-register cleanup; len=%d", got)
+	}
+
+	serverConn.Close()
+	wg.Wait()
 }

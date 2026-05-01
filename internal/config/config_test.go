@@ -233,6 +233,58 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "world-writable",
 		},
+		{
+			name: "valid API with inline token",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthToken = "secret"
+			},
+		},
+		{
+			name: "valid API with token file",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthTokenFile = "/run/sudosrv/api.token"
+			},
+		},
+		{
+			name: "valid API with TLS",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthToken = "secret"
+				c.API.TLSCertFile = "api.crt"
+				c.API.TLSKeyFile = "api.key"
+			},
+		},
+		{
+			name: "API enabled without token rejects",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+			},
+			wantErr: "neither api.auth_token nor api.auth_token_file",
+		},
+		{
+			name: "API TLS cert without key rejects",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthToken = "secret"
+				c.API.TLSCertFile = "api.crt"
+			},
+			wantErr: "api.tls_cert_file and api.tls_key_file",
+		},
+		{
+			name: "API TLS key without cert rejects",
+			mutate: func(c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthToken = "secret"
+				c.API.TLSKeyFile = "api.key"
+			},
+			wantErr: "api.tls_cert_file and api.tls_key_file",
+		},
+		{
+			name: "API disabled by default",
+			// No mutation: validLocal() leaves API zero-valued. Should not error.
+		},
 	}
 
 	for _, tt := range tests {

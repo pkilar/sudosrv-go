@@ -17,8 +17,10 @@ import (
 	"path/filepath"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
+	"sudosrv/internal/sessions"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,8 +32,22 @@ const (
 	// FlushingSuffix is appended to a cache file while it is being flushed upstream.
 	// Exported so startup orphan recovery can identify mid-flush files.
 	FlushingSuffix = ".flushing"
+	// DeliveredSuffix is appended to a cache file whose contents have been
+	// flushed upstream but which we could not Remove (e.g. permission or IO
+	// error). Orphan recovery globs *.log and *.log.flushing, so files with
+	// this suffix are invisible to it — preventing the duplicate-upstream
+	// hazard that would arise from re-flushing already-delivered messages.
+	DeliveredSuffix = ".delivered"
 	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
 	commitPointInterval = 10 * time.Second
+)
+
+// Phase strings exposed via Session.LiveStats. Stored as package-level vars
+// because atomic.Pointer[string] requires a pointer; using `const` here would
+// not let us take an address.
+var (
+	phaseWriting  = "writing"
+	phaseFlushing = "flushing"
 )
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
@@ -49,12 +65,38 @@ type Session struct {
 	lastCommitTime   time.Time                // When last commit point was sent to client
 	ctx              context.Context
 	cancel           context.CancelFunc
+	// onDone is invoked exactly once after the background runner exits — i.e.
+	// after both the cache-write phase and any upstream-flush phase finish.
+	// Connection-side bookkeeping that needs to outlive the client connection
+	// (such as session-registry deregistration) hooks into this.
+	onDone func()
+	// done is set to true before onDone fires so callers racing with the
+	// runner can detect a "done before I got here" outcome and run any
+	// cleanup that onDone could not (because the resource it would clean
+	// up did not yet exist when onDone ran).
+	done atomic.Bool
+	// Live stats exposed to the management API.
+	msgCount      atomic.Int64
+	bytesReceived atomic.Int64
+	lastActivity  atomic.Pointer[time.Time]
+	phase         atomic.Pointer[string] // "writing" -> "flushing"
 }
+
+// IsDone reports whether the background runner has finished. Once true the
+// session will never call its onDone callback again; any registry or other
+// state that was added after onDone fired must be cleaned up by the caller.
+func (s *Session) IsDone() bool { return s.done.Load() }
 
 // NewSession creates a new relay session handler.
 // The provided ctx is used as the parent context; cancelling it will stop the
 // session's background goroutine after the current operation completes.
-func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (*Session, error) {
+//
+// onDone (if non-nil) is invoked exactly once after the background runner
+// finishes, including any upstream-flush retries. This lets callers tie
+// resources whose lifecycle exceeds the client connection (e.g. management
+// API registry entries) to the actual end of the session rather than the end
+// of the connection.
+func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
 	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0750); err != nil {
 		return nil, fmt.Errorf("could not create relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
 	}
@@ -76,7 +118,9 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		cumulativeDelay:  make(map[string]time.Duration),
 		ctx:              ctx,
 		cancel:           cancel,
+		onDone:           onDone,
 	}
+	s.phase.Store(&phaseWriting)
 
 	s.wg.Add(1)
 	go s.run() // Start the single, durable goroutine for this session.
@@ -90,6 +134,16 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 func (s *Session) run() {
 	defer s.wg.Done()
 	defer s.cancel()
+	defer func() {
+		// Set done=true before firing onDone so any caller that observes
+		// IsDone() returning true after we have called onDone can rely on
+		// onDone having already run (i.e. its Deregister either happened or
+		// was a no-op because the registry entry did not yet exist).
+		s.done.Store(true)
+		if s.onDone != nil {
+			s.onDone()
+		}
+	}()
 	slog.Debug("Relay session runner started", "log_id", s.logID)
 
 	// Phase 1: Write all incoming messages to the local cache file.
@@ -101,6 +155,7 @@ func (s *Session) run() {
 	}
 
 	// Phase 2: The client session is complete. Now, persistently try to flush the file.
+	s.phase.Store(&phaseFlushing)
 	slog.Info("Client session complete, beginning persistent flush attempts.", "log_id", s.logID, "file", s.cacheFileName)
 	for attempt := 0; s.config.ReconnectAttempts == -1 || attempt < s.config.ReconnectAttempts; attempt++ {
 		select {
@@ -157,10 +212,15 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		return
 	}
 	defer func() {
+		// Sync surfaces fsync-time errors; Close surfaces flush errors that
+		// only manifest at close (e.g. NFS or disk-full). Drop neither — a
+		// cache file that fails to close cleanly is a data-loss signal.
 		if err := file.Sync(); err != nil {
 			slog.Error("Failed to fsync relay cache file", "log_id", s.logID, "error", err)
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			slog.Error("Failed to close relay cache file", "log_id", s.logID, "error", err)
+		}
 	}()
 
 	// Write the essential AcceptMessage first to ensure the cache file is valid for flushing.
@@ -236,7 +296,32 @@ func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec, bool) {
 	}
 }
 
+// LogID returns the base64-encoded sudo log_id assigned when the relay session
+// was created. It is stable for the lifetime of the session.
+func (s *Session) LogID() string { return s.logID }
+
+// LiveStats returns a snapshot of mutable counters for the management API.
+func (s *Session) LiveStats() sessions.LiveStats {
+	stats := sessions.LiveStats{
+		MessagesReceived: s.msgCount.Load(),
+		BytesReceived:    s.bytesReceived.Load(),
+		CacheFile:        s.cacheFileName,
+	}
+	if t := s.lastActivity.Load(); t != nil {
+		stats.LastActivity = *t
+	}
+	if p := s.phase.Load(); p != nil {
+		stats.Phase = *p
+	}
+	return stats
+}
+
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	s.msgCount.Add(1)
+	s.bytesReceived.Add(int64(proto.Size(msg)))
+	now := time.Now()
+	s.lastActivity.Store(&now)
+
 	// Don't process the initial AcceptMsg again, it was handled in NewSession.
 	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
 		// For relay mode, we return a log ID immediately to satisfy the client
@@ -405,6 +490,33 @@ func FlushOrphanedFile(ctx context.Context, filePath string, cfg *config.RelayCo
 	return nil
 }
 
+// retireCacheFile is called after flushFile finishes sending a cache file's
+// contents upstream. It removes the file. If Remove fails, the file is
+// renamed to DeliveredSuffix so orphan recovery cannot re-flush it on next
+// startup — re-flushing already-delivered messages would duplicate audit
+// records upstream, which is worse than leaking a stale on-disk file.
+func retireCacheFile(filePath string) {
+	err := os.Remove(filePath)
+	if err == nil {
+		return
+	}
+	delivered := filePath + DeliveredSuffix
+	if renameErr := os.Rename(filePath, delivered); renameErr != nil {
+		slog.Error(
+			"Failed to retire flushed cache file; orphan recovery may re-flush and duplicate upstream records",
+			"path", filePath,
+			"remove_error", err,
+			"rename_error", renameErr,
+		)
+		return
+	}
+	slog.Warn(
+		"Could not remove flushed cache file; renamed to sentinel to prevent re-flush",
+		"path", delivered,
+		"remove_error", err,
+	)
+}
+
 func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cfg *config.RelayConfig) error {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -415,21 +527,17 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 	for {
 		msg, err := readProtoMessage(f)
 		if errors.Is(err, io.EOF) {
-			// All messages sent successfully — now safe to remove the cache file
-			if removeErr := os.Remove(filePath); removeErr != nil {
-				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
-			}
+			// All messages sent successfully — retire the cache file.
+			retireCacheFile(filePath)
 			return nil
 		}
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			// Truncated tail (e.g., crash mid-write). Treat as end-of-stream for
-			// flush purposes so the file can be removed and recovery doesn't loop
+			// flush purposes so the file can be retired and recovery doesn't loop
 			// forever on corrupt trailing bytes.
 			slog.Warn("Cache file has truncated trailing record; flushing what was read",
 				"path", filePath, "error", err)
-			if removeErr := os.Remove(filePath); removeErr != nil {
-				slog.Error("Failed to remove flushed cache file", "path", filePath, "error", removeErr)
-			}
+			retireCacheFile(filePath)
 			return nil
 		}
 		if err != nil {

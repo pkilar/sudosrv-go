@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -75,6 +76,11 @@ func generateSelfSignedCert(t *testing.T) (certPath, keyPath string) {
 // the full lifecycle without going through signal delivery.
 func shutdown(srv *Server) {
 	srv.cancel()
+	if srv.apiServer != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = srv.apiServer.Shutdown(shutCtx)
+		cancel()
+	}
 	for _, l := range srv.listeners {
 		_ = l.Close()
 	}
@@ -189,6 +195,82 @@ func TestStart_TLSBadCertPath(t *testing.T) {
 	}
 	if got := err.Error(); !contains(got, "TLS key pair") {
 		t.Errorf("Start error: got %q, want contains 'TLS key pair'", got)
+	}
+}
+
+// TestStart_APIBindFailure asserts that a port-already-in-use on the API
+// listener is reported synchronously from Start, not silently swallowed by
+// the background Serve goroutine.
+func TestStart_APIBindFailure(t *testing.T) {
+	t.Parallel()
+	// Pre-bind a port and keep it bound so the API server's Listen fails.
+	pre, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pre-bind: %v", err)
+	}
+	defer pre.Close()
+
+	srv := newTestServer(t, &config.Config{
+		Server: config.ServerConfig{
+			Mode:          "local",
+			ListenAddress: "127.0.0.1:0",
+		},
+		LocalStorage: config.LocalStorageConfig{
+			LogDirectory:    t.TempDir(),
+			DirPermissions:  0750,
+			FilePermissions: 0640,
+		},
+		API: config.APIConfig{
+			ListenAddress: pre.Addr().String(),
+			AuthToken:     "secret",
+		},
+	})
+	defer shutdown(srv)
+
+	err = srv.Start()
+	if err == nil {
+		t.Fatal("Start: want error, got nil")
+	}
+	if got := err.Error(); !contains(got, "management API") {
+		t.Errorf("Start error: got %q, want contains 'management API'", got)
+	}
+	if srv.apiServer != nil {
+		t.Errorf("apiServer should not be set after a failed bind; got %#v", srv.apiServer)
+	}
+	if len(srv.listeners) != 0 {
+		t.Errorf("protocol listeners should be closed after API bind failure; got %d", len(srv.listeners))
+	}
+}
+
+// TestStart_APITLSFailure asserts that an invalid API TLS keypair is reported
+// synchronously from Start.
+func TestStart_APITLSFailure(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t, &config.Config{
+		Server: config.ServerConfig{
+			Mode:          "local",
+			ListenAddress: "127.0.0.1:0",
+		},
+		LocalStorage: config.LocalStorageConfig{
+			LogDirectory:    t.TempDir(),
+			DirPermissions:  0750,
+			FilePermissions: 0640,
+		},
+		API: config.APIConfig{
+			ListenAddress: "127.0.0.1:0",
+			AuthToken:     "secret",
+			TLSCertFile:   "/nonexistent/api.crt",
+			TLSKeyFile:    "/nonexistent/api.key",
+		},
+	})
+	defer shutdown(srv)
+
+	err := srv.Start()
+	if err == nil {
+		t.Fatal("Start: want error, got nil")
+	}
+	if got := err.Error(); !contains(got, "management API") {
+		t.Errorf("Start error: got %q, want contains 'management API'", got)
 	}
 }
 

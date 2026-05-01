@@ -17,3 +17,12 @@ relay:
   connect_timeout: 15s
   relay_cache_directory: "/tmp/sudosrv-cache"
   reconnect_attempts: -1
+
+# Optional read-only management HTTP API.
+# Leave listen_address empty (or omit the entire api: block) to disable it.
+#api:
+#  listen_address: "127.0.0.1:30345"
+#  auth_token_file: "/etc/sudosrv/api.token"  # preferred; file content is the bearer token
+#  # auth_token: "raw-token-here"             # alternative; inline (discouraged for prod)
+#  # tls_cert_file: "api.crt"                 # optional TLS for the API listener
+#  # tls_key_file:  "api.key"

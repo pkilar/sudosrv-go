@@ -107,6 +107,14 @@ relay:
   relay_cache_directory: "/var/log/gosudo-relay-cache"
   reconnect_attempts: -1           # -1 = infinite
   # max_reconnect_interval: 1m
+
+# Optional read-only management API. Omit the block (or leave listen_address
+# empty) to disable. See "Management API" below for endpoint details.
+# api:
+#   listen_address: "127.0.0.1:30345"
+#   auth_token_file: "/etc/sudosrv/api.token"
+#   # tls_cert_file: "api.crt"
+#   # tls_key_file:  "api.key"
 ```
 
 ### Supported Escape Sequences
@@ -120,6 +128,56 @@ For `iolog_dir` and `iolog_file`:
 | Host/Command | `%{hostname}`, `%{command}`, `%{command_path}` |
 | Time | `%{year}`, `%{month}`, `%{day}`, `%{hour}`, `%{minute}`, `%{second}`, `%{epoch}` |
 | Generated | `%{seq}`, `%{rand}`, `%{LIVEDIR}`, `%%` |
+
+## Management API
+
+An optional read-only HTTP+JSON API exposes currently active sessions for
+operational visibility. The API is **disabled by default** — set
+`api.listen_address` to enable it.
+
+### Configuration
+
+```yaml
+api:
+  listen_address: "127.0.0.1:30345"        # empty disables the API
+  auth_token_file: "/etc/sudosrv/api.token" # preferred over inline auth_token
+  # auth_token: "raw-token"                 # alternative; inline (discouraged)
+  # tls_cert_file: "api.crt"                # optional TLS for the listener
+  # tls_key_file:  "api.key"
+```
+
+The bearer token is loaded once at startup; rotating it requires a restart.
+Bind to localhost unless TLS and a strong token are in place.
+
+### Endpoints
+
+Both endpoints require an `Authorization: Bearer <token>` header.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/sessions` | Summary list of active sessions, newest first. |
+| GET | `/api/v1/sessions/{id}` | Full metadata for one session, looked up by `session_id` (UUID) or `server_log_id` (base64). URL-escape the segment when using `server_log_id` because it may contain `/`. |
+
+### Example
+
+```bash
+TOKEN=$(cat /etc/sudosrv/api.token)
+
+# List active sessions
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:30345/api/v1/sessions
+
+# Inspect one session
+curl -H "Authorization: Bearer $TOKEN" \
+     http://127.0.0.1:30345/api/v1/sessions/fb8f1722-2cdc-45e6-967f-22e39b2b465b
+```
+
+The detail response includes a `live` block with running counters
+(`messages_received`, `bytes_received`, `last_activity`) and mode-specific
+fields (`session_dir` for local mode; `cache_file` and `phase` —
+`writing`/`flushing` — for relay mode).
+
+Errors are returned as `{"error": "..."}` with `401` for missing or invalid
+tokens and `404` for unknown session IDs.
 
 ## Packaging
 

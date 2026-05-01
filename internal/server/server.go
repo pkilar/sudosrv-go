@@ -4,15 +4,19 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"sudosrv/internal/api"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/relay"
+	"sudosrv/internal/sessions"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -31,6 +35,12 @@ type Server struct {
 	// connSem is a counting semaphore that caps the number of concurrent client
 	// connections. nil when unbounded (MaxConnections <= 0).
 	connSem chan struct{}
+	// registry tracks active sessions for the optional management API. Always
+	// non-nil; reads from a disabled API simply never occur.
+	registry *sessions.Registry
+	// apiServer is the optional management HTTP server. nil when the API is
+	// disabled in config.
+	apiServer *api.Server
 }
 
 // NewServer creates a new server instance.
@@ -44,6 +54,7 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 		listeners:  make([]net.Listener, 0),
 		ctx:        ctx,
 		cancel:     cancel,
+		registry:   sessions.NewRegistry(),
 	}
 	s.config.Store(cfg)
 	if max := cfg.Server.MaxConnections; max > 0 {
@@ -52,23 +63,24 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 	return s, nil
 }
 
-// Start initializes listeners and begins accepting connections.
+// Start initializes listeners and begins accepting connections. It is
+// transactional: every listener (protocol plaintext, protocol TLS, management
+// API) is bound synchronously before any accept or serve goroutine is
+// spawned. A late bind failure (e.g. management API port already in use)
+// therefore cannot leak side effects from a protocol accept loop that had
+// already begun handing connections to the session pipeline.
 func (s *Server) Start() error {
 	cfg := s.config.Load()
 
-	// Start plaintext listener if configured
+	// Phase 1: bind every required listener.
 	if cfg.Server.ListenAddress != "" {
 		plainListener, err := net.Listen("tcp", cfg.Server.ListenAddress)
 		if err != nil {
 			return fmt.Errorf("failed to start plaintext listener on %s: %w", cfg.Server.ListenAddress, err)
 		}
 		s.listeners = append(s.listeners, plainListener)
-		s.waitGroup.Add(1)
-		go s.acceptLoop(plainListener)
-		slog.Info("Started plaintext listener", "address", cfg.Server.ListenAddress)
 	}
 
-	// Start TLS listener if configured
 	if cfg.Server.ListenAddressTLS != "" {
 		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
 			s.closeListeners()
@@ -83,28 +95,62 @@ func (s *Server) Start() error {
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
 		}
-
 		tlsListener, err := tls.Listen("tcp", cfg.Server.ListenAddressTLS, tlsConfig)
 		if err != nil {
 			s.closeListeners()
 			return fmt.Errorf("failed to start TLS listener on %s: %w", cfg.Server.ListenAddressTLS, err)
 		}
 		s.listeners = append(s.listeners, tlsListener)
-		s.waitGroup.Add(1)
-		go s.acceptLoop(tlsListener)
-		slog.Info("Started TLS listener", "address", cfg.Server.ListenAddressTLS)
 	}
 
 	if len(s.listeners) == 0 {
 		return fmt.Errorf("no listeners configured, server not started")
 	}
 
-	// Start metrics logging goroutine
+	if cfg.API.ListenAddress != "" {
+		apiSrv, err := api.NewServer(cfg.API, s.registry)
+		if err != nil {
+			s.closeListeners()
+			return fmt.Errorf("failed to create management API: %w", err)
+		}
+		if err := apiSrv.Listen(); err != nil {
+			s.closeListeners()
+			return fmt.Errorf("failed to start management API: %w", err)
+		}
+		s.apiServer = apiSrv
+	}
+
+	// Phase 2: every listener is bound — start serving.
+	plaintextAddr := cfg.Server.ListenAddress
+	tlsAddr := cfg.Server.ListenAddressTLS
+	for _, l := range s.listeners {
+		s.waitGroup.Add(1)
+		go s.acceptLoop(l)
+	}
+	if plaintextAddr != "" {
+		slog.Info("Started plaintext listener", "address", plaintextAddr)
+	}
+	if tlsAddr != "" {
+		slog.Info("Started TLS listener", "address", tlsAddr)
+	}
+	if s.apiServer != nil {
+		s.waitGroup.Add(1)
+		go func() {
+			defer s.waitGroup.Done()
+			if err := s.apiServer.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("Management API server exited with error", "error", err)
+			}
+		}()
+		slog.Info("Started management API",
+			"address", s.apiServer.Addr(),
+			"tls", cfg.API.TLSCertFile != "")
+	}
+
+	// Phase 3: ancillary goroutines under the server's lifecycle so shutdown
+	// cancels them cleanly.
 	s.waitGroup.Add(1)
 	go s.logMetricsPeriodically()
 
-	// Kick off orphan recovery for relay mode under the server's lifecycle
-	// so shutdown cancels any in-flight flush and waits for it to unwind.
 	if cfg.Server.Mode == "relay" {
 		s.waitGroup.Add(1)
 		go func() {
@@ -185,7 +231,7 @@ func (s *Server) acceptLoop(listener net.Listener) {
 				metrics.Global.DecrementActiveConnections()
 			}()
 			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
-			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config.Load())
+			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config.Load(), s.registry)
 			handler.Handle()
 			slog.Debug("Connection handler finished", "remote_addr", conn.RemoteAddr())
 		}()
@@ -213,6 +259,17 @@ func (s *Server) Wait() {
 
 	// Cancel context to signal all goroutines to stop
 	s.cancel()
+
+	// Stop the management API first so callers see a clean refusal rather than
+	// a stale snapshot of sessions that are about to tear down. http.Server.Shutdown
+	// drains in-flight requests but stops accepting new ones immediately.
+	if s.apiServer != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.apiServer.Shutdown(shutCtx); err != nil {
+			slog.Error("Management API shutdown error", "error", err)
+		}
+		cancel()
+	}
 
 	// Close all listeners to unblock acceptLoop
 	for _, l := range s.listeners {
@@ -283,6 +340,16 @@ func restartRequiredReloadChange(oldCfg, newCfg *config.Config) string {
 		return "server.tls_key_file changed"
 	case oldCfg.Server.MaxConnections != newCfg.Server.MaxConnections:
 		return fmt.Sprintf("server.max_connections changed from %d to %d", oldCfg.Server.MaxConnections, newCfg.Server.MaxConnections)
+	case oldCfg.API.ListenAddress != newCfg.API.ListenAddress:
+		return fmt.Sprintf("api.listen_address changed from %q to %q", oldCfg.API.ListenAddress, newCfg.API.ListenAddress)
+	case oldCfg.API.AuthToken != newCfg.API.AuthToken:
+		return "api.auth_token changed"
+	case oldCfg.API.AuthTokenFile != newCfg.API.AuthTokenFile:
+		return "api.auth_token_file changed"
+	case oldCfg.API.TLSCertFile != newCfg.API.TLSCertFile:
+		return "api.tls_cert_file changed"
+	case oldCfg.API.TLSKeyFile != newCfg.API.TLSKeyFile:
+		return "api.tls_key_file changed"
 	default:
 		return ""
 	}
