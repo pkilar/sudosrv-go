@@ -177,11 +177,13 @@ func (h *Handler) Handle() {
 			}
 		}
 
-		// Apply rate limiting to prevent memory exhaustion
+		// Apply rate limiting to prevent memory exhaustion.
+		// All writes below use h.ctx so a stalled client can't pin the handler
+		// past shutdown — see Server.Wait's bounded grace period.
 		if !h.checkRateLimit() {
 			slog.Warn("Rate limit exceeded, closing connection", "remote_addr", h.conn.RemoteAddr())
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Rate limit exceeded"}}
-			_ = h.processor.WriteServerMessage(errMsg)
+			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
 			return
 		}
 
@@ -192,14 +194,14 @@ func (h *Handler) Handle() {
 				"message_errors", metrics.Global.GetMessageErrors())
 			// Attempt to send a fatal error to the client
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
-			_ = h.processor.WriteServerMessage(errMsg)
+			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
 			return
 		}
 
 		metrics.Global.IncrementMessagesProcessed()
 
 		if serverMsg != nil {
-			if err := h.processor.WriteServerMessage(serverMsg); err != nil {
+			if err := h.processor.WriteServerMessageContext(h.ctx, serverMsg); err != nil {
 				slog.Error("Failed to write server message", "error", err, "remote_addr", h.conn.RemoteAddr())
 				return
 			}
@@ -346,6 +348,18 @@ func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
 		info.Provider = p
 	}
 	h.registry.Register(info)
+}
+
+// refreshLogIDFromSession overwrites h.logID with the session's authoritative
+// base64-encoded server log_id. Until the session is created, h.logID holds the
+// raw UUID string for early diagnostic logging. Once the session exists, the
+// log_id used by storage on disk, by the management API, and returned to the
+// client is the base64 form — slog must use the same form so operators can
+// correlate log entries with sessions.
+func (h *Handler) refreshLogIDFromSession() {
+	if lp, ok := h.session.(logIDProvider); ok {
+		h.logID = lp.LogID()
+	}
 }
 
 // handleHello responds to a ClientHello.
@@ -573,6 +587,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local storage session: %w", err)
 		}
+		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "local", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementLocalSessions()
@@ -584,6 +599,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
+		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "relay", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementRelaySessions()
@@ -611,6 +627,7 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 			return nil, fmt.Errorf("failed to create local event-only session: %w", err)
 		}
 		h.session = session
+		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "local", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementLocalSessions()
@@ -622,6 +639,7 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 			return nil, fmt.Errorf("failed to create relay event-only session: %w", err)
 		}
 		h.session = session
+		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "relay", acceptMsg)
 		metrics.Global.IncrementSessions()
 		metrics.Global.IncrementRelaySessions()
