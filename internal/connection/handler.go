@@ -482,7 +482,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	}
 
 	// Build the event record
-	eventRecord := map[string]interface{}{
+	eventRecord := map[string]any{
 		"event_type": "reject",
 		"reason":     rejectMsg.GetReason(),
 	}
@@ -491,7 +491,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	}
 
 	// Extract info messages
-	infoMap := make(map[string]interface{})
+	infoMap := make(map[string]any)
 	for _, info := range rejectMsg.GetInfoMsgs() {
 		key := info.GetKey()
 		switch v := info.Value.(type) {

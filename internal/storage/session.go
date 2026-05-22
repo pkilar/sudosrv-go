@@ -41,7 +41,7 @@ type Session struct {
 	timingFile      *os.File
 	logJSONPath     string // path to log.json; writes go through writeFileAtomic
 	cumulativeDelay map[string]time.Duration
-	logMeta         map[string]interface{}
+	logMeta         map[string]any
 	passwordFilter  *PasswordFilter // Password filtering for security
 	lastCommitTime  time.Time       // Tracks when last commit point was sent
 	fileMux         sync.Mutex
@@ -1007,7 +1007,7 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 
 // handleAlert records a security alert in the session's log.json metadata.
 func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, error) {
-	alert := map[string]interface{}{
+	alert := map[string]any{
 		"reason": alertMsg.GetReason(),
 	}
 	if alertTime := alertMsg.GetAlertTime(); alertTime != nil {
@@ -1015,7 +1015,7 @@ func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, err
 	}
 
 	// Extract info messages
-	infoMap := make(map[string]interface{})
+	infoMap := make(map[string]any)
 	for _, info := range alertMsg.GetInfoMsgs() {
 		key := info.GetKey()
 		switch v := info.Value.(type) {
@@ -1032,7 +1032,7 @@ func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, err
 	}
 
 	// Append to alerts array in metadata
-	alerts, _ := s.logMeta["alerts"].([]interface{})
+	alerts, _ := s.logMeta["alerts"].([]any)
 	alerts = append(alerts, alert)
 	s.logMeta["alerts"] = alerts
 
@@ -1047,7 +1047,7 @@ func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, err
 // handleSubCommandAccept records a sub-command accept event in the session metadata.
 // Sub-commands share the parent session's iolog_path, matching C sudo_logsrvd behavior.
 func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"event_type": "accept",
 	}
 	if st := acceptMsg.GetSubmitTime(); st != nil {
@@ -1055,7 +1055,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 	}
 
 	// Extract info messages
-	infoMap := make(map[string]interface{})
+	infoMap := make(map[string]any)
 	for _, info := range acceptMsg.GetInfoMsgs() {
 		key := info.GetKey()
 		switch v := info.Value.(type) {
@@ -1077,7 +1077,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 		}
 	}
 
-	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
 	s.logMeta["sub_commands"] = subCmds
 
@@ -1092,7 +1092,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 
 // handleSubCommandReject records a sub-command reject event in the session metadata.
 func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"event_type": "reject",
 		"reason":     rejectMsg.GetReason(),
 	}
@@ -1101,7 +1101,7 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 	}
 
 	// Extract info messages
-	infoMap := make(map[string]interface{})
+	infoMap := make(map[string]any)
 	for _, info := range rejectMsg.GetInfoMsgs() {
 		key := info.GetKey()
 		switch v := info.Value.(type) {
@@ -1123,7 +1123,7 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 		}
 	}
 
-	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
 	s.logMeta["sub_commands"] = subCmds
 
@@ -1224,7 +1224,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		timingFile.Close()
 		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
 	}
-	logMeta := make(map[string]interface{})
+	logMeta := make(map[string]any)
 	if err := json.NewDecoder(logJSONFile).Decode(&logMeta); err != nil {
 		logJSONFile.Close()
 		timingFile.Close()
@@ -1283,8 +1283,8 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	// Record restart event in log.json
-	restarts, _ := logMeta["restarts"].([]interface{})
-	restartEntry := map[string]interface{}{
+	restarts, _ := logMeta["restarts"].([]any)
+	restartEntry := map[string]any{
 		"time": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
