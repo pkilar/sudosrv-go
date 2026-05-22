@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sudosrv/internal/config"
+	"sudosrv/internal/protocol"
 	"sudosrv/internal/sessions"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
@@ -41,7 +44,7 @@ type Session struct {
 	timingFile      *os.File
 	logJSONPath     string // path to log.json; writes go through writeFileAtomic
 	cumulativeDelay map[string]time.Duration
-	logMeta         map[string]interface{}
+	logMeta         map[string]any
 	passwordFilter  *PasswordFilter // Password filtering for security
 	lastCommitTime  time.Time       // Tracks when last commit point was sent
 	fileMux         sync.Mutex
@@ -135,12 +138,7 @@ func writeNewFile(path string, data []byte, perm os.FileMode) (err error) {
 // containsDotDot checks whether a path contains a ".." component,
 // matching C sudo_logsrvd's contains_dot_dot() check.
 func containsDotDot(path string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "..")
 }
 
 // pathWithinBase returns true when target stays lexically within base.
@@ -256,7 +254,7 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 		logJSONPath: filepath.Join(sessionDir, "log.json"),
 		logMeta:     make(map[string]any),
 	}
-	event.addInfoMessages(acceptMsg.GetInfoMsgs())
+	maps.Copy(event.logMeta, protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()))
 	event.logMeta["event_type"] = "accept"
 	event.logMeta["server_log_id"] = logID
 	event.logMeta["expect_iobufs"] = false
@@ -309,9 +307,7 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		if alertTime := event.AlertMsg.GetAlertTime(); alertTime != nil {
 			alert["alert_time"] = time.Unix(alertTime.TvSec, int64(alertTime.TvNsec)).UTC().Format(time.RFC3339Nano)
 		}
-		info := make(map[string]any)
-		addInfoMessagesToMap(info, event.AlertMsg.GetInfoMsgs())
-		if len(info) > 0 {
+		if info := protocol.InfoMsgsToMap(event.AlertMsg.GetInfoMsgs()); len(info) > 0 {
 			alert["info"] = info
 		}
 		alerts, _ := s.logMeta["alerts"].([]any)
@@ -320,10 +316,14 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		return nil, s.updateLogJSON()
 	case *pb.ClientMessage_AcceptMsg:
 		entry := map[string]any{"event_type": "accept"}
-		addInfoMessagesToMap(entry, event.AcceptMsg.GetInfoMsgs())
-		entry["event_type"] = "accept"
 		if st := event.AcceptMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+		}
+		for k, v := range protocol.InfoMsgsToMap(event.AcceptMsg.GetInfoMsgs()) {
+			if _, exists := entry[k]; exists {
+				continue
+			}
+			entry[k] = v
 		}
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
@@ -334,11 +334,14 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 			"event_type": "reject",
 			"reason":     event.RejectMsg.GetReason(),
 		}
-		addInfoMessagesToMap(entry, event.RejectMsg.GetInfoMsgs())
-		entry["event_type"] = "reject"
-		entry["reason"] = event.RejectMsg.GetReason()
 		if st := event.RejectMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
+		}
+		for k, v := range protocol.InfoMsgsToMap(event.RejectMsg.GetInfoMsgs()) {
+			if _, exists := entry[k]; exists {
+				continue
+			}
+			entry[k] = v
 		}
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
@@ -354,27 +357,6 @@ func (s *EventSession) Close() error {
 		slog.Info("Closed local event-only session", "log_id", s.logID)
 	})
 	return nil
-}
-
-func (s *EventSession) addInfoMessages(infos []*pb.InfoMessage) {
-	addInfoMessagesToMap(s.logMeta, infos)
-}
-
-func addInfoMessagesToMap(dst map[string]any, infos []*pb.InfoMessage) {
-	for _, info := range infos {
-		key := info.GetKey()
-		if key == "" {
-			continue
-		}
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			dst[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			dst[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			dst[key] = v.Strlistval.GetStrings()
-		}
-	}
 }
 
 func (s *EventSession) finalize(exitMsg *pb.ExitMessage) {
@@ -621,7 +603,7 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 	seqStr := ""
 	val := nextSeq
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		seqStr = string(base36[val%36]) + seqStr
 		val /= 36
 	}
@@ -1007,32 +989,19 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 
 // handleAlert records a security alert in the session's log.json metadata.
 func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, error) {
-	alert := map[string]interface{}{
+	alert := map[string]any{
 		"reason": alertMsg.GetReason(),
 	}
 	if alertTime := alertMsg.GetAlertTime(); alertTime != nil {
 		alert["alert_time"] = time.Unix(alertTime.TvSec, int64(alertTime.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Extract info messages
-	infoMap := make(map[string]interface{})
-	for _, info := range alertMsg.GetInfoMsgs() {
-		key := info.GetKey()
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			infoMap[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			infoMap[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			infoMap[key] = v.Strlistval.GetStrings()
-		}
-	}
-	if len(infoMap) > 0 {
-		alert["info"] = infoMap
+	if info := protocol.InfoMsgsToMap(alertMsg.GetInfoMsgs()); len(info) > 0 {
+		alert["info"] = info
 	}
 
 	// Append to alerts array in metadata
-	alerts, _ := s.logMeta["alerts"].([]interface{})
+	alerts, _ := s.logMeta["alerts"].([]any)
 	alerts = append(alerts, alert)
 	s.logMeta["alerts"] = alerts
 
@@ -1047,37 +1016,23 @@ func (s *Session) handleAlert(alertMsg *pb.AlertMessage) (*pb.ServerMessage, err
 // handleSubCommandAccept records a sub-command accept event in the session metadata.
 // Sub-commands share the parent session's iolog_path, matching C sudo_logsrvd behavior.
 func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"event_type": "accept",
 	}
 	if st := acceptMsg.GetSubmitTime(); st != nil {
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Extract info messages
-	infoMap := make(map[string]interface{})
-	for _, info := range acceptMsg.GetInfoMsgs() {
-		key := info.GetKey()
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			infoMap[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			infoMap[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			infoMap[key] = v.Strlistval.GetStrings()
+	// Merge client-supplied info messages, but never let them clobber the
+	// authoritative fields already set on entry.
+	for k, v := range protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()) {
+		if _, exists := entry[k]; exists {
+			continue
 		}
-	}
-	if len(infoMap) > 0 {
-		for k, v := range infoMap {
-			// Preserve authoritative fields already set by the server.
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		entry[k] = v
 	}
 
-	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
 	s.logMeta["sub_commands"] = subCmds
 
@@ -1092,7 +1047,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 
 // handleSubCommandReject records a sub-command reject event in the session metadata.
 func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"event_type": "reject",
 		"reason":     rejectMsg.GetReason(),
 	}
@@ -1100,30 +1055,16 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Extract info messages
-	infoMap := make(map[string]interface{})
-	for _, info := range rejectMsg.GetInfoMsgs() {
-		key := info.GetKey()
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			infoMap[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			infoMap[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			infoMap[key] = v.Strlistval.GetStrings()
+	// Merge client-supplied info messages, but never let them clobber the
+	// authoritative fields already set on entry.
+	for k, v := range protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()) {
+		if _, exists := entry[k]; exists {
+			continue
 		}
-	}
-	if len(infoMap) > 0 {
-		for k, v := range infoMap {
-			// Preserve authoritative fields already set by the server.
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		entry[k] = v
 	}
 
-	subCmds, _ := s.logMeta["sub_commands"].([]interface{})
+	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
 	s.logMeta["sub_commands"] = subCmds
 
@@ -1224,7 +1165,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		timingFile.Close()
 		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
 	}
-	logMeta := make(map[string]interface{})
+	logMeta := make(map[string]any)
 	if err := json.NewDecoder(logJSONFile).Decode(&logMeta); err != nil {
 		logJSONFile.Close()
 		timingFile.Close()
@@ -1283,8 +1224,8 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	// Record restart event in log.json
-	restarts, _ := logMeta["restarts"].([]interface{})
-	restartEntry := map[string]interface{}{
+	restarts, _ := logMeta["restarts"].([]any)
+	restartEntry := map[string]any{
 		"time": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {

@@ -187,7 +187,7 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 	acceptMsg := createTestAcceptMessage()
 
 	// 3. Create a new relay session
-	session, err := NewSession(context.Background(), sessionUUID, acceptMsg, relayCfg, nil)
+	session, err := NewSession(t.Context(), sessionUUID, acceptMsg, relayCfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestRelayCommitPoints(t *testing.T) {
 	sessionUUID := uuid.MustParse("b2c3d4e5-f6a7-4b2c-9d3e-0f1a2b3c4d5e")
 	acceptMsg := createTestAcceptMessage()
 
-	session, err := NewSession(context.Background(), sessionUUID, acceptMsg, relayCfg, nil)
+	session, err := NewSession(t.Context(), sessionUUID, acceptMsg, relayCfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestRelayCommitPointThrottling(t *testing.T) {
 	sessionUUID := uuid.MustParse("c3d4e5f6-a7b8-4c3d-ae4f-1a2b3c4d5e6f")
 	acceptMsg := createTestAcceptMessage()
 
-	session, err := NewSession(context.Background(), sessionUUID, acceptMsg, relayCfg, nil)
+	session, err := NewSession(t.Context(), sessionUUID, acceptMsg, relayCfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}

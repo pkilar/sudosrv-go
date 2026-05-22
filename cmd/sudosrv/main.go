@@ -242,8 +242,10 @@ func runServerWithGracefulShutdown(cfg *config.Config, configPath string, logLev
 
 	slog.Info("Server started successfully")
 
-	// Wait for shutdown signal and handle graceful shutdown
-	srv.Wait()
+	// Wait for shutdown signal and handle graceful shutdown.
+	// shutdownTimeout bounds how long we wait for goroutines after SIGTERM/SIGINT
+	// before logging and returning so the process can actually exit.
+	srv.Wait(shutdownTimeout)
 
 	slog.Info("Server shutdown completed")
 	return nil

@@ -194,7 +194,7 @@ func TestProcessor(t *testing.T) {
 		defer serverConn.Close()
 
 		proc := NewProcessor(serverConn, serverConn)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 		defer cancel()
 
 		_, err := proc.ReadServerMessageContext(ctx)
@@ -209,7 +209,7 @@ func TestProcessor(t *testing.T) {
 		defer serverConn.Close()
 
 		proc := NewProcessor(serverConn, serverConn)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 		defer cancel()
 
 		msg := &sudosrv_proto.ClientMessage{

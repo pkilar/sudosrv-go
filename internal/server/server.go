@@ -134,13 +134,11 @@ func (s *Server) Start() error {
 		slog.Info("Started TLS listener", "address", tlsAddr)
 	}
 	if s.apiServer != nil {
-		s.waitGroup.Add(1)
-		go func() {
-			defer s.waitGroup.Done()
+		s.waitGroup.Go(func() {
 			if err := s.apiServer.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("Management API server exited with error", "error", err)
 			}
-		}()
+		})
 		slog.Info("Started management API",
 			"address", s.apiServer.Addr(),
 			"tls", cfg.API.TLSCertFile != "")
@@ -152,13 +150,11 @@ func (s *Server) Start() error {
 	go s.logMetricsPeriodically()
 
 	if cfg.Server.Mode == "relay" {
-		s.waitGroup.Add(1)
-		go func() {
-			defer s.waitGroup.Done()
+		s.waitGroup.Go(func() {
 			if err := relay.RecoverOrphans(s.ctx, &cfg.Relay); err != nil {
 				slog.Error("Orphan relay recovery reported errors", "error", err)
 			}
-		}()
+		})
 	}
 
 	return nil
@@ -195,8 +191,13 @@ func (s *Server) acceptLoop(listener net.Listener) {
 			default:
 				metrics.Global.IncrementFailedConnections()
 				slog.Error("Failed to accept connection", "error", err, "failed_connections", metrics.Global.GetFailedConnections())
-				// Brief backoff to avoid tight error loop on transient failures
-				time.Sleep(100 * time.Millisecond)
+				// Brief backoff to avoid tight error loop on transient failures.
+				// Honour ctx so shutdown is not held up for 100ms per accept loop.
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
 			continue
 		}
@@ -240,7 +241,13 @@ func (s *Server) acceptLoop(listener net.Listener) {
 
 // Wait blocks until the server is shut down.
 // SIGHUP triggers a config reload; SIGINT/SIGTERM trigger graceful shutdown.
-func (s *Server) Wait() {
+//
+// shutdownTimeout caps the time spent waiting for goroutines after shutdown is
+// signalled. A wedged handler (slow client, stuck syscall) cannot then block
+// the process from exiting; the timeout fires and we return with a warning so
+// the surrounding process supervisor can take over. Zero disables the cap and
+// blocks indefinitely.
+func (s *Server) Wait(shutdownTimeout time.Duration) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigChan)
@@ -278,8 +285,24 @@ func (s *Server) Wait() {
 		}
 	}
 
-	// Wait for all goroutines to finish
-	s.waitGroup.Wait()
+	// Wait for all goroutines to finish, bounded by shutdownTimeout.
+	done := make(chan struct{})
+	go func() {
+		s.waitGroup.Wait()
+		close(done)
+	}()
+	if shutdownTimeout <= 0 {
+		<-done
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		slog.Warn("Shutdown timeout exceeded; some goroutines did not exit cleanly",
+			"timeout", shutdownTimeout,
+			"active_connections", metrics.Global.GetActiveConnections(),
+			"active_sessions", metrics.Global.GetActiveSessions())
+	}
 }
 
 // reload re-reads the configuration file and applies changes that can be

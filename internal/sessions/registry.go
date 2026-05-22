@@ -6,7 +6,7 @@
 package sessions
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -121,7 +121,8 @@ func (r *Registry) Snapshot() []SessionInfo {
 		out = append(out, s)
 	}
 	r.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
+	// Newest-first by StartedAt; Compare(b, a) so larger (newer) sorts first.
+	slices.SortFunc(out, func(a, b SessionInfo) int { return b.StartedAt.Compare(a.StartedAt) })
 	return out
 }
 

@@ -101,7 +101,7 @@ func TestStorageSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		if err := json.Unmarshal(data, &logMeta); err != nil {
 			t.Fatalf("Failed to unmarshal log.json: %v", err)
 		}
@@ -528,7 +528,7 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
 
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		if err := json.Unmarshal(data, &logMeta); err != nil {
 			t.Fatalf("Failed to unmarshal log.json: %v", err)
 		}
@@ -587,16 +587,16 @@ func TestStorageSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		if err := json.Unmarshal(data, &logMeta); err != nil {
 			t.Fatalf("Failed to unmarshal log.json: %v", err)
 		}
 
-		alerts, ok := logMeta["alerts"].([]interface{})
+		alerts, ok := logMeta["alerts"].([]any)
 		if !ok || len(alerts) != 1 {
 			t.Fatalf("Expected 1 alert in log.json, got %v", logMeta["alerts"])
 		}
-		alert := alerts[0].(map[string]interface{})
+		alert := alerts[0].(map[string]any)
 		if alert["reason"] != "policy violation detected" {
 			t.Errorf("Expected alert reason 'policy violation detected', got '%v'", alert["reason"])
 		}
@@ -651,14 +651,14 @@ func TestStorageSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		json.Unmarshal(data, &logMeta)
 
-		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		subCmds, ok := logMeta["sub_commands"].([]any)
 		if !ok || len(subCmds) != 1 {
 			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
 		}
-		subCmd := subCmds[0].(map[string]interface{})
+		subCmd := subCmds[0].(map[string]any)
 		if subCmd["event_type"] != "accept" {
 			t.Errorf("Expected event_type 'accept', got '%v'", subCmd["event_type"])
 		}
@@ -718,14 +718,14 @@ func TestStorageSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		json.Unmarshal(data, &logMeta)
 
-		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		subCmds, ok := logMeta["sub_commands"].([]any)
 		if !ok || len(subCmds) != 1 {
 			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
 		}
-		subCmd := subCmds[0].(map[string]interface{})
+		subCmd := subCmds[0].(map[string]any)
 		if subCmd["event_type"] != "reject" {
 			t.Errorf("Expected event_type 'reject', got '%v'", subCmd["event_type"])
 		}
@@ -760,7 +760,7 @@ func TestStorageSession(t *testing.T) {
 		_, _ = session.HandleClientMessage(acceptClientMsg)
 
 		// Send multiple sub-commands
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			subCmdMsg := &pb.ClientMessage{
 				Type: &pb.ClientMessage_AcceptMsg{
 					AcceptMsg: &pb.AcceptMessage{
@@ -783,10 +783,10 @@ func TestStorageSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read log.json: %v", err)
 		}
-		var logMeta map[string]interface{}
+		var logMeta map[string]any
 		json.Unmarshal(data, &logMeta)
 
-		subCmds, ok := logMeta["sub_commands"].([]interface{})
+		subCmds, ok := logMeta["sub_commands"].([]any)
 		if !ok || len(subCmds) != 3 {
 			t.Fatalf("Expected 3 sub_commands, got %d", len(subCmds))
 		}
@@ -833,7 +833,7 @@ func TestCommitPointThrottling(t *testing.T) {
 	}
 
 	// Subsequent events within the 10s window should NOT return commit points
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		resp, err := session.HandleClientMessage(makeIoMsg())
 		if err != nil {
 			t.Fatalf("I/O event %d failed: %v", i+2, err)
@@ -1412,7 +1412,7 @@ func TestDefaultValuesForAbsentFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read log.json: %v", err)
 	}
-	var logMeta map[string]interface{}
+	var logMeta map[string]any
 	if err := json.Unmarshal(data, &logMeta); err != nil {
 		t.Fatalf("Failed to unmarshal log.json: %v", err)
 	}
