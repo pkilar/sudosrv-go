@@ -262,29 +262,6 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 	}
 }
 
-// flattenInfoMsgs converts repeated InfoMessage entries into a JSON-friendly
-// map[string]any keyed by InfoMessage.key. Mirrors the per-type switch used
-// when persisting log.json so the management API and the on-disk record carry
-// the same shape.
-func flattenInfoMsgs(infos []*pb.InfoMessage) map[string]any {
-	out := make(map[string]any, len(infos))
-	for _, info := range infos {
-		key := info.GetKey()
-		if key == "" {
-			continue
-		}
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			out[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			out[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			out[key] = v.Strlistval.GetStrings()
-		}
-	}
-	return out
-}
-
 // registerSession adds the just-created session to the registry, if one is
 // configured. Static fields are populated from the AcceptMessage; the live
 // MetadataProvider hook is set when the session implements it. ServerLogID is
@@ -303,7 +280,7 @@ func (h *Handler) registerSession(sessionUUID uuid.UUID, mode string, acceptMsg 
 		RemoteAddr:   h.conn.RemoteAddr().String(),
 		StartedAt:    h.startedAt,
 		ExpectIobufs: acceptMsg.GetExpectIobufs(),
-		Info:         flattenInfoMsgs(acceptMsg.GetInfoMsgs()),
+		Info:         protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()),
 	}
 	if st := acceptMsg.GetSubmitTime(); st != nil {
 		info.SubmitTime = time.Unix(st.TvSec, int64(st.TvNsec)).UTC()
@@ -490,27 +467,14 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 		eventRecord["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Extract info messages
-	infoMap := make(map[string]any)
-	for _, info := range rejectMsg.GetInfoMsgs() {
-		key := info.GetKey()
-		switch v := info.Value.(type) {
-		case *pb.InfoMessage_Strval:
-			infoMap[key] = v.Strval
-		case *pb.InfoMessage_Numval:
-			infoMap[key] = v.Numval
-		case *pb.InfoMessage_Strlistval:
-			infoMap[key] = v.Strlistval.GetStrings()
+	// Merge client-supplied info messages into the record, but never let them
+	// overwrite the authoritative fields (event_type, reason, submit_time) we
+	// already set above.
+	for k, v := range protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()) {
+		if _, exists := eventRecord[k]; exists {
+			continue
 		}
-	}
-	if len(infoMap) > 0 {
-		for k, v := range infoMap {
-			// Preserve authoritative fields already set by the server.
-			if _, exists := eventRecord[k]; exists {
-				continue
-			}
-			eventRecord[k] = v
-		}
+		eventRecord[k] = v
 	}
 
 	data, err := json.MarshalIndent(eventRecord, "", "  ")
