@@ -42,6 +42,7 @@ type Handler struct {
 	// sessionFactories allows for injecting mock session creators during tests.
 	sessionFactories struct {
 		newLocalStorageSession func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
+		newLocalEventSession   func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
 		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 	}
@@ -106,6 +107,9 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 	// Initialize factories to point to the real session creation functions.
 	h.sessionFactories.newLocalStorageSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
 		return storage.NewSession(sessionUUID, acceptMsg, localCfg)
+	}
+	h.sessionFactories.newLocalEventSession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
+		return storage.NewEventSession(sessionUUID, acceptMsg, localCfg)
 	}
 	h.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
 		// onDone is invoked from the relay's background runner goroutine
@@ -584,13 +588,13 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
 	slog.Info("Handling event-only log (no I/O buffers expected)", "remote_addr", h.conn.RemoteAddr())
 
+	var err error
 	switch h.config.Server.Mode {
 	case "local":
-		session, err := storage.NewEventSession(sessionUUID, acceptMsg, &h.config.LocalStorage)
+		h.session, err = h.sessionFactories.newLocalEventSession(sessionUUID, acceptMsg, &h.config.LocalStorage)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local event-only session: %w", err)
 		}
-		h.session = session
 		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "local", acceptMsg)
 		metrics.Global.IncrementSessions()
@@ -598,11 +602,10 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 		slog.Info("Started local event-only session", "log_id", h.logID,
 			"total_sessions", metrics.Global.GetTotalSessions(), "local_sessions", metrics.Global.GetLocalSessions())
 	case "relay":
-		session, err := h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
+		h.session, err = h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create relay event-only session: %w", err)
 		}
-		h.session = session
 		h.refreshLogIDFromSession()
 		h.registerSession(sessionUUID, "relay", acceptMsg)
 		metrics.Global.IncrementSessions()
