@@ -2,7 +2,6 @@
 package connection
 
 import (
-	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -1096,7 +1095,7 @@ func TestRelay_DoneBeforeRegisterDoesNotOrphan(t *testing.T) {
 	}
 
 	registry := sessions.NewRegistry()
-	handler := NewHandlerWithContext(context.Background(), serverConn, cfg, registry)
+	handler := NewHandlerWithContext(t.Context(), serverConn, cfg, registry)
 	handler.sessionFactories.newRelaySession = func(sessionUUID uuid.UUID, _ *pb.AcceptMessage, _ *config.RelayConfig) (SessionHandler, error) {
 		// Simulate the race: the runner finished and called Deregister
 		// before registerSession had a chance to add the entry. The
