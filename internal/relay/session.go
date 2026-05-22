@@ -424,28 +424,42 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 	}
 	slog.Info("Found orphaned relay files", "count", len(files))
 
+	// Bounded worker pool: spawn at most maxConcurrentFlushes goroutines, not
+	// one per file. With a stale cache from a multi-day outage `files` can run
+	// into the thousands, and the old pattern allocated a goroutine stack for
+	// every entry just to block on a 5-slot semaphore.
 	const maxConcurrentFlushes = 5
-	semaphore := make(chan struct{}, maxConcurrentFlushes)
+	workers := min(maxConcurrentFlushes, len(files))
+	jobs := make(chan string, len(files))
 	errChan := make(chan error, len(files))
 
-	for _, file := range files {
-		go func(filename string) {
-			select {
-			case semaphore <- struct{}{}:
-			case <-ctx.Done():
-				errChan <- ctx.Err()
-				return
-			}
-			defer func() { <-semaphore }()
-
-			slog.Debug("Flushing orphaned relay file", "file", filename)
-			errChan <- FlushOrphanedFile(ctx, filename, cfg)
-		}(file)
+	for _, f := range files {
+		jobs <- f
 	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for filename := range jobs {
+				// Bail between jobs on cancellation. FlushOrphanedFile is
+				// itself ctx-aware so a mid-flush cancel propagates through
+				// errChan via the returned error.
+				if err := ctx.Err(); err != nil {
+					errChan <- err
+					return
+				}
+				slog.Debug("Flushing orphaned relay file", "file", filename)
+				errChan <- FlushOrphanedFile(ctx, filename, cfg)
+			}
+		})
+	}
+	wg.Wait()
+	close(errChan)
 
 	var flushErrors []error
-	for i := 0; i < len(files); i++ {
-		if err := <-errChan; err != nil {
+	for err := range errChan {
+		if err != nil {
 			flushErrors = append(flushErrors, err)
 		}
 	}
