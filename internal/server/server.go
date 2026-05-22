@@ -134,13 +134,11 @@ func (s *Server) Start() error {
 		slog.Info("Started TLS listener", "address", tlsAddr)
 	}
 	if s.apiServer != nil {
-		s.waitGroup.Add(1)
-		go func() {
-			defer s.waitGroup.Done()
+		s.waitGroup.Go(func() {
 			if err := s.apiServer.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("Management API server exited with error", "error", err)
 			}
-		}()
+		})
 		slog.Info("Started management API",
 			"address", s.apiServer.Addr(),
 			"tls", cfg.API.TLSCertFile != "")
@@ -152,13 +150,11 @@ func (s *Server) Start() error {
 	go s.logMetricsPeriodically()
 
 	if cfg.Server.Mode == "relay" {
-		s.waitGroup.Add(1)
-		go func() {
-			defer s.waitGroup.Done()
+		s.waitGroup.Go(func() {
 			if err := relay.RecoverOrphans(s.ctx, &cfg.Relay); err != nil {
 				slog.Error("Orphan relay recovery reported errors", "error", err)
 			}
-		}()
+		})
 	}
 
 	return nil

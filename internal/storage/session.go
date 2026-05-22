@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/sessions"
@@ -135,12 +136,7 @@ func writeNewFile(path string, data []byte, perm os.FileMode) (err error) {
 // containsDotDot checks whether a path contains a ".." component,
 // matching C sudo_logsrvd's contains_dot_dot() check.
 func containsDotDot(path string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "..")
 }
 
 // pathWithinBase returns true when target stays lexically within base.
@@ -621,7 +617,7 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 	seqStr := ""
 	val := nextSeq
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		seqStr = string(base36[val%36]) + seqStr
 		val /= 36
 	}

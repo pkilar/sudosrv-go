@@ -760,7 +760,7 @@ func TestStorageSession(t *testing.T) {
 		_, _ = session.HandleClientMessage(acceptClientMsg)
 
 		// Send multiple sub-commands
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			subCmdMsg := &pb.ClientMessage{
 				Type: &pb.ClientMessage_AcceptMsg{
 					AcceptMsg: &pb.AcceptMessage{
@@ -833,7 +833,7 @@ func TestCommitPointThrottling(t *testing.T) {
 	}
 
 	// Subsequent events within the 10s window should NOT return commit points
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		resp, err := session.HandleClientMessage(makeIoMsg())
 		if err != nil {
 			t.Fatalf("I/O event %d failed: %v", i+2, err)
