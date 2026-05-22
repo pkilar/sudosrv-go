@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Filename: internal/config/config.go
 package config
 

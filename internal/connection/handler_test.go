@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Filename: internal/connection/handler_test.go
 package connection
 

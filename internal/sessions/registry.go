@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package sessions provides an in-memory registry of currently active sudo
 // sessions for the management API. The registry is keyed by the server-side
 // session UUID (matching the value already emitted as log_id in slog) and is

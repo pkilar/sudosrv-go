@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package api implements the optional management HTTP API for sudosrv. It
 // exposes read-only endpoints for enumerating active sessions and querying
 // per-session metadata. Authentication is a static bearer token loaded from
