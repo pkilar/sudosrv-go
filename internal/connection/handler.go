@@ -117,9 +117,15 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 		// here at construction time. The connection-side defer skips
 		// deregistering relay sessions for this reason; deregister via
 		// onDone so "phase: flushing" stays visible in the management API
-		// until the flush truly completes.
+		// until the flush truly completes. The active-sessions metric is
+		// decremented here for the same reason: until the flush finishes
+		// the session is still consuming server resources (cache file +
+		// flush goroutine), so it should count as active.
 		sid := sessionUUID.String()
-		onDone := func() { h.registry.Deregister(sid) }
+		onDone := func() {
+			h.registry.Deregister(sid)
+			metrics.Global.DecrementActiveSessions()
+		}
 		return relay.NewSession(h.ctx, sessionUUID, acceptMsg, relayCfg, onDone)
 	}
 	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
@@ -132,16 +138,20 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 func (h *Handler) Handle() {
 	defer func() {
 		if h.session != nil {
-			// Local sessions are fully closed by Close(); deregister now.
-			// Self-deregistering sessions (relay) own the registry entry's
-			// lifetime via their onDone callback, which fires when their
-			// background flusher exits — possibly long after the connection
-			// closes. Hiding the "phase: flushing" record on disconnect
-			// would defeat the management API's purpose.
-			if _, selfDeregistering := h.session.(doneNotifier); !selfDeregistering && h.registry != nil {
-				h.registry.Deregister(h.sessionID)
+			// Local sessions are fully closed by Close(); deregister and
+			// decrement the active count now. Self-deregistering sessions
+			// (relay) own the registry entry's lifetime — and the
+			// active-sessions metric — via their onDone callback, which
+			// fires when their background flusher exits, possibly long
+			// after the connection closes. Hiding "phase: flushing"
+			// records or decrementing the metric on disconnect would
+			// defeat the management API's purpose.
+			if _, selfDeregistering := h.session.(doneNotifier); !selfDeregistering {
+				if h.registry != nil {
+					h.registry.Deregister(h.sessionID)
+				}
+				metrics.Global.DecrementActiveSessions()
 			}
-			metrics.Global.DecrementActiveSessions()
 			if err := h.session.Close(); err != nil {
 				slog.Error("Failed to close session", "error", err, "remote_addr", h.conn.RemoteAddr())
 			}
