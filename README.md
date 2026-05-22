@@ -1,5 +1,7 @@
 # Go Sudo I/O Log Server
 
+[![CI][ci-badge]][ci] [![Go Report Card][go-reportcard-badge]][go-reportcard] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev]
+
 A high-performance, standalone I/O log server for sudo, written in Go. It is a fully compatible alternative to sudo's native `sudo_logsrvd`, capable of receiving and processing I/O logs from any sudo client (version 1.9.0+).
 
 The server captures complete transcripts of user sessions run via sudo, including all terminal input and output, providing a tool for security auditing, forensic analysis, and troubleshooting.
@@ -222,3 +224,10 @@ pkg/sudosrv_proto/   Generated protobuf definitions
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+[ci-badge]: https://github.com/pkilar/sudosrv-go/actions/workflows/makefile.yml/badge.svg
+[ci]: https://github.com/pkilar/sudosrv-go/actions/workflows/makefile.yml
+[go-reportcard-badge]: https://goreportcard.com/badge/github.com/pkilar/sudosrv-go
+[go-reportcard]: https://goreportcard.com/report/github.com/pkilar/sudosrv-go
+[pkg.go.dev-badge]: https://pkg.go.dev/badge/github.com/pkilar/sudosrv-go.svg
+[pkg.go.dev]: https://pkg.go.dev/github.com/pkilar/sudosrv-go
