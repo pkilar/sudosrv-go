@@ -184,7 +184,7 @@ func TestAPI_RelayVisibleDuringFlush(t *testing.T) {
 			UpstreamHost:         upstreamAddr,
 			ConnectTimeout:       500 * time.Millisecond,
 			RelayCacheDirectory:  t.TempDir(),
-			ReconnectAttempts:    -1,             // infinite — we cancel via shutdown
+			ReconnectAttempts:    -1, // infinite — we cancel via shutdown
 			MaxReconnectInterval: 5 * time.Second,
 		},
 		API: config.APIConfig{
