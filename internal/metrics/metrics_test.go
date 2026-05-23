@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Filename: internal/metrics/metrics_test.go
 package metrics
 

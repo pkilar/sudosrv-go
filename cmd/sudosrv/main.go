@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Filename: cmd/sudosrv/main.go
 package main
 
