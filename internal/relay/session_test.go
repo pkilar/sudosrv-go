@@ -12,6 +12,7 @@ import (
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ type mockUpstreamServer struct {
 	wg           sync.WaitGroup
 	receivedMsgs chan *pb.ClientMessage
 	t            *testing.T
+	closing      atomic.Bool // set true before listener.Close so acceptLoop suppresses the expected "use of closed network connection" log
 }
 
 func newMockUpstreamServer(t *testing.T, addr string) (*mockUpstreamServer, error) {
@@ -58,7 +60,7 @@ func (s *mockUpstreamServer) acceptLoop() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if !s.isClosing() {
+			if !s.closing.Load() {
 				s.t.Logf("Accept error: %v", err)
 			}
 			return // Listener was closed
@@ -69,18 +71,6 @@ func (s *mockUpstreamServer) acceptLoop() {
 			s.handleConnection(c)
 		}(conn)
 	}
-}
-
-func (s *mockUpstreamServer) isClosing() bool {
-	// Check if listener is closed by trying to get the file descriptor
-	if tcpListener, ok := s.listener.(*net.TCPListener); ok {
-		file, err := tcpListener.File()
-		if err != nil {
-			return true // Likely closed
-		}
-		file.Close()
-	}
-	return false
 }
 
 // handleConnection now robustly handles the full handshake and subsequent message flush.
@@ -142,6 +132,7 @@ func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
 }
 
 func (s *mockUpstreamServer) Close() {
+	s.closing.Store(true)
 	s.listener.Close()
 	s.wg.Wait()
 	close(s.receivedMsgs)
@@ -193,17 +184,25 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
 
-	// 4. Send some messages to the session, which will be cached locally
-	session.HandleClientMessage(&pb.ClientMessage{
+	// 4. Send some messages to the session, which will be cached locally.
+	// Errors here indicate a regression in HandleClientMessage (e.g. timeout,
+	// channel closed); failing loudly beats a silent miscount downstream.
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Data: []byte("output1")}},
-	})
-	session.HandleClientMessage(&pb.ClientMessage{
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(output1): %v", err)
+	}
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Data: []byte("output2")}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(output2): %v", err)
+	}
 	// Send the final exit message, which completes the client-facing part of the session
-	session.HandleClientMessage(&pb.ClientMessage{
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(exit): %v", err)
+	}
 
 	// 5. Close the "client" connection to the relay session.
 	// This signals the messageWriter to finish, allowing the background flusher to proceed.
@@ -321,9 +320,11 @@ func TestRelayCommitPoints(t *testing.T) {
 	}
 
 	// Clean up: send exit and close
-	session.HandleClientMessage(&pb.ClientMessage{
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(exit) during cleanup: %v", err)
+	}
 	session.Close()
 	waitRelaySession(t, session, 2*time.Second)
 }
@@ -367,7 +368,7 @@ func TestRelayCommitPointThrottling(t *testing.T) {
 	}
 
 	// Subsequent events within throttle window: no commit point
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err = session.HandleClientMessage(makeIoMsg())
 		if err != nil {
 			t.Fatalf("I/O event %d failed: %v", i+2, err)
