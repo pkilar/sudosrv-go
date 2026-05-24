@@ -10,6 +10,11 @@ import (
 // Metrics holds basic operational metrics for the server.
 // All counter fields use atomic.Int64 to enforce atomic access at the type level,
 // preventing accidental non-atomic reads or writes.
+//
+// serverStartUnixNano stores the start time as a single atomic int64 of unix
+// nanoseconds. Storing a time.Time directly would not be torn-write-safe — it's
+// a two-word struct, and a Reset() racing with GetUptime() could observe a
+// half-updated value.
 type Metrics struct {
 	totalConnections  atomic.Int64
 	activeConnections atomic.Int64
@@ -23,16 +28,16 @@ type Metrics struct {
 	messagesProcessed atomic.Int64
 	messageErrors     atomic.Int64
 
-	serverStartTime time.Time
+	serverStartUnixNano atomic.Int64
 }
 
 // Global metrics instance
 var Global = newMetrics()
 
 func newMetrics() *Metrics {
-	return &Metrics{
-		serverStartTime: time.Now(),
-	}
+	m := &Metrics{}
+	m.serverStartUnixNano.Store(time.Now().UnixNano())
+	return m
 }
 
 // Connection tracking
@@ -114,7 +119,7 @@ func (m *Metrics) GetMessageErrors() int64 {
 }
 
 func (m *Metrics) GetUptime() time.Duration {
-	return time.Since(m.serverStartTime)
+	return time.Since(time.Unix(0, m.serverStartUnixNano.Load()))
 }
 
 // Reset resets all counters to zero. Intended for use in tests.
@@ -128,5 +133,5 @@ func (m *Metrics) Reset() {
 	m.relaySessions.Store(0)
 	m.messagesProcessed.Store(0)
 	m.messageErrors.Store(0)
-	m.serverStartTime = time.Now()
+	m.serverStartUnixNano.Store(time.Now().UnixNano())
 }

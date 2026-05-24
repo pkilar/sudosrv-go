@@ -349,7 +349,7 @@ func waitFor(cond func() bool, timeout time.Duration) error {
 
 func apiRequest(t *testing.T, url, token string) *http.Response {
 	t.Helper()
-	req, _ := http.NewRequest("GET", url, nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

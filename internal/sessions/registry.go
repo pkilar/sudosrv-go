@@ -18,6 +18,11 @@ import (
 // SessionInfo is the registry record for one active session. Static fields are
 // populated at registration time; live fields are obtained via Provider on
 // demand so the API never returns stale counters.
+//
+// Info is a reference type (map). The registry treats it as read-only after
+// Register; callers MUST NOT mutate the map returned from Get/Snapshot.
+// API handlers that need to expose Info externally should defensive-copy via
+// maps.Clone — see internal/api/server.go:detail.
 type SessionInfo struct {
 	SessionID    string           // sessionUUID.String(); registry key
 	ServerLogID  string           // base64-encoded sudo log_id; populated after session init
@@ -27,7 +32,7 @@ type SessionInfo struct {
 	StartedAt    time.Time        // server-side connection start
 	SubmitTime   time.Time        // AcceptMessage.submit_time
 	ExpectIobufs bool             // whether I/O buffers are expected for this session
-	Info         map[string]any   // flattened AcceptMessage.InfoMsgs
+	Info         map[string]any   // flattened AcceptMessage.InfoMsgs; treat as read-only post-Register
 	Provider     MetadataProvider // optional accessor for live counters
 }
 

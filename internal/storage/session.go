@@ -343,12 +343,7 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		if st := event.AcceptMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 		}
-		for k, v := range protocol.InfoMsgsToMap(event.AcceptMsg.GetInfoMsgs()) {
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		mergePreservingExisting(entry, protocol.InfoMsgsToMap(event.AcceptMsg.GetInfoMsgs()))
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
 		s.logMeta["sub_commands"] = subCmds
@@ -361,12 +356,7 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		if st := event.RejectMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 		}
-		for k, v := range protocol.InfoMsgsToMap(event.RejectMsg.GetInfoMsgs()) {
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		mergePreservingExisting(entry, protocol.InfoMsgsToMap(event.RejectMsg.GetInfoMsgs()))
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
 		s.logMeta["sub_commands"] = subCmds
@@ -564,6 +554,19 @@ func getMutexForDir(dir string) *sync.Mutex {
 	mutex := &sync.Mutex{}
 	seqMutexMap[dir] = mutex
 	return mutex
+}
+
+// mergePreservingExisting copies keys from src into dst that are not already
+// present in dst. Used wherever client-supplied InfoMsgs are merged into a
+// sub-command event entry — the authoritative fields (event_type, reason,
+// submit_time) must never be clobbered by a client-controlled key collision.
+func mergePreservingExisting(dst, src map[string]any) {
+	for k, v := range src {
+		if _, exists := dst[k]; exists {
+			continue
+		}
+		dst[k] = v
+	}
 }
 
 // readLogJSON opens, decodes, and closes a log.json file. Keeping the file
@@ -1075,14 +1078,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Merge client-supplied info messages, but never let them clobber the
-	// authoritative fields already set on entry.
-	for k, v := range protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()) {
-		if _, exists := entry[k]; exists {
-			continue
-		}
-		entry[k] = v
-	}
+	mergePreservingExisting(entry, protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()))
 
 	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
@@ -1107,14 +1103,7 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Merge client-supplied info messages, but never let them clobber the
-	// authoritative fields already set on entry.
-	for k, v := range protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()) {
-		if _, exists := entry[k]; exists {
-			continue
-		}
-		entry[k] = v
-	}
+	mergePreservingExisting(entry, protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()))
 
 	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
