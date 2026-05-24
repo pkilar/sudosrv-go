@@ -62,22 +62,16 @@ local_storage:
 		}
 	})
 
-	t.Run("NonExistentConfigFile", func(t *testing.T) {
-		// Attempt to load a config file that does not exist
-		cfg, err := LoadConfig("non-existent-file.yaml")
-		if err != nil {
-			t.Fatalf("LoadConfig() with non-existent file should not error, but got: %v", err)
+	t.Run("NonExistentConfigFileErrors", func(t *testing.T) {
+		// A missing config file is an error: silently falling back to defaults
+		// would mask deployment typos and could replace a documented secure
+		// config with whatever yaml.v3 leaves in a half-populated struct.
+		_, err := LoadConfig("non-existent-file.yaml")
+		if err == nil {
+			t.Fatal("LoadConfig() with non-existent file should error, got nil")
 		}
-
-		// Check that default values are used
-		if cfg.Server.Mode != "local" {
-			t.Errorf("expected default server mode 'local', got '%s'", cfg.Server.Mode)
-		}
-		if cfg.Server.ListenAddress != "127.0.0.1:30343" {
-			t.Errorf("expected default listen_address '127.0.0.1:30343', got '%s'", cfg.Server.ListenAddress)
-		}
-		if cfg.LocalStorage.LogDirectory != "/var/log/gosudo-io" {
-			t.Errorf("expected default log_directory '/var/log/gosudo-io', got '%s'", cfg.LocalStorage.LogDirectory)
+		if !strings.Contains(err.Error(), "non-existent-file.yaml") {
+			t.Errorf("error should mention the missing path, got: %v", err)
 		}
 	})
 
@@ -141,6 +135,82 @@ local_storage:
 	}
 }
 
+// TestPartialYAMLPreservesSecureDefaults pins yaml.v3's "leave unmentioned
+// fields alone" behavior for the fields that would silently flip a server
+// into an unsafe configuration if zeroed: password filter, log paths, server
+// ID, listen address, relay cache dir, and reconnect retries.
+//
+// If you ever refactor LoadConfig's merge strategy, keep this test green.
+func TestPartialYAMLPreservesSecureDefaults(t *testing.T) {
+	t.Parallel()
+	// Only `server.mode` is set; every other key is absent from the YAML.
+	// All security-critical defaults must survive.
+	content := `
+server:
+  mode: "local"
+`
+	tmpFile := filepath.Join(t.TempDir(), "minimal.yaml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"PasswordFilter", cfg.LocalStorage.PasswordFilter, true},
+		{"LogDirectory", cfg.LocalStorage.LogDirectory, "/var/log/gosudo-io"},
+		{"IologDir", cfg.LocalStorage.IologDir, "%{LIVEDIR}/%{user}"},
+		{"IologFile", cfg.LocalStorage.IologFile, "%{seq}"},
+		{"ServerID", cfg.Server.ServerID, "GoSudoLogSrv/1.0"},
+		{"ListenAddress", cfg.Server.ListenAddress, "127.0.0.1:30343"},
+		{"MaxConnections", cfg.Server.MaxConnections, 10000},
+		{"RelayCacheDirectory", cfg.Relay.RelayCacheDirectory, "/var/log/gosudo-relay-cache"},
+		{"ReconnectAttempts", cfg.Relay.ReconnectAttempts, -1},
+		{"TLSSkipVerify", cfg.Relay.TLSSkipVerify, false},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestPartialYAMLExplicitFalseHonored verifies that a user who explicitly
+// writes `password_filter: false` can still turn it off — the defaults-merge
+// must not override explicit user intent.
+func TestPartialYAMLExplicitFalseHonored(t *testing.T) {
+	t.Parallel()
+	content := `
+server:
+  mode: "local"
+local_storage:
+  password_filter: false
+  compress: true
+`
+	tmpFile := filepath.Join(t.TempDir(), "explicit.yaml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LocalStorage.PasswordFilter {
+		t.Error("password_filter: false in YAML should disable the filter")
+	}
+	if !cfg.LocalStorage.Compress {
+		t.Error("compress: true in YAML should enable compression")
+	}
+}
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 	// validLocal returns a fresh, minimally-valid local-mode Config.
@@ -159,7 +229,7 @@ func TestValidate(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		mutate  func(*Config)
+		mutate  func(t *testing.T, c *Config)
 		wantErr string // substring match; "" means expect no error
 	}{
 		{
@@ -167,7 +237,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "valid relay mode",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.Mode = "relay"
 				c.Relay.UpstreamHost = "upstream:1234"
 				c.Relay.RelayCacheDirectory = "/tmp/cache"
@@ -175,7 +245,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "valid TLS-only listener",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.ListenAddress = ""
 				c.Server.ListenAddressTLS = "127.0.0.1:30344"
 				c.Server.TLSCertFile = "cert"
@@ -184,12 +254,12 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "invalid mode",
-			mutate:  func(c *Config) { c.Server.Mode = "magic" },
+			mutate:  func(_ *testing.T, c *Config) { c.Server.Mode = "magic" },
 			wantErr: "invalid server mode",
 		},
 		{
 			name: "no listen address",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.ListenAddress = ""
 				c.Server.ListenAddressTLS = ""
 			},
@@ -197,7 +267,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "TLS listener without cert",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.ListenAddressTLS = "127.0.0.1:30344"
 				c.Server.TLSKeyFile = "key"
 			},
@@ -205,7 +275,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "TLS listener without key",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.ListenAddressTLS = "127.0.0.1:30344"
 				c.Server.TLSCertFile = "cert"
 			},
@@ -213,7 +283,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "relay mode missing upstream_host",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.Mode = "relay"
 				c.Relay.RelayCacheDirectory = "/tmp/cache"
 			},
@@ -221,7 +291,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "relay mode missing relay_cache_directory",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.Server.Mode = "relay"
 				c.Relay.UpstreamHost = "upstream:1234"
 			},
@@ -229,28 +299,28 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "local mode bad permissions delegates to ValidatePermissions",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.LocalStorage.DirPermissions = 0777
 			},
 			wantErr: "world-writable",
 		},
 		{
 			name: "valid API with inline token",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
 				c.API.AuthToken = "secret"
 			},
 		},
 		{
-			name: "valid API with token file",
-			mutate: func(c *Config) {
+			name: "valid API with token file (mode 0600)",
+			mutate: func(t *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
-				c.API.AuthTokenFile = "/run/sudosrv/api.token"
+				c.API.AuthTokenFile = writeTokenFile(t, 0600)
 			},
 		},
 		{
 			name: "valid API with TLS",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
 				c.API.AuthToken = "secret"
 				c.API.TLSCertFile = "api.crt"
@@ -259,14 +329,14 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "API enabled without token rejects",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
 			},
 			wantErr: "neither api.auth_token nor api.auth_token_file",
 		},
 		{
 			name: "API TLS cert without key rejects",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
 				c.API.AuthToken = "secret"
 				c.API.TLSCertFile = "api.crt"
@@ -275,7 +345,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "API TLS key without cert rejects",
-			mutate: func(c *Config) {
+			mutate: func(_ *testing.T, c *Config) {
 				c.API.ListenAddress = "127.0.0.1:30345"
 				c.API.AuthToken = "secret"
 				c.API.TLSKeyFile = "api.key"
@@ -286,6 +356,38 @@ func TestValidate(t *testing.T) {
 			name: "API disabled by default",
 			// No mutation: validLocal() leaves API zero-valued. Should not error.
 		},
+		{
+			name: "API token file with relative path rejected",
+			mutate: func(_ *testing.T, c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthTokenFile = "relative/path"
+			},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name: "API token file missing rejected",
+			mutate: func(_ *testing.T, c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthTokenFile = "/nonexistent/sudosrv/token"
+			},
+			wantErr: "auth_token_file",
+		},
+		{
+			name: "API token file world-readable rejected",
+			mutate: func(t *testing.T, c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthTokenFile = writeTokenFile(t, 0644)
+			},
+			wantErr: "no group/other access",
+		},
+		{
+			name: "API token file group-readable rejected",
+			mutate: func(t *testing.T, c *Config) {
+				c.API.ListenAddress = "127.0.0.1:30345"
+				c.API.AuthTokenFile = writeTokenFile(t, 0640)
+			},
+			wantErr: "no group/other access",
+		},
 	}
 
 	for _, tt := range tests {
@@ -293,7 +395,7 @@ func TestValidate(t *testing.T) {
 			t.Parallel()
 			cfg := validLocal()
 			if tt.mutate != nil {
-				tt.mutate(cfg)
+				tt.mutate(t, cfg)
 			}
 			err := Validate(cfg)
 			switch {
@@ -306,6 +408,23 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// writeTokenFile creates a real token file in t.TempDir() with the given mode,
+// so AuthTokenFile validation (which stats the file) has something concrete
+// to evaluate. Returns the absolute path.
+func writeTokenFile(t *testing.T, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "api.token")
+	if err := os.WriteFile(path, []byte("secret\n"), mode); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	// WriteFile honours mode only on creation; chmod to be sure on filesystems
+	// where umask interferes.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod token file: %v", err)
+	}
+	return path
 }
 
 func TestValidatePermissions(t *testing.T) {
@@ -322,6 +441,7 @@ func TestValidatePermissions(t *testing.T) {
 		{"world-writable file", 0750, 0642, "file_permissions"},
 		{"world-readable file", 0750, 0644, "world-readable"},
 		{"both bits bad on dir checked first", 0777, 0777, "dir_permissions"},
+		{"dir without owner-exec rejected", 0640, 0640, "owner-exec"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -467,6 +587,17 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		applyZeroValueDefaults(cfg)
 		if cfg.Server.MaxConnections != 0 {
 			t.Errorf("Negative MaxConnections should be normalized to 0, got %d", cfg.Server.MaxConnections)
+		}
+	})
+
+	t.Run("zero max_connections is preserved (disables cap)", func(t *testing.T) {
+		t.Parallel()
+		// "0 disables the cap" is documented behavior; applyZeroValueDefaults
+		// must not silently rewrite it to the 10000 default.
+		cfg := &Config{Server: ServerConfig{MaxConnections: 0}}
+		applyZeroValueDefaults(cfg)
+		if cfg.Server.MaxConnections != 0 {
+			t.Errorf("MaxConnections=0 must be preserved, got %d", cfg.Server.MaxConnections)
 		}
 	})
 
