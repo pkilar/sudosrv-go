@@ -2,15 +2,20 @@
 // Filename: internal/protocol/infomsg.go
 package protocol
 
-import pb "sudosrv/pkg/sudosrv_proto"
+import (
+	"fmt"
+	"log/slog"
+
+	pb "sudosrv/pkg/sudosrv_proto"
+)
 
 // InfoMsgsToMap converts a slice of InfoMessage entries to a generic map keyed
 // by InfoMessage.Key. Entries with empty keys are skipped (matching C
 // sudo_logsrvd, which treats keyless entries as malformed). Strval, Numval, and
 // Strlistval values are unwrapped to their underlying Go types (string, int64,
-// []string). Unknown value variants are silently dropped — this keeps the
-// helper forward-compatible if the proto schema grows new InfoMessage value
-// types in a future sudo release.
+// []string). Unknown value variants are dropped (preserving forward-compat with
+// future proto extensions) but logged at Debug so a new field doesn't quietly
+// disappear from audit records.
 func InfoMsgsToMap(infos []*pb.InfoMessage) map[string]any {
 	out := make(map[string]any, len(infos))
 	for _, info := range infos {
@@ -25,6 +30,9 @@ func InfoMsgsToMap(infos []*pb.InfoMessage) map[string]any {
 			out[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
 			out[key] = v.Strlistval.GetStrings()
+		default:
+			slog.Debug("InfoMessage variant dropped (unknown type)",
+				"key", key, "type", fmt.Sprintf("%T", v))
 		}
 	}
 	return out

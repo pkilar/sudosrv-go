@@ -11,12 +11,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/metrics"
 	"testing"
@@ -75,7 +78,8 @@ func generateSelfSignedCert(t *testing.T) (certPath, keyPath string) {
 }
 
 // shutdown drives the post-signal portion of Server.Wait so tests can run
-// the full lifecycle without going through signal delivery.
+// the full lifecycle without going through signal delivery. Bounds the
+// final waitGroup.Wait so a flaky test cannot hang the runner indefinitely.
 func shutdown(srv *Server) {
 	srv.cancel()
 	if srv.apiServer != nil {
@@ -86,7 +90,16 @@ func shutdown(srv *Server) {
 	for _, l := range srv.listeners {
 		_ = l.Close()
 	}
-	srv.waitGroup.Wait()
+	done := make(chan struct{})
+	go func() { srv.waitGroup.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		// A regression in shutdown wiring would otherwise pin the test
+		// process. Print rather than t.Fatal because shutdown is also
+		// called from t.Cleanup paths where t.Fatal is a no-op.
+		fmt.Fprintln(os.Stderr, "test shutdown timed out waiting for goroutines")
+	}
 }
 
 func newTestServer(t *testing.T, cfg *config.Config) *Server {
@@ -152,7 +165,7 @@ func TestStart_NoListeners(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !contains(got, "no listeners configured") {
+	if got := err.Error(); !strings.Contains(got,"no listeners configured") {
 		t.Errorf("Start error: got %q, want contains 'no listeners configured'", got)
 	}
 }
@@ -171,7 +184,7 @@ func TestStart_TLSWithoutCertKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !contains(got, "tls_cert_file") {
+	if got := err.Error(); !strings.Contains(got,"tls_cert_file") {
 		t.Errorf("Start error: got %q, want contains 'tls_cert_file'", got)
 	}
 	if len(srv.listeners) != 0 {
@@ -195,7 +208,7 @@ func TestStart_TLSBadCertPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !contains(got, "TLS key pair") {
+	if got := err.Error(); !strings.Contains(got,"TLS key pair") {
 		t.Errorf("Start error: got %q, want contains 'TLS key pair'", got)
 	}
 }
@@ -233,7 +246,7 @@ func TestStart_APIBindFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !contains(got, "management API") {
+	if got := err.Error(); !strings.Contains(got,"management API") {
 		t.Errorf("Start error: got %q, want contains 'management API'", got)
 	}
 	if srv.apiServer != nil {
@@ -271,7 +284,7 @@ func TestStart_APITLSFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !contains(got, "management API") {
+	if got := err.Error(); !strings.Contains(got,"management API") {
 		t.Errorf("Start error: got %q, want contains 'management API'", got)
 	}
 }
@@ -418,7 +431,7 @@ func TestAcceptLoop_RejectsOverCap(t *testing.T) {
 		// Some platforms surface this as a different error (e.g., ECONNRESET);
 		// any non-nil read error is acceptable, just not nil/timeout.
 		var ne net.Error
-		if asNetError(err, &ne) && ne.Timeout() {
+		if errors.As(err, &ne) && ne.Timeout() {
 			t.Errorf("read on rejected connection timed out; expected close")
 		}
 	}
@@ -724,35 +737,6 @@ local_storage:
 }
 
 // --- tiny helpers (kept private to this test file) ---
-
-// contains is a strings.Contains shim; pulling in the strings package just for
-// this would be slightly wasteful given how few callers we have.
-func contains(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-// asNetError unwraps to net.Error using errors.As semantics without pulling
-// in errors here. Returns false if the conversion fails.
-func asNetError(err error, target *net.Error) bool {
-	for err != nil {
-		if ne, ok := err.(net.Error); ok {
-			*target = ne
-			return true
-		}
-		type wrapper interface{ Unwrap() error }
-		if w, ok := err.(wrapper); ok {
-			err = w.Unwrap()
-			continue
-		}
-		return false
-	}
-	return false
-}
 
 // runtimeYield gives the runtime a brief moment between polls.
 func runtimeYield() {

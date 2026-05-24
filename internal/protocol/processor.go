@@ -64,6 +64,10 @@ func NewProcessorWithCloser(r io.Reader, w io.Writer, c io.Closer) Processor {
 	}
 }
 
+// withReadContext runs fn() and aborts the underlying read promptly when ctx
+// is cancelled. For non-cancellable contexts (context.Background()), where
+// ctx.Done() returns nil, the watcher goroutine is skipped entirely — this
+// saves 2 channels + 1 goroutine per protocol message on the common hot path.
 func withReadContext(ctx context.Context, reader io.Reader, fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -73,7 +77,10 @@ func withReadContext(ctx context.Context, reader io.Reader, fn func() error) err
 	}
 
 	setter, ok := reader.(readDeadlineSetter)
-	if !ok {
+	// Skip the watcher when (a) the reader cannot enforce a deadline or
+	// (b) the context cannot be cancelled. Either condition makes the
+	// watcher pure overhead.
+	if !ok || ctx.Done() == nil {
 		err := fn()
 		if err != nil && ctx.Err() != nil {
 			return ctx.Err()
@@ -102,6 +109,8 @@ func withReadContext(ctx context.Context, reader io.Reader, fn func() error) err
 	return err
 }
 
+// withWriteContext mirrors withReadContext for the write side; see that
+// function's godoc for the hot-path short-circuit rationale.
 func withWriteContext(ctx context.Context, writer io.Writer, fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -111,7 +120,7 @@ func withWriteContext(ctx context.Context, writer io.Writer, fn func() error) er
 	}
 
 	setter, ok := writer.(writeDeadlineSetter)
-	if !ok {
+	if !ok || ctx.Done() == nil {
 		err := fn()
 		if err != nil && ctx.Err() != nil {
 			return ctx.Err()
