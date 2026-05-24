@@ -57,25 +57,43 @@ type LiveStats struct {
 // The static fields of SessionInfo are set once at Register time; live
 // counters are read through the MetadataProvider hook, which uses its own
 // synchronization (typically sync/atomic) on the underlying session.
+//
+// byLogID is a secondary index mapping ServerLogID → SessionID so Get() can
+// answer either-form lookups in O(1) instead of a linear scan that an
+// authenticated client could trivially weaponize by polling random IDs.
 type Registry struct {
 	mu       sync.RWMutex
 	sessions map[string]SessionInfo
+	byLogID  map[string]string
 }
 
 // NewRegistry returns an empty registry ready for use.
 func NewRegistry() *Registry {
-	return &Registry{sessions: make(map[string]SessionInfo)}
+	return &Registry{
+		sessions: make(map[string]SessionInfo),
+		byLogID:  make(map[string]string),
+	}
 }
 
 // Register adds a session to the registry, replacing any existing entry with
 // the same SessionID. A nil receiver is a no-op so callers that may not have a
 // registry (e.g., unit tests) can call this unconditionally.
+//
+// If an existing entry under the same SessionID had a different ServerLogID,
+// the old index entry is cleaned up so the registry never serves a stale
+// logID → sessionID mapping.
 func (r *Registry) Register(info SessionInfo) {
 	if r == nil || info.SessionID == "" {
 		return
 	}
 	r.mu.Lock()
+	if prev, ok := r.sessions[info.SessionID]; ok && prev.ServerLogID != "" && prev.ServerLogID != info.ServerLogID {
+		delete(r.byLogID, prev.ServerLogID)
+	}
 	r.sessions[info.SessionID] = info
+	if info.ServerLogID != "" {
+		r.byLogID[info.ServerLogID] = info.SessionID
+	}
 	r.mu.Unlock()
 }
 
@@ -86,13 +104,16 @@ func (r *Registry) Deregister(sessionID string) {
 		return
 	}
 	r.mu.Lock()
+	if prev, ok := r.sessions[sessionID]; ok && prev.ServerLogID != "" {
+		delete(r.byLogID, prev.ServerLogID)
+	}
 	delete(r.sessions, sessionID)
 	r.mu.Unlock()
 }
 
 // Get returns a copy of the registered session matching id. The lookup tries
-// the SessionID (UUID form) first, then falls back to a linear scan for a
-// matching ServerLogID so callers can paste either form.
+// the SessionID (UUID form) first, then the ServerLogID secondary index, so
+// callers can paste either form and pay only O(1) work.
 func (r *Registry) Get(id string) (SessionInfo, bool) {
 	if r == nil || id == "" {
 		return SessionInfo{}, false
@@ -102,8 +123,8 @@ func (r *Registry) Get(id string) (SessionInfo, bool) {
 	if s, ok := r.sessions[id]; ok {
 		return s, true
 	}
-	for _, s := range r.sessions {
-		if s.ServerLogID != "" && s.ServerLogID == id {
+	if sid, ok := r.byLogID[id]; ok {
+		if s, ok := r.sessions[sid]; ok {
 			return s, true
 		}
 	}

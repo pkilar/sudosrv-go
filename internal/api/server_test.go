@@ -157,18 +157,34 @@ func TestAuth_RejectsWrongScheme(t *testing.T) {
 }
 
 func TestAuth_RejectsWrongToken(t *testing.T) {
-	srv, _ := newTestServer(t, "secret")
-	ts := withTestServer(t, srv)
-
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/sessions", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET: %v", err)
+	// Covers two cases: a different-length wrong token (the easy case the
+	// constant-time compare's length check short-circuits) AND a same-length
+	// wrong token (which exercises the equal-length compare path). A future
+	// "optimization" that replaces the constant-time compare with == would
+	// still pass the former; the latter is what catches that regression.
+	cases := []struct {
+		name    string
+		token   string
+	}{
+		{"different length", "wrong"},
+		{"same length, single char differs", "sxcret"},
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServer(t, "secret")
+			ts := withTestServer(t, srv)
+
+			req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/api/v1/sessions", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+		})
 	}
 }
 

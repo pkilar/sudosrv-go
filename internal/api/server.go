@@ -9,12 +9,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +25,10 @@ import (
 	"sudosrv/internal/sessions"
 	"time"
 )
+
+// maxAPIRequestBody caps inbound request bodies. The API only serves GETs,
+// so an honest client sends no body; any oversized payload is hostile.
+const maxAPIRequestBody = 4096
 
 // Server owns the management HTTP server. Construct with NewServer, then call
 // Listen synchronously to bind the address (so port-in-use and TLS load
@@ -33,7 +39,11 @@ type Server struct {
 	registry *sessions.Registry
 	httpSrv  *http.Server
 	listener net.Listener
-	token    string
+	// tokenHash is sha256(token). Comparing fixed-length digests with
+	// subtle.ConstantTimeCompare removes the length side-channel that the
+	// raw-token compare leaks (ConstantTimeCompare returns 0 immediately on
+	// length mismatch).
+	tokenHash [sha256.Size]byte
 }
 
 // NewServer validates the configuration, loads the bearer token, and prepares
@@ -50,19 +60,38 @@ func NewServer(cfg config.APIConfig, registry *sessions.Registry) (*Server, erro
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, registry: registry, token: token}
+	s := &Server{cfg: cfg, registry: registry, tokenHash: sha256.Sum256([]byte(token))}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/sessions", s.authMW(s.handleList))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", s.authMW(s.handleGet))
 
 	s.httpSrv = &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           mux,
+		Addr:    cfg.ListenAddress,
+		Handler: limitBody(mux),
+		// Header timeout protects against slow-header slowloris; the broader
+		// ReadTimeout/WriteTimeout cover slow-body and slow-receiver clients
+		// after the headers are consumed. MaxHeaderBytes caps a giant header
+		// flood before we allocate per-request buffers.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 14, // 16 KiB; default 1 MiB is excessive for an admin API
 	}
 	return s, nil
+}
+
+// limitBody wraps every request body in a MaxBytesReader. The API is GET-only,
+// so 4 KiB is plenty for any conceivable future POST/PUT body and rejects
+// arbitrary-size hostile bodies before they can chew up memory.
+func limitBody(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIRequestBody)
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Listen synchronously binds the configured address and, if TLS is configured,
@@ -74,14 +103,11 @@ func (s *Server) Listen() error {
 		return errors.New("api: Listen called more than once")
 	}
 	if s.cfg.TLSCertFile != "" && s.cfg.TLSKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
+		tlsCfg, err := buildTLSConfig(s.cfg)
 		if err != nil {
-			return fmt.Errorf("api: load tls keypair: %w", err)
+			return err
 		}
-		ln, err := tls.Listen("tcp", s.cfg.ListenAddress, &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-		})
+		ln, err := tls.Listen("tcp", s.cfg.ListenAddress, tlsCfg)
 		if err != nil {
 			return fmt.Errorf("api: listen on %s: %w", s.cfg.ListenAddress, err)
 		}
@@ -94,6 +120,21 @@ func (s *Server) Listen() error {
 	}
 	s.listener = ln
 	return nil
+}
+
+// buildTLSConfig centralizes TLS settings so future hardening (mTLS, OCSP
+// stapling, custom curve preferences) lives in one place. TLS 1.3 is the
+// floor — its cipher suites are not configurable and are all AEAD, so we
+// don't enumerate CipherSuites (those entries would be silently ignored).
+func buildTLSConfig(cfg config.APIConfig) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("api: load tls keypair: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	}, nil
 }
 
 // Serve handles HTTP requests on the listener bound by Listen. It blocks
@@ -141,6 +182,11 @@ func loadToken(cfg config.APIConfig) (string, error) {
 }
 
 // authMW enforces a constant-time bearer-token check on every request.
+// Both the configured token and the supplied token are hashed once with
+// SHA-256 before comparison so a) ConstantTimeCompare always operates on
+// equal-length inputs (the raw compare leaks "your token is wrong length"
+// via early return) and b) timing is independent of how long the attacker's
+// guess happens to be.
 func (s *Server) authMW(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
@@ -149,8 +195,8 @@ func (s *Server) authMW(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "missing or malformed Authorization header")
 			return
 		}
-		provided := h[len(prefix):]
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
+		provided := sha256.Sum256([]byte(h[len(prefix):]))
+		if subtle.ConstantTimeCompare(provided[:], s.tokenHash[:]) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
@@ -254,6 +300,11 @@ func summarize(info sessions.SessionInfo) sessionSummary {
 }
 
 func detail(info sessions.SessionInfo) sessionDetail {
+	// Defensive copy of the Info map: SessionInfo is stored by value in the
+	// registry but Info is a reference type, so a handler mutating the
+	// returned map would race with concurrent registry reads. maps.Clone
+	// keeps the API immutable from the caller's perspective.
+	infoCopy := maps.Clone(info.Info)
 	out := sessionDetail{
 		SessionID:    info.SessionID,
 		ServerLogID:  info.ServerLogID,
@@ -262,7 +313,7 @@ func detail(info sessions.SessionInfo) sessionDetail {
 		StartedAt:    info.StartedAt,
 		SubmitTime:   info.SubmitTime,
 		ExpectIobufs: info.ExpectIobufs,
-		Info:         info.Info,
+		Info:         infoCopy,
 	}
 	if info.Provider != nil {
 		s := info.Provider.LiveStats()
@@ -278,24 +329,39 @@ func detail(info sessions.SessionInfo) sessionDetail {
 	return out
 }
 
+// jsonInternalErrorBody is the canned response written when JSON encoding
+// itself fails. Hoisted to package level to avoid a per-error allocation.
+var jsonInternalErrorBody = []byte(`{"error":"internal server error"}` + "\n")
+
 // writeJSON marshals body into a buffer first so an encoding failure can
 // produce a 500 response instead of a 200 with truncated JSON. Once
 // WriteHeader has fired, the status is locked and the client will see
 // whatever we already wrote.
+//
+// Cache-Control: no-store keeps an authenticated session listing out of
+// shared caches; X-Content-Type-Options: nosniff prevents content sniffing
+// from reinterpreting the JSON payload.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		slog.Error("api: failed to encode JSON response", "error", err)
-		w.Header().Set("Content-Type", "application/json")
+		setSecurityHeaders(w)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"internal server error"}` + "\n"))
+		_, _ = w.Write(jsonInternalErrorBody)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	setSecurityHeaders(w)
 	w.WriteHeader(status)
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		slog.Error("api: failed to write JSON response", "error", err)
 	}
+}
+
+func setSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

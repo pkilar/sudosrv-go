@@ -218,6 +218,46 @@ func BenchmarkRegistry_Snapshot(b *testing.B) {
 	}
 }
 
+// TestRegistry_GetByLogIDIsO1 pins the secondary-index behavior: a lookup by
+// ServerLogID must succeed without falling back to a linear scan, and the
+// index must stay coherent across replacement and deregistration so an old
+// logID cannot resolve to a session that has since taken its place.
+func TestRegistry_GetByLogIDIsO1(t *testing.T) {
+	r := NewRegistry()
+	id := uuid.New()
+	r.Register(SessionInfo{
+		SessionID:   id.String(),
+		SessionUUID: id,
+		ServerLogID: "logA",
+		StartedAt:   time.Unix(1, 0),
+	})
+
+	if got, ok := r.Get("logA"); !ok || got.SessionID != id.String() {
+		t.Fatalf("Get by ServerLogID: got=%+v ok=%v", got, ok)
+	}
+
+	// Replacement under the same SessionID with a new ServerLogID must drop
+	// the stale logID → SessionID mapping.
+	r.Register(SessionInfo{
+		SessionID:   id.String(),
+		SessionUUID: id,
+		ServerLogID: "logB",
+		StartedAt:   time.Unix(2, 0),
+	})
+	if _, ok := r.Get("logA"); ok {
+		t.Error("stale logA lookup should miss after re-registration with logB")
+	}
+	if got, ok := r.Get("logB"); !ok || got.SessionID != id.String() {
+		t.Errorf("Get by new logB failed: got=%+v ok=%v", got, ok)
+	}
+
+	// Deregister must drop the secondary index entry too.
+	r.Deregister(id.String())
+	if _, ok := r.Get("logB"); ok {
+		t.Error("logB lookup should miss after Deregister")
+	}
+}
+
 // Sanity: ensure %v formatting of a SessionInfo doesn't panic, useful when
 // tests include diagnostic output.
 func TestSessionInfo_FormatStable(t *testing.T) {
