@@ -84,9 +84,17 @@ func NewRegistry() *Registry {
 // the same SessionID. A nil receiver is a no-op so callers that may not have a
 // registry (e.g., unit tests) can call this unconditionally.
 //
-// If an existing entry under the same SessionID had a different ServerLogID,
-// the old index entry is cleaned up so the registry never serves a stale
-// logID → sessionID mapping.
+// Two cases need careful index hygiene:
+//
+//  1. Re-register under the same SessionID with a different ServerLogID:
+//     drop the old logID → SessionID mapping so it can't outlive its owner.
+//  2. Register under a NEW SessionID with the same ServerLogID as an existing
+//     entry (e.g., a restart/reconnect overlap where the old connection is
+//     still finishing teardown): the newer entry takes ownership of the
+//     logID index. The older SessionID is still reachable via its primary
+//     key, but Get(logID) returns the newer record. This matches operator
+//     intent — when two sessions share a log_id during an overlap, the
+//     active recovery is the one worth surfacing.
 func (r *Registry) Register(info SessionInfo) {
 	if r == nil || info.SessionID == "" {
 		return
@@ -104,13 +112,22 @@ func (r *Registry) Register(info SessionInfo) {
 
 // Deregister removes the session with the given ID. Missing IDs are silently
 // ignored. A nil receiver is a no-op.
+//
+// The secondary-index delete is OWNERSHIP-AWARE: we only drop
+// byLogID[prev.ServerLogID] when it still points at the SessionID being
+// removed. If a newer session has since claimed the same ServerLogID
+// (restart/reconnect overlap), removing the old session must not clobber
+// the newer one's lookup — that would 404 a recovery session that an
+// operator is actively trying to inspect.
 func (r *Registry) Deregister(sessionID string) {
 	if r == nil || sessionID == "" {
 		return
 	}
 	r.mu.Lock()
 	if prev, ok := r.sessions[sessionID]; ok && prev.ServerLogID != "" {
-		delete(r.byLogID, prev.ServerLogID)
+		if owner, ok := r.byLogID[prev.ServerLogID]; ok && owner == sessionID {
+			delete(r.byLogID, prev.ServerLogID)
+		}
 	}
 	delete(r.sessions, sessionID)
 	r.mu.Unlock()
