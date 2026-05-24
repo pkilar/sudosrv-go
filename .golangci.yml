@@ -1,0 +1,73 @@
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.26"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gosec
+    - intrange
+    - modernize
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - os.Remove
+        - (*sudosrv/internal/protocol.Processor).Close
+    gosec:
+      excludes:
+        # G104 — covered by errcheck
+        - G104
+        # G115 — int→uint32/int32 conversions are length-prefix and timestamp
+        # encodings bounded by upstream protocol/syscall semantics.
+        - G115
+        # G304 — file paths are derived from config-driven sudoers escape
+        # sequences with explicit sanitisation (containsDotDot, sanitizePathComponent).
+        - G304
+        # G302 — timing files are deliberately written 0440 (read-only after
+        # session close) to match C sudo_logsrvd behaviour for sudoreplay.
+        - G302
+        # G402 — TLS InsecureSkipVerify is a config-controlled toggle for
+        # operators testing relay against self-signed upstreams.
+        - G402
+        # G404 — math/rand/v2 is used only for jitter, never security.
+        - G404
+    staticcheck:
+      checks:
+        - all
+        # Protocol-event constants (IO_EVENT_*) intentionally match the
+        # wire-protocol naming so a reader of the protobuf spec finds them
+        # under the same identifiers.
+        - -ST1003
+        # Package/exported-symbol comment style is informally enforced by
+        # convention here, not by the linter.
+        - -ST1000
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # QF1003 suggests tagged switches for two-clause string equality;
+        # the explicit if/||/elseif chain is clearer for the I/O-stream
+        # branching in storage/session.go and intentionally retained.
+        - -QF1003
+  exclusions:
+    rules:
+      - path: pkg/sudosrv_proto/
+        linters:
+          - errcheck
+          - gosec
+          - govet
+          - ineffassign
+          - modernize
+          - staticcheck
+          - unused
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose

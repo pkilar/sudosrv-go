@@ -427,7 +427,7 @@ func TestAcceptLoop_RejectsOverCap(t *testing.T) {
 	_, err = second.Read(buf)
 	if err == nil {
 		t.Errorf("read on rejected connection: got nil error, want EOF/close")
-	} else if err != io.EOF {
+	} else if !errors.Is(err, io.EOF) {
 		// Some platforms surface this as a different error (e.g., ECONNRESET);
 		// any non-nil read error is acceptable, just not nil/timeout.
 		var ne net.Error

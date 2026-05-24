@@ -753,7 +753,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	defer func() {
 		if retErr != nil {
 			for _, gzWriter := range s.gzipWriters {
-				gzWriter.Close()
+				_ = gzWriter.Close()
 			}
 			for _, f := range s.files {
 				f.Close()
@@ -1321,7 +1321,7 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 	}
 
 	// Close all file handles
-	s.Close()
+	_ = s.Close()
 
 	// Mark timing file as read-only to indicate completion, per sudo spec.
 	timingFilePath := filepath.Join(s.sessionDir, "timing")
