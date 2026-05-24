@@ -102,7 +102,7 @@ func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
 	for {
 		msg, err := proc.ReadClientMessage()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				s.t.Logf("Mock server: client disconnected (EOF) after %d messages", messageCount)
 				return // Expected when the flushing client disconnects.
 			}
@@ -405,7 +405,7 @@ func TestRelayCommitPointThrottling(t *testing.T) {
 
 func TestRelaySession_CloseDoesNotWaitForFlush(t *testing.T) {
 	tmpDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	relayCfg := &config.RelayConfig{

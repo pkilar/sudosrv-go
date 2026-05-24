@@ -1,0 +1,3 @@
+# Ignored modernization suggestions
+# Format: <date> <category> <description>
+2026-05-24 t-context internal/server/server_test.go:86 shutdown() helper is called from t.Cleanup blocks (api_e2e_test.go:45,199) where t.Context() is already canceled — using it would defeat apiServer.Shutdown's graceful drain. context.Background() with explicit 5s timeout is intentional.

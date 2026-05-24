@@ -207,7 +207,7 @@ func (s *Session) run() {
 		// context-aware reads/writes, so shutdown can interrupt stalled upstream I/O.
 		slog.Info("Upstream connection successful, flushing cache.", "log_id", s.logID, "file", s.cacheFileName)
 		err = flushFile(s.ctx, proc, s.cacheFileName, s.config)
-		proc.Close()
+		_ = proc.Close()
 		if err != nil {
 			// If ctx was cancelled, the error is expected (we closed the conn).
 			if s.ctx.Err() != nil {
@@ -571,7 +571,7 @@ func FlushOrphanedFile(ctx context.Context, filePath string, cfg *config.RelayCo
 	}
 
 	err = flushFile(ctx, proc, flushingFileName, cfg)
-	proc.Close()
+	_ = proc.Close()
 	if err != nil {
 		slog.Error("Failed to flush orphaned file, renaming back", "path", flushingFileName, "error", err)
 		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
@@ -678,14 +678,14 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
 		return proc.WriteClientMessageContext(opCtx, helloMsg)
 	}); err != nil {
-		proc.Close()
+		_ = proc.Close()
 		return nil, fmt.Errorf("failed to send ClientHello to upstream: %w", err)
 	}
 	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
 		_, err = proc.ReadServerMessageContext(opCtx)
 		return err
 	}); err != nil {
-		proc.Close()
+		_ = proc.Close()
 		return nil, fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
 	}
 	return proc, nil
