@@ -125,8 +125,9 @@ func (s *Server) Start() error {
 	plaintextAddr := cfg.Server.ListenAddress
 	tlsAddr := cfg.Server.ListenAddressTLS
 	for _, l := range s.listeners {
-		s.waitGroup.Add(1)
-		go s.acceptLoop(l)
+		// waitGroup.Go (Go 1.25+) atomically pairs Add with the goroutine
+		// launch, eliminating the rare Add/Wait race the old pattern had.
+		s.waitGroup.Go(func() { s.acceptLoop(l) })
 	}
 	if plaintextAddr != "" {
 		slog.Info("Started plaintext listener", "address", plaintextAddr)
@@ -147,8 +148,7 @@ func (s *Server) Start() error {
 
 	// Phase 3: ancillary goroutines under the server's lifecycle so shutdown
 	// cancels them cleanly.
-	s.waitGroup.Add(1)
-	go s.logMetricsPeriodically()
+	s.waitGroup.Go(s.logMetricsPeriodically)
 
 	if cfg.Server.Mode == "relay" {
 		s.waitGroup.Go(func() {
@@ -173,8 +173,8 @@ func (s *Server) closeListeners() {
 }
 
 // acceptLoop continuously accepts new connections on a listener.
+// Launched via waitGroup.Go, which owns the Done call.
 func (s *Server) acceptLoop(listener net.Listener) {
-	defer s.waitGroup.Done()
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -215,6 +215,12 @@ func (s *Server) acceptLoop(listener net.Listener) {
 					"remote_addr", conn.RemoteAddr(),
 					"limit", cap(s.connSem),
 					"failed_connections", metrics.Global.GetFailedConnections())
+				// A TLS peer that hasn't completed the handshake can pin
+				// Close() if we don't bound it: tls.Conn.Close will try to
+				// flush the alert record. SetDeadline forces the close to
+				// fail fast so the rejection path can't be used as a
+				// slowloris against us.
+				_ = conn.SetDeadline(time.Now().Add(time.Second))
 				_ = conn.Close()
 				continue
 			}
@@ -223,20 +229,18 @@ func (s *Server) acceptLoop(listener net.Listener) {
 		slog.Info("Accepted new connection", "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr(),
 			"total_connections", metrics.Global.GetTotalConnections(), "active_connections", metrics.Global.GetActiveConnections())
 
-		s.waitGroup.Add(1)
-		go func() {
+		s.waitGroup.Go(func() {
 			defer func() {
 				if s.connSem != nil {
 					<-s.connSem
 				}
-				s.waitGroup.Done()
 				metrics.Global.DecrementActiveConnections()
 			}()
 			slog.Debug("Starting connection handler", "remote_addr", conn.RemoteAddr())
 			handler := connection.NewHandlerWithContext(s.ctx, conn, s.config.Load(), s.registry)
 			handler.Handle()
 			slog.Debug("Connection handler finished", "remote_addr", conn.RemoteAddr())
-		}()
+		})
 	}
 }
 
@@ -271,8 +275,14 @@ func (s *Server) Wait(shutdownTimeout time.Duration) {
 	// Stop the management API first so callers see a clean refusal rather than
 	// a stale snapshot of sessions that are about to tear down. http.Server.Shutdown
 	// drains in-flight requests but stops accepting new ones immediately.
+	// Give it at most half of the overall shutdown budget so the protocol
+	// listeners and their handlers still get their fair share.
 	if s.apiServer != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		apiTimeout := 5 * time.Second
+		if shutdownTimeout > 0 && shutdownTimeout/2 < apiTimeout {
+			apiTimeout = shutdownTimeout / 2
+		}
+		shutCtx, cancel := context.WithTimeout(context.Background(), apiTimeout)
 		if err := s.apiServer.Shutdown(shutCtx); err != nil {
 			slog.Error("Management API shutdown error", "error", err)
 		}
@@ -379,9 +389,9 @@ func restartRequiredReloadChange(oldCfg, newCfg *config.Config) string {
 	}
 }
 
-// logMetricsPeriodically logs server metrics every 5 minutes for operational visibility.
+// logMetricsPeriodically logs server metrics every 5 minutes for operational
+// visibility. Launched via waitGroup.Go, which owns the Done call.
 func (s *Server) logMetricsPeriodically() {
-	defer s.waitGroup.Done()
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 

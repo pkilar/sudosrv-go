@@ -58,14 +58,23 @@ type Session struct {
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
 	fromClientChan   chan *pb.ClientMessage
-	wg               sync.WaitGroup
-	closeOnce        sync.Once
-	cacheFileName    string
-	mu               sync.Mutex               // Protects cumulativeDelay and lastCommitTime
-	cumulativeDelay  map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
-	lastCommitTime   time.Time                // When last commit point was sent to client
-	ctx              context.Context
-	cancel           context.CancelFunc
+	// sendMu serializes Close against in-flight HandleClientMessage calls.
+	// HandleClientMessage holds RLock for its entire critical section
+	// (closed check + channel send); Close takes the exclusive Lock so it
+	// waits for every admitted send to commit to the channel before
+	// flipping the closed flag and closing the channel. Without this,
+	// a sender that passed the closed check could still write to a buffer
+	// the writer goroutine has already abandoned, silently losing audit data.
+	sendMu    sync.RWMutex
+	closed    atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	cacheFileName   string
+	mu              sync.Mutex               // Protects cumulativeDelay and lastCommitTime
+	cumulativeDelay map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
+	lastCommitTime  time.Time                // When last commit point was sent to client
+	ctx             context.Context
+	cancel          context.CancelFunc
 	// onDone is invoked exactly once after the background runner exits — i.e.
 	// after both the cache-write phase and any upstream-flush phase finish.
 	// Connection-side bookkeeping that needs to outlive the client connection
@@ -83,6 +92,9 @@ type Session struct {
 	phase         atomic.Pointer[string] // "writing" -> "flushing"
 }
 
+// Compile-time check that Session satisfies sessions.MetadataProvider.
+var _ sessions.MetadataProvider = (*Session)(nil)
+
 // IsDone reports whether the background runner has finished. Once true the
 // session will never call its onDone callback again; any registry or other
 // state that was added after onDone fired must be cleaned up by the caller.
@@ -98,7 +110,10 @@ func (s *Session) IsDone() bool { return s.done.Load() }
 // API registry entries) to the actual end of the session rather than the end
 // of the connection.
 func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
-	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0750); err != nil {
+	// 0700: cache files and the directory carry raw sudo I/O (keystrokes,
+	// command output, sometimes passwords — the storage password filter
+	// does not apply to the relay cache writer). Group/other must not read.
+	if err := os.MkdirAll(cfg.RelayCacheDirectory, 0700); err != nil {
 		return nil, fmt.Errorf("could not create relay cache directory %s: %w", cfg.RelayCacheDirectory, err)
 	}
 
@@ -158,6 +173,12 @@ func (s *Session) run() {
 	// Phase 2: The client session is complete. Now, persistently try to flush the file.
 	s.phase.Store(&phaseFlushing)
 	slog.Info("Client session complete, beginning persistent flush attempts.", "log_id", s.logID, "file", s.cacheFileName)
+	// Pre-connect splay (0–1s) so many concurrently-completing sessions don't
+	// all hit the upstream in lockstep when it comes back online. Per-session
+	// backoff already jitters; this addresses synchronized first attempts.
+	if err := sleepWithContext(s.ctx, time.Duration(rand.Int64N(int64(time.Second)))); err != nil {
+		return
+	}
 	for attempt := 0; s.config.ReconnectAttempts == -1 || attempt < s.config.ReconnectAttempts; attempt++ {
 		select {
 		case <-s.ctx.Done():
@@ -207,7 +228,9 @@ func (s *Session) run() {
 
 // writeMessagesToCache opens the cache file and writes all received messages until an ExitMessage.
 func (s *Session) writeMessagesToCache() (completed bool) {
-	file, err := os.OpenFile(s.cacheFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	// 0600: cache files carry raw sudo I/O, sometimes including passwords
+	// (the storage password filter is not applied to the relay write path).
+	file, err := os.OpenFile(s.cacheFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		slog.Error("CRITICAL: could not open cache file. Relay data for this session will be lost.", "log_id", s.logID, "error", err)
 		return
@@ -230,13 +253,16 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		return
 	}
 
-	// Loop until the session context is cancelled (server shutdown), the client
-	// channel is closed (connection handler exited), or an ExitMessage arrives.
+	// Loop until the session context is cancelled (server shutdown), Close()
+	// closes fromClientChan, or an ExitMessage arrives. Close() guarantees
+	// that every admitted send has committed to the channel before close()
+	// fires, so the ok=false signal here implies "the buffer has been fully
+	// drained" — no messages are lost on disconnect races.
 	for {
 		select {
 		case msg, ok := <-s.fromClientChan:
 			if !ok {
-				// Channel closed by Close(): the connection handler has exited.
+				// Channel closed by Close(); all buffered messages drained.
 				return false
 			}
 			if err := writeProtoMessage(file, msg); err != nil {
@@ -259,6 +285,22 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 // already ~146 years — well past any realistic maxInterval.
 const maxBackoffExponent = 62
 
+// sleepWithContext sleeps for d or returns ctx.Err() if cancellation arrives
+// first. Used for jitter splays that must respect server shutdown.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Session) calculateBackoff(attempts int) time.Duration {
 	maxInterval := s.config.MaxReconnectInterval
 	if maxInterval <= 0 {
@@ -278,22 +320,23 @@ func (s *Session) calculateBackoff(attempts int) time.Duration {
 	return time.Duration(backoff)
 }
 
-// extractIoDelay extracts the stream name and delay from I/O buffer messages.
-// Returns ("", nil, false) for non-I/O messages.
-func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec, bool) {
+// extractIoDelay returns the stream name and delay for I/O buffer messages.
+// Returns ("", nil) for non-I/O messages; the empty stream name is the "not
+// applicable" signal — no separate ok bool is needed.
+func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec) {
 	switch event := msg.Type.(type) {
 	case *pb.ClientMessage_TtyinBuf:
-		return "ttyin", event.TtyinBuf.GetDelay(), true
+		return "ttyin", event.TtyinBuf.GetDelay()
 	case *pb.ClientMessage_TtyoutBuf:
-		return "ttyout", event.TtyoutBuf.GetDelay(), true
+		return "ttyout", event.TtyoutBuf.GetDelay()
 	case *pb.ClientMessage_StdinBuf:
-		return "stdin", event.StdinBuf.GetDelay(), true
+		return "stdin", event.StdinBuf.GetDelay()
 	case *pb.ClientMessage_StdoutBuf:
-		return "stdout", event.StdoutBuf.GetDelay(), true
+		return "stdout", event.StdoutBuf.GetDelay()
 	case *pb.ClientMessage_StderrBuf:
-		return "stderr", event.StderrBuf.GetDelay(), true
+		return "stderr", event.StderrBuf.GetDelay()
 	default:
-		return "", nil, false
+		return "", nil
 	}
 }
 
@@ -318,6 +361,16 @@ func (s *Session) LiveStats() sessions.LiveStats {
 }
 
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	// RLock pairs with Close()'s Lock: while we hold this, Close cannot run
+	// to completion. Any send that admits past the closed check is therefore
+	// guaranteed to commit to the channel before close(fromClientChan) fires
+	// — the writer cannot miss it.
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
+		return nil, fmt.Errorf("relay session closed")
+	}
+
 	s.msgCount.Add(1)
 	s.bytesReceived.Add(int64(proto.Size(msg)))
 	now := time.Now()
@@ -329,10 +382,14 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
 	}
 
-	// Use a timeout to prevent indefinite blocking
+	// Use a timeout to prevent indefinite blocking. time.NewTimer+Stop
+	// avoids leaking a pending timer for up to 5s on the common path where
+	// the send wins immediately (time.After cannot be stopped).
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	select {
 	case s.fromClientChan <- msg:
-	case <-time.After(5 * time.Second):
+	case <-timer.C:
 		slog.Warn("Relay session message channel timeout", "log_id", s.logID)
 		return nil, fmt.Errorf("relay session message channel timeout")
 	case <-s.ctx.Done():
@@ -343,7 +400,7 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	// throttled to commitPointInterval matching C sudo_logsrvd behavior.
 	// Lock protects cumulativeDelay and lastCommitTime which are also
 	// read by the run() goroutine's context (indirectly via Close/wg.Wait).
-	if streamName, delay, ok := extractIoDelay(msg); ok {
+	if streamName, delay := extractIoDelay(msg); streamName != "" {
 		s.mu.Lock()
 		if delay != nil {
 			delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
@@ -355,8 +412,8 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 			s.mu.Unlock()
 			return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
 				CommitPoint: &pb.TimeSpec{
-					TvSec:  int64(commitPoint.Seconds()),
-					TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
+					TvSec:  int64(commitPoint / time.Second),
+					TvNsec: int32(commitPoint % time.Second),
 				},
 			}}, nil
 		}
@@ -370,10 +427,20 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 // signals the write-phase loop that no more messages will arrive and then
 // returns immediately; durable upstream flushing continues in the background.
 // Server shutdown propagates via the parent context. Safe to call multiple times.
+//
+// Acquiring sendMu exclusively waits for any HandleClientMessage call already
+// inside its critical section to finish its channel send. After we set
+// closed=true and close the channel, no new sender can pass the closed check
+// and any committed buffered message will be drained by the writer's
+// ok-from-receive loop. This is the synchronization Codex's adversarial
+// review identified as missing.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
+		s.sendMu.Lock()
+		s.closed.Store(true)
 		close(s.fromClientChan)
+		s.sendMu.Unlock()
 	})
 	return nil
 }
@@ -408,6 +475,12 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 	for _, f := range flushingFiles {
 		restored := f[:len(f)-len(FlushingSuffix)]
 		if err := os.Rename(f, restored); err != nil {
+			if os.IsNotExist(err) {
+				// Another concurrent recovery (HA failover, parallel orphan
+				// scan) already claimed this file. Benign.
+				slog.Debug("Mid-flush cache file already claimed by another worker", "path", f)
+				continue
+			}
 			slog.Error("Failed to recover mid-flush cache file", "path", f, "error", err)
 			continue
 		}
@@ -476,9 +549,14 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 func FlushOrphanedFile(ctx context.Context, filePath string, cfg *config.RelayConfig) error {
 	slog.Info("Found orphaned relay file, attempting to flush", "path", filePath)
 
-	// Rename file to prevent another process from picking it up
+	// Rename file to prevent another process from picking it up. A missing
+	// file means a sibling worker already claimed it — benign skip.
 	flushingFileName := filePath + FlushingSuffix
 	if err := os.Rename(filePath, flushingFileName); err != nil {
+		if os.IsNotExist(err) {
+			slog.Debug("Orphan file already claimed by another worker", "path", filePath)
+			return nil
+		}
 		slog.Error("Could not rename orphaned file for flushing", "path", filePath, "error", err)
 		return fmt.Errorf("could not rename orphaned file %s: %w", filePath, err)
 	}

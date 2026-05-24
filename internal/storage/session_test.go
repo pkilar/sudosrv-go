@@ -109,8 +109,12 @@ func TestStorageSession(t *testing.T) {
 		if logMeta["submituser"] != "testuser" {
 			t.Errorf("log.json: expected submituser 'testuser', got '%v'", logMeta["submituser"])
 		}
-		if logMeta["exit_value"].(float64) != 0 {
-			t.Errorf("log.json: expected exit_value 0, got '%v'", logMeta["exit_value"])
+		exitVal, ok := logMeta["exit_value"].(float64)
+		if !ok {
+			t.Fatalf("log.json: missing or non-float64 exit_value, got %T %v", logMeta["exit_value"], logMeta["exit_value"])
+		}
+		if exitVal != 0 {
+			t.Errorf("log.json: expected exit_value 0, got '%v'", exitVal)
 		}
 		if logMeta["runcwd"] != "/home/testuser" {
 			t.Errorf("log.json: expected runcwd '/home/testuser', got '%v'", logMeta["runcwd"])
@@ -659,7 +663,10 @@ func TestStorageSession(t *testing.T) {
 		if !ok || len(subCmds) != 1 {
 			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
 		}
-		subCmd := subCmds[0].(map[string]any)
+		subCmd, ok := subCmds[0].(map[string]any)
+		if !ok {
+			t.Fatalf("sub_command 0: expected map[string]any, got %T", subCmds[0])
+		}
 		if subCmd["event_type"] != "accept" {
 			t.Errorf("Expected event_type 'accept', got '%v'", subCmd["event_type"])
 		}
@@ -726,7 +733,10 @@ func TestStorageSession(t *testing.T) {
 		if !ok || len(subCmds) != 1 {
 			t.Fatalf("Expected 1 sub_command, got %v", logMeta["sub_commands"])
 		}
-		subCmd := subCmds[0].(map[string]any)
+		subCmd, ok := subCmds[0].(map[string]any)
+		if !ok {
+			t.Fatalf("sub_command 0: expected map[string]any, got %T", subCmds[0])
+		}
 		if subCmd["event_type"] != "reject" {
 			t.Errorf("Expected event_type 'reject', got '%v'", subCmd["event_type"])
 		}

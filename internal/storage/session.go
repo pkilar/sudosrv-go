@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Filename: internal/storage/session.go
+
+//go:build unix
+
 package storage
 
 import (
@@ -16,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
@@ -35,6 +39,14 @@ import (
 const commitPointInterval = 10 * time.Second
 
 // Session handles saving I/O logs for one session to the local filesystem.
+//
+// Lock ordering (must be observed by any code added later):
+//
+//	fileMux  → passwordFilter.mu
+//
+// HandleClientMessage acquires fileMux and may then call into passwordFilter
+// methods (CheckOutput/FilterInput) which take passwordFilter.mu internally.
+// Acquiring locks in the reverse order will deadlock.
 type Session struct {
 	logID           string
 	sessionUUID     uuid.UUID
@@ -51,13 +63,19 @@ type Session struct {
 	fileMux         sync.Mutex
 	closeOnce       sync.Once
 	isInitialized   bool
-	// Live stats exposed to the management API. Updated with atomic ops so
-	// the API's read path never blocks on fileMux held by the write path.
-	// Writes themselves still happen while fileMux is held by HandleClientMessage.
+	// Live stats exposed to the management API. Each counter is an independent
+	// atomic, so a reader may observe an incoherent triple (e.g. msgCount
+	// incremented but bytesReceived not yet, or lastActivity stale by one
+	// message). Eventual consistency is acceptable for an admin UI; do not
+	// rely on these for correctness checks.
 	msgCount      atomic.Int64
 	bytesReceived atomic.Int64
 	lastActivity  atomic.Pointer[time.Time]
 }
+
+// Compile-time check that Session satisfies the sessions.MetadataProvider
+// contract consumed by the management API.
+var _ sessions.MetadataProvider = (*Session)(nil)
 
 // IO event types for the timing file, matching native sudo implementation.
 const (
@@ -228,11 +246,16 @@ type EventSession struct {
 	logJSONPath string
 	logMeta     map[string]any
 	closeOnce   sync.Once
-	// Live stats exposed to the management API.
+	// Live stats exposed to the management API. Same eventual-consistency
+	// contract as Session: each counter is an independent atomic and an API
+	// reader may observe an incoherent triple. Do not use for correctness.
 	msgCount      atomic.Int64
 	bytesReceived atomic.Int64
 	lastActivity  atomic.Pointer[time.Time]
 }
+
+// Compile-time check that EventSession satisfies sessions.MetadataProvider.
+var _ sessions.MetadataProvider = (*EventSession)(nil)
 
 // NewEventSession creates a local metadata-only session for an accepted command
 // where ExpectIobufs is false.
@@ -320,12 +343,7 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		if st := event.AcceptMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 		}
-		for k, v := range protocol.InfoMsgsToMap(event.AcceptMsg.GetInfoMsgs()) {
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		mergePreservingExisting(entry, protocol.InfoMsgsToMap(event.AcceptMsg.GetInfoMsgs()))
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
 		s.logMeta["sub_commands"] = subCmds
@@ -338,12 +356,7 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 		if st := event.RejectMsg.GetSubmitTime(); st != nil {
 			entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 		}
-		for k, v := range protocol.InfoMsgsToMap(event.RejectMsg.GetInfoMsgs()) {
-			if _, exists := entry[k]; exists {
-				continue
-			}
-			entry[k] = v
-		}
+		mergePreservingExisting(entry, protocol.InfoMsgsToMap(event.RejectMsg.GetInfoMsgs()))
 		subCmds, _ := s.logMeta["sub_commands"].([]any)
 		subCmds = append(subCmds, entry)
 		s.logMeta["sub_commands"] = subCmds
@@ -455,7 +468,7 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		case *pb.InfoMessage_Strval:
 			infoMap[key] = v.Strval
 		case *pb.InfoMessage_Numval:
-			infoMap[key] = fmt.Sprintf("%d", v.Numval)
+			infoMap[key] = strconv.FormatInt(v.Numval, 10)
 		}
 	}
 
@@ -469,7 +482,7 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		return "", fmt.Errorf("failed to generate random string: %w", err)
 	}
 	now := time.Now()
-	epochStr := fmt.Sprintf("%d", now.Unix())
+	epochStr := strconv.FormatInt(now.Unix(), 10)
 
 	// Replacer for sudoers-style escape sequences.
 	// User-controlled values are sanitized to strip "/" characters,
@@ -543,6 +556,37 @@ func getMutexForDir(dir string) *sync.Mutex {
 	return mutex
 }
 
+// mergePreservingExisting copies keys from src into dst that are not already
+// present in dst. Used wherever client-supplied InfoMsgs are merged into a
+// sub-command event entry — the authoritative fields (event_type, reason,
+// submit_time) must never be clobbered by a client-controlled key collision.
+func mergePreservingExisting(dst, src map[string]any) {
+	for k, v := range src {
+		if _, exists := dst[k]; exists {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+// readLogJSON opens, decodes, and closes a log.json file. Keeping the file
+// handle scoped to this helper prevents the double-close hazard that arose
+// when the decode-then-close sequence was inlined into a restart path with
+// multiple downstream error returns.
+func readLogJSON(path string) (map[string]any, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
+	}
+	defer f.Close()
+
+	logMeta := make(map[string]any)
+	if err := json.NewDecoder(f).Decode(&logMeta); err != nil {
+		return nil, fmt.Errorf("failed to read existing log.json: %w", err)
+	}
+	return logMeta, nil
+}
+
 // getNextSeq generates a sudo-compatible 6-character sequence number with file locking.
 func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) {
 	mutex := getMutexForDir(baseDir)
@@ -561,13 +605,15 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
 	}
+	// f.Close releases the flock implicitly on Linux/BSD — no explicit
+	// LOCK_UN defer needed. (Pairing one with the file-Close defer would
+	// run LOCK_UN first under LIFO ordering, which is harmless today but a
+	// footgun if the close path is ever wrapped or replaced.)
 	defer f.Close()
 
-	// Apply file lock for additional safety
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return "", fmt.Errorf("could not lock sequence file: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	// Get file info to check size
 	stat, err := f.Stat()
@@ -585,7 +631,15 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 		currentSeq = binary.BigEndian.Uint32(data)
 	}
 
-	// Increment and wrap if necessary (sudo uses a base36 encoding)
+	// Sequence numbers are encoded as 6-char base36 strings; 36^6 = 2,176,782,336
+	// is the maximum representable. Beyond that we'd silently truncate via the
+	// modulo loop and collide with earlier sequences, corrupting session
+	// uniqueness. Fail loudly instead.
+	const maxSeq uint32 = 36 * 36 * 36 * 36 * 36 * 36
+	if currentSeq >= maxSeq-1 {
+		return "", fmt.Errorf("sequence space exhausted at %d (max %d); rotate %s to recover",
+			currentSeq, maxSeq-1, seqFile)
+	}
 	nextSeq := currentSeq + 1
 
 	// Write the new sequence number back to the file atomically
@@ -721,7 +775,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 			value = v.Strval
 			s.logMeta[key] = v.Strval
 		case *pb.InfoMessage_Numval:
-			value = fmt.Sprintf("%d", v.Numval)
+			value = strconv.FormatInt(v.Numval, 10)
 			s.logMeta[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
 			value = strings.Join(v.Strlistval.Strings, " ")
@@ -907,12 +961,12 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		}
 	}
 
-	// Write data - use gzip writer if compression is enabled, otherwise write directly
-	var writer io.Writer
-	if gzWriter, compressed := s.gzipWriters[streamName]; compressed {
+	// Write data - use gzip writer if compression is enabled, otherwise write directly.
+	// One map lookup serves both the choice of writer and the post-write Flush call.
+	gzWriter, compressed := s.gzipWriters[streamName]
+	var writer io.Writer = s.files[streamName]
+	if compressed {
 		writer = gzWriter
-	} else {
-		writer = s.files[streamName]
 	}
 
 	if _, err := writer.Write(dataToWrite); err != nil {
@@ -920,7 +974,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	}
 
 	// Flush gzip writer if using compression (equivalent to sudo's Z_SYNC_FLUSH)
-	if gzWriter, compressed := s.gzipWriters[streamName]; compressed {
+	if compressed {
 		if err := gzWriter.Flush(); err != nil {
 			return nil, fmt.Errorf("failed to flush gzip writer for %s: %w", streamName, err)
 		}
@@ -1024,14 +1078,7 @@ func (s *Session) handleSubCommandAccept(acceptMsg *pb.AcceptMessage) (*pb.Serve
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Merge client-supplied info messages, but never let them clobber the
-	// authoritative fields already set on entry.
-	for k, v := range protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()) {
-		if _, exists := entry[k]; exists {
-			continue
-		}
-		entry[k] = v
-	}
+	mergePreservingExisting(entry, protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()))
 
 	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
@@ -1056,14 +1103,7 @@ func (s *Session) handleSubCommandReject(rejectMsg *pb.RejectMessage) (*pb.Serve
 		entry["submit_time"] = time.Unix(st.TvSec, int64(st.TvNsec)).UTC().Format(time.RFC3339Nano)
 	}
 
-	// Merge client-supplied info messages, but never let them clobber the
-	// authoritative fields already set on entry.
-	for k, v := range protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()) {
-		if _, exists := entry[k]; exists {
-			continue
-		}
-		entry[k] = v
-	}
+	mergePreservingExisting(entry, protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs()))
 
 	subCmds, _ := s.logMeta["sub_commands"].([]any)
 	subCmds = append(subCmds, entry)
@@ -1159,20 +1199,14 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 
 	// Read existing log.json. O_NOFOLLOW guards against symlink swap between
 	// session finalize and restart; the subsequent atomic rewrite uses
-	// writeFileAtomic.
+	// writeFileAtomic. Decoded in a helper so the file handle is scoped
+	// strictly to the decode and cannot leak into later error paths.
 	logJSONPath := filepath.Join(sessionDir, "log.json")
-	logJSONFile, err := os.OpenFile(logJSONPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	logMeta, err := readLogJSON(logJSONPath)
 	if err != nil {
 		timingFile.Close()
-		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
+		return nil, err
 	}
-	logMeta := make(map[string]any)
-	if err := json.NewDecoder(logJSONFile).Decode(&logMeta); err != nil {
-		logJSONFile.Close()
-		timingFile.Close()
-		return nil, fmt.Errorf("failed to read existing log.json: %w", err)
-	}
-	logJSONFile.Close()
 
 	// Open existing I/O stream files in append mode.
 	// stdin/ttyin may not exist (on-demand creation), so only open files that are present.
@@ -1189,7 +1223,6 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 				openFile.Close()
 			}
 			timingFile.Close()
-			logJSONFile.Close()
 			return nil, fmt.Errorf("failed to open stream file %s for restart: %w", streamName, err)
 		}
 		files[streamName] = f

@@ -218,6 +218,93 @@ func BenchmarkRegistry_Snapshot(b *testing.B) {
 	}
 }
 
+// TestRegistry_GetByLogIDIsO1 pins the secondary-index behavior: a lookup by
+// ServerLogID must succeed without falling back to a linear scan, and the
+// index must stay coherent across replacement and deregistration so an old
+// logID cannot resolve to a session that has since taken its place.
+func TestRegistry_GetByLogIDIsO1(t *testing.T) {
+	r := NewRegistry()
+	id := uuid.New()
+	r.Register(SessionInfo{
+		SessionID:   id.String(),
+		SessionUUID: id,
+		ServerLogID: "logA",
+		StartedAt:   time.Unix(1, 0),
+	})
+
+	if got, ok := r.Get("logA"); !ok || got.SessionID != id.String() {
+		t.Fatalf("Get by ServerLogID: got=%+v ok=%v", got, ok)
+	}
+
+	// Replacement under the same SessionID with a new ServerLogID must drop
+	// the stale logID → SessionID mapping.
+	r.Register(SessionInfo{
+		SessionID:   id.String(),
+		SessionUUID: id,
+		ServerLogID: "logB",
+		StartedAt:   time.Unix(2, 0),
+	})
+	if _, ok := r.Get("logA"); ok {
+		t.Error("stale logA lookup should miss after re-registration with logB")
+	}
+	if got, ok := r.Get("logB"); !ok || got.SessionID != id.String() {
+		t.Errorf("Get by new logB failed: got=%+v ok=%v", got, ok)
+	}
+
+	// Deregister must drop the secondary index entry too.
+	r.Deregister(id.String())
+	if _, ok := r.Get("logB"); ok {
+		t.Error("logB lookup should miss after Deregister")
+	}
+}
+
+// TestRegistry_DuplicateLogIDOverlap pins the ownership-aware Deregister
+// behavior Codex's second adversarial review flagged. Two sessions can
+// temporarily share a ServerLogID during a restart/reconnect overlap; the
+// newer session takes ownership of the secondary index. Deregistering the
+// OLD session must not delete the newer session's lookup — that would
+// 404 a recovery session in the management API at exactly the moment
+// operators want to inspect it.
+func TestRegistry_DuplicateLogIDOverlap(t *testing.T) {
+	r := NewRegistry()
+	idA := uuid.New()
+	idB := uuid.New()
+	const sharedLogID = "shared-log-id"
+
+	r.Register(SessionInfo{
+		SessionID:   idA.String(),
+		SessionUUID: idA,
+		ServerLogID: sharedLogID,
+		StartedAt:   time.Unix(1, 0),
+	})
+	r.Register(SessionInfo{
+		SessionID:   idB.String(),
+		SessionUUID: idB,
+		ServerLogID: sharedLogID, // overlap: newer entry claims the index
+		StartedAt:   time.Unix(2, 0),
+	})
+
+	// Lookup by shared ServerLogID returns the newer session.
+	if got, ok := r.Get(sharedLogID); !ok || got.SessionID != idB.String() {
+		t.Fatalf("after overlap: Get(%q) = (%+v, %v), want session B", sharedLogID, got, ok)
+	}
+
+	// Deregistering the OLDER session must NOT remove B's lookup.
+	r.Deregister(idA.String())
+	if got, ok := r.Get(sharedLogID); !ok || got.SessionID != idB.String() {
+		t.Fatalf("after Deregister(A): Get(%q) = (%+v, %v); B must still be reachable by log_id", sharedLogID, got, ok)
+	}
+	if _, ok := r.Get(idA.String()); ok {
+		t.Error("Deregister(A) should remove A's primary key entry")
+	}
+
+	// Deregistering B (the actual owner) finally clears the secondary index.
+	r.Deregister(idB.String())
+	if _, ok := r.Get(sharedLogID); ok {
+		t.Errorf("after Deregister(B): Get(%q) should miss", sharedLogID)
+	}
+}
+
 // Sanity: ensure %v formatting of a SessionInfo doesn't panic, useful when
 // tests include diagnostic output.
 func TestSessionInfo_FormatStable(t *testing.T) {

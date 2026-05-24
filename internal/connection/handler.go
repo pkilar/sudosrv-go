@@ -91,6 +91,12 @@ func NewHandler(conn net.Conn, cfg *config.Config) *Handler {
 // NewHandlerWithContext creates a new handler for a connection with context
 // support. Pass a non-nil registry to make the connection's session visible to
 // the management API; pass nil to disable that integration.
+//
+// The supplied cfg is captured by value for the lifetime of the connection:
+// SIGHUP-driven config changes (notably Server.IdleTimeout) only affect
+// connections accepted *after* the reload. The server's reload path explicitly
+// rejects listener/mode changes for that reason; numeric tuning knobs like
+// IdleTimeout become effective per-connection at next accept.
 func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Config, registry *sessions.Registry) *Handler {
 	_, isTLS := conn.(*tls.Conn)
 	h := &Handler{

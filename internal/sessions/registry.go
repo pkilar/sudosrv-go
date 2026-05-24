@@ -18,6 +18,11 @@ import (
 // SessionInfo is the registry record for one active session. Static fields are
 // populated at registration time; live fields are obtained via Provider on
 // demand so the API never returns stale counters.
+//
+// Info is a reference type (map). The registry treats it as read-only after
+// Register; callers MUST NOT mutate the map returned from Get/Snapshot.
+// API handlers that need to expose Info externally should defensive-copy via
+// maps.Clone — see internal/api/server.go:detail.
 type SessionInfo struct {
 	SessionID    string           // sessionUUID.String(); registry key
 	ServerLogID  string           // base64-encoded sudo log_id; populated after session init
@@ -27,7 +32,7 @@ type SessionInfo struct {
 	StartedAt    time.Time        // server-side connection start
 	SubmitTime   time.Time        // AcceptMessage.submit_time
 	ExpectIobufs bool             // whether I/O buffers are expected for this session
-	Info         map[string]any   // flattened AcceptMessage.InfoMsgs
+	Info         map[string]any   // flattened AcceptMessage.InfoMsgs; treat as read-only post-Register
 	Provider     MetadataProvider // optional accessor for live counters
 }
 
@@ -57,42 +62,80 @@ type LiveStats struct {
 // The static fields of SessionInfo are set once at Register time; live
 // counters are read through the MetadataProvider hook, which uses its own
 // synchronization (typically sync/atomic) on the underlying session.
+//
+// byLogID is a secondary index mapping ServerLogID → SessionID so Get() can
+// answer either-form lookups in O(1) instead of a linear scan that an
+// authenticated client could trivially weaponize by polling random IDs.
 type Registry struct {
 	mu       sync.RWMutex
 	sessions map[string]SessionInfo
+	byLogID  map[string]string
 }
 
 // NewRegistry returns an empty registry ready for use.
 func NewRegistry() *Registry {
-	return &Registry{sessions: make(map[string]SessionInfo)}
+	return &Registry{
+		sessions: make(map[string]SessionInfo),
+		byLogID:  make(map[string]string),
+	}
 }
 
 // Register adds a session to the registry, replacing any existing entry with
 // the same SessionID. A nil receiver is a no-op so callers that may not have a
 // registry (e.g., unit tests) can call this unconditionally.
+//
+// Two cases need careful index hygiene:
+//
+//  1. Re-register under the same SessionID with a different ServerLogID:
+//     drop the old logID → SessionID mapping so it can't outlive its owner.
+//  2. Register under a NEW SessionID with the same ServerLogID as an existing
+//     entry (e.g., a restart/reconnect overlap where the old connection is
+//     still finishing teardown): the newer entry takes ownership of the
+//     logID index. The older SessionID is still reachable via its primary
+//     key, but Get(logID) returns the newer record. This matches operator
+//     intent — when two sessions share a log_id during an overlap, the
+//     active recovery is the one worth surfacing.
 func (r *Registry) Register(info SessionInfo) {
 	if r == nil || info.SessionID == "" {
 		return
 	}
 	r.mu.Lock()
+	if prev, ok := r.sessions[info.SessionID]; ok && prev.ServerLogID != "" && prev.ServerLogID != info.ServerLogID {
+		delete(r.byLogID, prev.ServerLogID)
+	}
 	r.sessions[info.SessionID] = info
+	if info.ServerLogID != "" {
+		r.byLogID[info.ServerLogID] = info.SessionID
+	}
 	r.mu.Unlock()
 }
 
 // Deregister removes the session with the given ID. Missing IDs are silently
 // ignored. A nil receiver is a no-op.
+//
+// The secondary-index delete is OWNERSHIP-AWARE: we only drop
+// byLogID[prev.ServerLogID] when it still points at the SessionID being
+// removed. If a newer session has since claimed the same ServerLogID
+// (restart/reconnect overlap), removing the old session must not clobber
+// the newer one's lookup — that would 404 a recovery session that an
+// operator is actively trying to inspect.
 func (r *Registry) Deregister(sessionID string) {
 	if r == nil || sessionID == "" {
 		return
 	}
 	r.mu.Lock()
+	if prev, ok := r.sessions[sessionID]; ok && prev.ServerLogID != "" {
+		if owner, ok := r.byLogID[prev.ServerLogID]; ok && owner == sessionID {
+			delete(r.byLogID, prev.ServerLogID)
+		}
+	}
 	delete(r.sessions, sessionID)
 	r.mu.Unlock()
 }
 
 // Get returns a copy of the registered session matching id. The lookup tries
-// the SessionID (UUID form) first, then falls back to a linear scan for a
-// matching ServerLogID so callers can paste either form.
+// the SessionID (UUID form) first, then the ServerLogID secondary index, so
+// callers can paste either form and pay only O(1) work.
 func (r *Registry) Get(id string) (SessionInfo, bool) {
 	if r == nil || id == "" {
 		return SessionInfo{}, false
@@ -102,8 +145,8 @@ func (r *Registry) Get(id string) (SessionInfo, bool) {
 	if s, ok := r.sessions[id]; ok {
 		return s, true
 	}
-	for _, s := range r.sessions {
-		if s.ServerLogID != "" && s.ServerLogID == id {
+	if sid, ok := r.byLogID[id]; ok {
+		if s, ok := r.sessions[sid]; ok {
 			return s, true
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -74,16 +75,15 @@ type LocalStorageConfig struct {
 	PasswordFilter  bool   `yaml:"password_filter"`  // Enable regex-based password filtering
 }
 
-// LoadConfig reads the configuration from a YAML file.
+// LoadConfig reads the configuration from a YAML file. A missing file is an
+// error so a typo in -config or a missing deployment artifact cannot silently
+// replace the documented secure defaults with whatever yaml.v3 leaves in a
+// half-populated struct.
 func LoadConfig(path string) (*Config, error) {
 	config := defaultConfig()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Warn("Config file not found, using defaults", "path", path)
-			return config, nil
-		}
 		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
 	}
 
@@ -94,24 +94,20 @@ func LoadConfig(path string) (*Config, error) {
 	return config, nil
 }
 
-// LoadConfigRequired reads the configuration from a YAML file and fails if the
-// file is missing. This is used for SIGHUP reloads so a transient deployment
-// mistake cannot silently replace the running config with defaults.
+// LoadConfigRequired is retained as an alias for LoadConfig so existing SIGHUP
+// reload call sites do not need to change. Both functions now have identical
+// fail-fast semantics on a missing file.
 func LoadConfigRequired(path string) (*Config, error) {
-	config := defaultConfig()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
-	}
-
-	if err := unmarshalConfig(data, config); err != nil {
-		return nil, err
-	}
-
-	return config, nil
+	return LoadConfig(path)
 }
 
+// defaultConfig returns a Config populated with all secure defaults.
+//
+// LoadConfig calls this first, then yaml.Unmarshal merges user values on top.
+// yaml.v3 only overwrites fields that appear in the YAML, so any field the
+// user omits keeps its default — including PasswordFilter, IologDir, etc.
+// applyZeroValueDefaults is a defensive second pass that re-applies the few
+// numeric defaults a user could accidentally zero out (e.g., idle_timeout: 0).
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
@@ -217,6 +213,34 @@ func Validate(cfg *Config) error {
 		if (cfg.API.TLSCertFile == "") != (cfg.API.TLSKeyFile == "") {
 			return fmt.Errorf("api.tls_cert_file and api.tls_key_file must both be set or both empty")
 		}
+		if err := validateAuthTokenFile(cfg.API.AuthTokenFile); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateAuthTokenFile enforces the security preconditions documented for the
+// preferred AuthTokenFile credential path: absolute path, file exists, and the
+// mode forbids group/other access. A world-readable token file accepted as
+// "preferred" would be a silent regression.
+func validateAuthTokenFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("api.auth_token_file must be an absolute path, got %q", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("api.auth_token_file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("api.auth_token_file %s is not a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("api.auth_token_file %s has mode 0%o; require 0600 or 0400 (no group/other access)",
+			path, info.Mode().Perm())
 	}
 	return nil
 }
@@ -239,6 +263,12 @@ func ValidatePermissions(cfg *LocalStorageConfig) error {
 	if cfg.FilePermissions&0004 != 0 {
 		return fmt.Errorf("file_permissions 0%o is world-readable; sudo transcripts may contain secrets — refusing to start", cfg.FilePermissions)
 	}
+	// Directories without owner-exec are not traversable; this catches the
+	// classic `dir_permissions: 644` mistake (auto-octalled from decimal),
+	// which would otherwise produce inscrutable runtime errors.
+	if cfg.DirPermissions&0100 == 0 {
+		return fmt.Errorf("dir_permissions 0%o lacks owner-exec bit; directories would not be traversable", cfg.DirPermissions)
+	}
 	return nil
 }
 
@@ -247,6 +277,10 @@ func ValidatePermissions(cfg *LocalStorageConfig) error {
 // octal value (0o750 = 488). Only converts when every decimal digit is 0-7,
 // which is a strong signal the user intended octal notation. Values already
 // within 0-0o777 (0-511) are returned unchanged.
+//
+// ValidatePermissions runs after this conversion, so any resulting value that
+// would be unsafe (world-writable, world-readable file, dir without owner-exec)
+// still blocks startup with a clear error.
 func reinterpretDecimalAsOctal(val uint32, fieldName string) uint32 {
 	if val <= 0o777 {
 		return val // Already a valid permission value
@@ -259,14 +293,16 @@ func reinterpretDecimalAsOctal(val uint32, fieldName string) uint32 {
 		digit := tmp % 10
 		if digit > 7 {
 			// Contains 8 or 9 — not an octal literal, just a bad value
-			slog.Warn(fmt.Sprintf("%s value %d exceeds maximum 0777 and contains non-octal digits; please use quoted octal (e.g., 0o750)", fieldName, val))
+			slog.Warn("permission value exceeds 0777 and contains non-octal digits; use quoted octal (e.g., \"0750\")",
+				"field", fieldName, "value", val)
 			return val
 		}
 		octalVal += digit * multiplier
 		multiplier *= 8
 		tmp /= 10
 	}
-	slog.Warn(fmt.Sprintf("%s: auto-corrected YAML 1.2 decimal %d to octal 0o%o (%d); consider using quoted 0o notation in config", fieldName, val, octalVal, octalVal))
+	slog.Warn("auto-corrected YAML 1.2 decimal to octal; quote the value in config to silence this warning",
+		"field", fieldName, "decimal", val, "octal", fmt.Sprintf("0o%o", octalVal))
 	return octalVal
 }
 

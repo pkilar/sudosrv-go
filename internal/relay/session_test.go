@@ -4,6 +4,9 @@ package relay
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -12,6 +15,7 @@ import (
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +40,7 @@ type mockUpstreamServer struct {
 	wg           sync.WaitGroup
 	receivedMsgs chan *pb.ClientMessage
 	t            *testing.T
+	closing      atomic.Bool // set true before listener.Close so acceptLoop suppresses the expected "use of closed network connection" log
 }
 
 func newMockUpstreamServer(t *testing.T, addr string) (*mockUpstreamServer, error) {
@@ -58,7 +63,7 @@ func (s *mockUpstreamServer) acceptLoop() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if !s.isClosing() {
+			if !s.closing.Load() {
 				s.t.Logf("Accept error: %v", err)
 			}
 			return // Listener was closed
@@ -69,18 +74,6 @@ func (s *mockUpstreamServer) acceptLoop() {
 			s.handleConnection(c)
 		}(conn)
 	}
-}
-
-func (s *mockUpstreamServer) isClosing() bool {
-	// Check if listener is closed by trying to get the file descriptor
-	if tcpListener, ok := s.listener.(*net.TCPListener); ok {
-		file, err := tcpListener.File()
-		if err != nil {
-			return true // Likely closed
-		}
-		file.Close()
-	}
-	return false
 }
 
 // handleConnection now robustly handles the full handshake and subsequent message flush.
@@ -142,6 +135,7 @@ func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
 }
 
 func (s *mockUpstreamServer) Close() {
+	s.closing.Store(true)
 	s.listener.Close()
 	s.wg.Wait()
 	close(s.receivedMsgs)
@@ -193,17 +187,25 @@ func TestRelaySession_CacheAndFlush(t *testing.T) {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
 
-	// 4. Send some messages to the session, which will be cached locally
-	session.HandleClientMessage(&pb.ClientMessage{
+	// 4. Send some messages to the session, which will be cached locally.
+	// Errors here indicate a regression in HandleClientMessage (e.g. timeout,
+	// channel closed); failing loudly beats a silent miscount downstream.
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Data: []byte("output1")}},
-	})
-	session.HandleClientMessage(&pb.ClientMessage{
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(output1): %v", err)
+	}
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Data: []byte("output2")}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(output2): %v", err)
+	}
 	// Send the final exit message, which completes the client-facing part of the session
-	session.HandleClientMessage(&pb.ClientMessage{
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(exit): %v", err)
+	}
 
 	// 5. Close the "client" connection to the relay session.
 	// This signals the messageWriter to finish, allowing the background flusher to proceed.
@@ -321,9 +323,11 @@ func TestRelayCommitPoints(t *testing.T) {
 	}
 
 	// Clean up: send exit and close
-	session.HandleClientMessage(&pb.ClientMessage{
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
 		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
-	})
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(exit) during cleanup: %v", err)
+	}
 	session.Close()
 	waitRelaySession(t, session, 2*time.Second)
 }
@@ -367,7 +371,7 @@ func TestRelayCommitPointThrottling(t *testing.T) {
 	}
 
 	// Subsequent events within throttle window: no commit point
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err = session.HandleClientMessage(makeIoMsg())
 		if err != nil {
 			t.Fatalf("I/O event %d failed: %v", i+2, err)
@@ -434,4 +438,120 @@ func TestRelaySession_CloseDoesNotWaitForFlush(t *testing.T) {
 
 	cancel()
 	waitRelaySession(t, session, 2*time.Second)
+}
+
+// TestRelaySession_NoMessageLossUnderCloseRace asserts the invariant Codex's
+// adversarial review flagged: if HandleClientMessage returns nil error, the
+// message MUST end up durably cached. The previous Close/send synchronization
+// (separate `closed` chan signal + open data channel) could let a sender
+// commit to the buffer after the writer goroutine had already exited via the
+// closed-signal arm, silently losing audit data.
+//
+// To exercise the race, we use a starting barrier so a wave of senders all
+// hit the channel right when Close runs, maximising the chance that a send
+// commits to the buffer concurrently with Close closing the channel. The
+// test asserts the invariant on every iteration of an inner loop so a single
+// run gives many race attempts; combine with `-race -count=N` for stress.
+func TestRelaySession_NoMessageLossUnderCloseRace(t *testing.T) {
+	const (
+		iterations = 25
+		senders    = 500
+	)
+	for iter := range iterations {
+		t.Run(fmt.Sprintf("iter-%02d", iter), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			relayCfg := &config.RelayConfig{
+				RelayCacheDirectory:  tmpDir,
+				ReconnectAttempts:    0, // skip phase 2; leaves the *.log cache file in place
+				MaxReconnectInterval: 50 * time.Millisecond,
+				ConnectTimeout:       50 * time.Millisecond,
+				UpstreamHost:         "127.0.0.1:1", // unreachable
+			}
+
+			sessionUUID := uuid.New()
+			session, err := NewSession(t.Context(), sessionUUID, createTestAcceptMessage(), relayCfg, nil)
+			if err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
+
+			var (
+				startBarrier = make(chan struct{})
+				wg           sync.WaitGroup
+				mu           sync.Mutex
+				acked        = make(map[uint32]struct{}, senders)
+			)
+			wg.Add(senders)
+			for i := range senders {
+				go func(i int) {
+					defer wg.Done()
+					payload := make([]byte, 4)
+					binary.BigEndian.PutUint32(payload, uint32(i))
+					msg := &pb.ClientMessage{Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+						Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 0},
+						Data:  payload,
+					}}}
+					<-startBarrier
+					if _, err := session.HandleClientMessage(msg); err == nil {
+						mu.Lock()
+						acked[uint32(i)] = struct{}{}
+						mu.Unlock()
+					}
+				}(i)
+			}
+			// Release the senders, then Close almost immediately. This
+			// maximises the chance that some sends are still committing
+			// when Close closes the channel.
+			close(startBarrier)
+			if err := session.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			wg.Wait()
+			waitRelaySession(t, session, 5*time.Second)
+
+			cachePath := filepath.Join(tmpDir, sessionUUID.String()+".log")
+			cached, err := readCachedPayloads(cachePath)
+			if err != nil {
+				t.Fatalf("read cache: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for idx := range acked {
+				if _, ok := cached[idx]; !ok {
+					t.Fatalf("data loss: sender %d returned nil error but its payload is absent from cache (ack=%d cached=%d)",
+						idx, len(acked), len(cached))
+				}
+			}
+		})
+	}
+}
+
+// readCachedPayloads opens the relay cache file and returns the set of
+// TtyoutBuf payload sender-indices it contains. Non-Ttyout messages
+// (AcceptMsg from session init) are skipped.
+func readCachedPayloads(path string) (map[uint32]struct{}, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make(map[uint32]struct{})
+	for {
+		msg, err := readProtoMessage(f)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		buf := msg.GetTtyoutBuf()
+		if buf == nil {
+			continue
+		}
+		data := buf.GetData()
+		if len(data) != 4 {
+			continue
+		}
+		out[binary.BigEndian.Uint32(data)] = struct{}{}
+	}
 }
