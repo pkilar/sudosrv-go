@@ -18,7 +18,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sudosrv/internal/config"
@@ -157,7 +156,12 @@ func writeNewFile(path string, data []byte, perm os.FileMode) (err error) {
 // containsDotDot checks whether a path contains a ".." component,
 // matching C sudo_logsrvd's contains_dot_dot() check.
 func containsDotDot(path string) bool {
-	return slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "..")
+	for seg := range strings.SplitSeq(filepath.ToSlash(path), "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // pathWithinBase returns true when target stays lexically within base.
