@@ -4,6 +4,9 @@ package relay
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -435,4 +438,120 @@ func TestRelaySession_CloseDoesNotWaitForFlush(t *testing.T) {
 
 	cancel()
 	waitRelaySession(t, session, 2*time.Second)
+}
+
+// TestRelaySession_NoMessageLossUnderCloseRace asserts the invariant Codex's
+// adversarial review flagged: if HandleClientMessage returns nil error, the
+// message MUST end up durably cached. The previous Close/send synchronization
+// (separate `closed` chan signal + open data channel) could let a sender
+// commit to the buffer after the writer goroutine had already exited via the
+// closed-signal arm, silently losing audit data.
+//
+// To exercise the race, we use a starting barrier so a wave of senders all
+// hit the channel right when Close runs, maximising the chance that a send
+// commits to the buffer concurrently with Close closing the channel. The
+// test asserts the invariant on every iteration of an inner loop so a single
+// run gives many race attempts; combine with `-race -count=N` for stress.
+func TestRelaySession_NoMessageLossUnderCloseRace(t *testing.T) {
+	const (
+		iterations = 25
+		senders    = 500
+	)
+	for iter := range iterations {
+		t.Run(fmt.Sprintf("iter-%02d", iter), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			relayCfg := &config.RelayConfig{
+				RelayCacheDirectory:  tmpDir,
+				ReconnectAttempts:    0, // skip phase 2; leaves the *.log cache file in place
+				MaxReconnectInterval: 50 * time.Millisecond,
+				ConnectTimeout:       50 * time.Millisecond,
+				UpstreamHost:         "127.0.0.1:1", // unreachable
+			}
+
+			sessionUUID := uuid.New()
+			session, err := NewSession(t.Context(), sessionUUID, createTestAcceptMessage(), relayCfg, nil)
+			if err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
+
+			var (
+				startBarrier = make(chan struct{})
+				wg           sync.WaitGroup
+				mu           sync.Mutex
+				acked        = make(map[uint32]struct{}, senders)
+			)
+			wg.Add(senders)
+			for i := range senders {
+				go func(i int) {
+					defer wg.Done()
+					payload := make([]byte, 4)
+					binary.BigEndian.PutUint32(payload, uint32(i))
+					msg := &pb.ClientMessage{Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+						Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 0},
+						Data:  payload,
+					}}}
+					<-startBarrier
+					if _, err := session.HandleClientMessage(msg); err == nil {
+						mu.Lock()
+						acked[uint32(i)] = struct{}{}
+						mu.Unlock()
+					}
+				}(i)
+			}
+			// Release the senders, then Close almost immediately. This
+			// maximises the chance that some sends are still committing
+			// when Close closes the channel.
+			close(startBarrier)
+			if err := session.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			wg.Wait()
+			waitRelaySession(t, session, 5*time.Second)
+
+			cachePath := filepath.Join(tmpDir, sessionUUID.String()+".log")
+			cached, err := readCachedPayloads(cachePath)
+			if err != nil {
+				t.Fatalf("read cache: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for idx := range acked {
+				if _, ok := cached[idx]; !ok {
+					t.Fatalf("data loss: sender %d returned nil error but its payload is absent from cache (ack=%d cached=%d)",
+						idx, len(acked), len(cached))
+				}
+			}
+		})
+	}
+}
+
+// readCachedPayloads opens the relay cache file and returns the set of
+// TtyoutBuf payload sender-indices it contains. Non-Ttyout messages
+// (AcceptMsg from session init) are skipped.
+func readCachedPayloads(path string) (map[uint32]struct{}, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make(map[uint32]struct{})
+	for {
+		msg, err := readProtoMessage(f)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		buf := msg.GetTtyoutBuf()
+		if buf == nil {
+			continue
+		}
+		data := buf.GetData()
+		if len(data) != 4 {
+			continue
+		}
+		out[binary.BigEndian.Uint32(data)] = struct{}{}
+	}
 }

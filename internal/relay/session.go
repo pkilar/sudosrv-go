@@ -58,11 +58,15 @@ type Session struct {
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
 	fromClientChan   chan *pb.ClientMessage
-	// closed is closed by Close() to signal "no more sends will arrive".
-	// HandleClientMessage selects on it instead of relying on a closed
-	// fromClientChan, which would panic on send if a late call races with
-	// teardown (e.g. a metric reader holding a stale Session pointer).
-	closed    chan struct{}
+	// sendMu serializes Close against in-flight HandleClientMessage calls.
+	// HandleClientMessage holds RLock for its entire critical section
+	// (closed check + channel send); Close takes the exclusive Lock so it
+	// waits for every admitted send to commit to the channel before
+	// flipping the closed flag and closing the channel. Without this,
+	// a sender that passed the closed check could still write to a buffer
+	// the writer goroutine has already abandoned, silently losing audit data.
+	sendMu    sync.RWMutex
+	closed    atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	cacheFileName   string
@@ -126,7 +130,6 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		config:           cfg,
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
-		closed:           make(chan struct{}),
 		cacheFileName:    cacheFileName,
 		cumulativeDelay:  make(map[string]time.Duration),
 		ctx:              ctx,
@@ -251,11 +254,17 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 	}
 
 	// Loop until the session context is cancelled (server shutdown), Close()
-	// signals end-of-input, or an ExitMessage arrives. We drain any messages
-	// still buffered in fromClientChan after Close before exiting.
+	// closes fromClientChan, or an ExitMessage arrives. Close() guarantees
+	// that every admitted send has committed to the channel before close()
+	// fires, so the ok=false signal here implies "the buffer has been fully
+	// drained" — no messages are lost on disconnect races.
 	for {
 		select {
-		case msg := <-s.fromClientChan:
+		case msg, ok := <-s.fromClientChan:
+			if !ok {
+				// Channel closed by Close(); all buffered messages drained.
+				return false
+			}
 			if err := writeProtoMessage(file, msg); err != nil {
 				slog.Error("Failed to write message to relay cache, aborting write phase", "log_id", s.logID, "error", err)
 				return false
@@ -263,24 +272,6 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 			if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
 				slog.Debug("ExitMessage received and cached. Ending write phase.", "log_id", s.logID)
 				return true
-			}
-		case <-s.closed:
-			// Close() was called. Drain any buffered messages before exiting
-			// — they were sent before Close() returned and represent real
-			// client data we owe to the cache.
-			for {
-				select {
-				case msg := <-s.fromClientChan:
-					if err := writeProtoMessage(file, msg); err != nil {
-						slog.Error("Failed to write buffered message during drain", "log_id", s.logID, "error", err)
-						return false
-					}
-					if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
-						return true
-					}
-				default:
-					return false
-				}
 			}
 		case <-s.ctx.Done():
 			slog.Info("Relay session write phase cancelled by context", "log_id", s.logID)
@@ -370,13 +361,14 @@ func (s *Session) LiveStats() sessions.LiveStats {
 }
 
 func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage, error) {
-	// Reject sends after Close() to avoid panicking on a closed channel. The
-	// closed check is in the select arm of the send below; this early check
-	// short-circuits the bookkeeping work for an already-closed session.
-	select {
-	case <-s.closed:
+	// RLock pairs with Close()'s Lock: while we hold this, Close cannot run
+	// to completion. Any send that admits past the closed check is therefore
+	// guaranteed to commit to the channel before close(fromClientChan) fires
+	// — the writer cannot miss it.
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
 		return nil, fmt.Errorf("relay session closed")
-	default:
 	}
 
 	s.msgCount.Add(1)
@@ -400,8 +392,6 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	case <-timer.C:
 		slog.Warn("Relay session message channel timeout", "log_id", s.logID)
 		return nil, fmt.Errorf("relay session message channel timeout")
-	case <-s.closed:
-		return nil, fmt.Errorf("relay session closed")
 	case <-s.ctx.Done():
 		return nil, fmt.Errorf("relay session cancelled")
 	}
@@ -438,14 +428,19 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 // returns immediately; durable upstream flushing continues in the background.
 // Server shutdown propagates via the parent context. Safe to call multiple times.
 //
-// We deliberately do NOT close fromClientChan — a late HandleClientMessage
-// call racing with Close would panic on send. Closing a dedicated signal
-// channel lets the runner detect end-of-input while keeping the data channel
-// in a panic-free state.
+// Acquiring sendMu exclusively waits for any HandleClientMessage call already
+// inside its critical section to finish its channel send. After we set
+// closed=true and close the channel, no new sender can pass the closed check
+// and any committed buffered message will be drained by the writer's
+// ok-from-receive loop. This is the synchronization Codex's adversarial
+// review identified as missing.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		slog.Info("Client connection closed. Relay session writer will now complete.", "log_id", s.logID)
-		close(s.closed)
+		s.sendMu.Lock()
+		s.closed.Store(true)
+		close(s.fromClientChan)
+		s.sendMu.Unlock()
 	})
 	return nil
 }
