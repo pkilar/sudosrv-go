@@ -555,3 +555,69 @@ func readCachedPayloads(path string) (map[uint32]struct{}, error) {
 		out[binary.BigEndian.Uint32(data)] = struct{}{}
 	}
 }
+
+// TestRelayFinalCommitOnExit verifies the downstream client gets a FINAL
+// commit_point on Exit whose value is the cumulative clock summed across all
+// streams AND winsize/suspend — even though the upstream is flushed
+// asynchronously later. Without it a stock client stalls in CLOSING.
+func TestRelayFinalCommitOnExit(t *testing.T) {
+	tmpDir := t.TempDir()
+	relayCfg := &config.RelayConfig{
+		RelayCacheDirectory:  tmpDir,
+		ReconnectAttempts:    0,
+		MaxReconnectInterval: 100 * time.Millisecond,
+		ConnectTimeout:       time.Second,
+		UpstreamHost:         "127.0.0.1:0", // never connects; we only exercise HandleClientMessage
+	}
+
+	session, err := NewSession(t.Context(), uuid.New(), createTestAcceptMessage(), relayCfg, nil)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
+	}
+
+	// ttyout 1.1s -> first I/O event emits a commit point carrying the global total.
+	if resp, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 100000000}, Data: []byte("out")}},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(ttyout) failed: %v", err)
+	} else if cp := resp.GetCommitPoint(); cp == nil || cp.TvSec != 1 || cp.TvNsec != 100000000 {
+		t.Fatalf("first commit_point = %v, want 1.1s", cp)
+	}
+
+	// winsize 0.4s and stdin 0.5s advance the same clock; neither emits a commit
+	// (winsize is non-I/O; stdin is within the throttle interval).
+	for _, m := range []*pb.ClientMessage{
+		{Type: &pb.ClientMessage_WinsizeEvent{WinsizeEvent: &pb.ChangeWindowSize{Delay: &pb.TimeSpec{TvNsec: 400000000}, Rows: 30, Cols: 90}}},
+		{Type: &pb.ClientMessage_StdinBuf{StdinBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvNsec: 500000000}, Data: []byte("in")}}},
+	} {
+		if resp, err := session.HandleClientMessage(m); err != nil {
+			t.Fatalf("HandleClientMessage(%T) failed: %v", m.Type, err)
+		} else if resp != nil {
+			t.Errorf("expected no commit_point for %T, got %v", m.Type, resp)
+		}
+	}
+
+	// Exit -> FINAL commit_point = 1.1 + 0.4 + 0.5 = 2.0s.
+	resp, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(Exit) failed: %v", err)
+	}
+	cp := resp.GetCommitPoint()
+	if cp == nil {
+		t.Fatal("expected FINAL commit_point on Exit in relay mode; without it a stock client hangs in CLOSING")
+	}
+	if cp.TvSec != 2 || cp.TvNsec != 0 {
+		t.Errorf("final commit_point = %d.%09d, want 2.000000000", cp.TvSec, cp.TvNsec)
+	}
+
+	session.Close()
+	waitRelaySession(t, session, 2*time.Second)
+}

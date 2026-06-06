@@ -70,9 +70,9 @@ type Session struct {
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	cacheFileName   string
-	mu              sync.Mutex               // Protects cumulativeDelay and lastCommitTime
-	cumulativeDelay map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
-	lastCommitTime  time.Time                // When last commit point was sent to client
+	mu              sync.Mutex    // Protects cumulativeDelay and lastCommitTime
+	cumulativeDelay time.Duration // Single elapsed clock summed across all I/O, winsize, and suspend delays (mirrors C closure->elapsed_time)
+	lastCommitTime  time.Time     // When last commit point was sent to client
 	ctx             context.Context
 	cancel          context.CancelFunc
 	// onDone is invoked exactly once after the background runner exits — i.e.
@@ -131,7 +131,6 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
 		cacheFileName:    cacheFileName,
-		cumulativeDelay:  make(map[string]time.Duration),
 		ctx:              ctx,
 		cancel:           cancel,
 		onDone:           onDone,
@@ -340,6 +339,54 @@ func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec) {
 	}
 }
 
+// messageDelay returns the delay of any event that advances sudo's elapsed-time
+// clock: the five I/O buffers plus winsize and suspend. Returns nil for messages
+// that carry no delay (Accept/Reject/Restart/Alert/Exit). Mirrors the set of
+// update_elapsed_time call sites in C sudo_logsrvd.
+func messageDelay(msg *pb.ClientMessage) *pb.TimeSpec {
+	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_TtyinBuf:
+		return event.TtyinBuf.GetDelay()
+	case *pb.ClientMessage_TtyoutBuf:
+		return event.TtyoutBuf.GetDelay()
+	case *pb.ClientMessage_StdinBuf:
+		return event.StdinBuf.GetDelay()
+	case *pb.ClientMessage_StdoutBuf:
+		return event.StdoutBuf.GetDelay()
+	case *pb.ClientMessage_StderrBuf:
+		return event.StderrBuf.GetDelay()
+	case *pb.ClientMessage_WinsizeEvent:
+		return event.WinsizeEvent.GetDelay()
+	case *pb.ClientMessage_SuspendEvent:
+		return event.SuspendEvent.GetDelay()
+	default:
+		return nil
+	}
+}
+
+// isExitMessage reports whether msg is an ExitMessage.
+func isExitMessage(msg *pb.ClientMessage) bool {
+	_, ok := msg.Type.(*pb.ClientMessage_ExitMsg)
+	return ok
+}
+
+// durationFromTimeSpec converts a protobuf TimeSpec into a time.Duration.
+func durationFromTimeSpec(ts *pb.TimeSpec) time.Duration {
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())*time.Nanosecond
+}
+
+// commitPointMsg builds a commit_point ServerMessage carrying the cumulative
+// elapsed time d. Integer second/nanosecond split matches C's encoding and the
+// value the client compares against its own global elapsed time.
+func commitPointMsg(d time.Duration) *pb.ServerMessage {
+	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+		CommitPoint: &pb.TimeSpec{
+			TvSec:  int64(d / time.Second),
+			TvNsec: int32(d % time.Second),
+		},
+	}}
+}
+
 // LogID returns the base64-encoded sudo log_id assigned when the relay session
 // was created. It is stable for the lifetime of the session.
 func (s *Session) LogID() string { return s.logID }
@@ -396,28 +443,36 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		return nil, fmt.Errorf("relay session cancelled")
 	}
 
-	// Generate local commit points for relay clients on I/O events,
-	// throttled to commitPointInterval matching C sudo_logsrvd behavior.
-	// Lock protects cumulativeDelay and lastCommitTime which are also
-	// read by the run() goroutine's context (indirectly via Close/wg.Wait).
-	if streamName, delay := extractIoDelay(msg); streamName != "" {
+	// Generate local commit points for the downstream client so it can complete
+	// its CLOSING handshake without waiting on the (asynchronously flushed)
+	// upstream. The cumulative clock is advanced by EVERY delay-bearing event
+	// (I/O, winsize, suspend) — one counter, mirroring C's closure->elapsed_time —
+	// because the client compares the final commit_point against its own global
+	// elapsed time. Lock protects cumulativeDelay and lastCommitTime which are
+	// also read by the run() goroutine's context (indirectly via Close/wg.Wait).
+	streamName, _ := extractIoDelay(msg)
+	if delay := messageDelay(msg); delay != nil {
 		s.mu.Lock()
-		if delay != nil {
-			delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
-			s.cumulativeDelay[streamName] += delayDur
-		}
-		if time.Since(s.lastCommitTime) >= commitPointInterval {
+		s.cumulativeDelay += durationFromTimeSpec(delay)
+		// Throttled periodic commit on I/O events (matches C's ACK_FREQUENCY).
+		// winsize/suspend advance the clock but do not themselves emit a commit.
+		if streamName != "" && time.Since(s.lastCommitTime) >= commitPointInterval {
 			s.lastCommitTime = time.Now()
-			commitPoint := s.cumulativeDelay[streamName]
+			cp := s.cumulativeDelay
 			s.mu.Unlock()
-			return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
-				CommitPoint: &pb.TimeSpec{
-					TvSec:  int64(commitPoint / time.Second),
-					TvNsec: int32(commitPoint % time.Second),
-				},
-			}}, nil
+			return commitPointMsg(cp), nil
 		}
 		s.mu.Unlock()
+	}
+
+	// Unconditional FINAL commit on Exit (matches C handle_exit). Exit carries no
+	// delay so it is handled outside the accumulation block above; without this
+	// the stock client stalls in CLOSING until log_server_timeout (default 30s).
+	if isExitMessage(msg) {
+		s.mu.Lock()
+		cp := s.cumulativeDelay
+		s.mu.Unlock()
+		return commitPointMsg(cp), nil
 	}
 
 	return nil, nil

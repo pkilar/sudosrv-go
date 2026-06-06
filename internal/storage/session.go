@@ -55,7 +55,13 @@ type Session struct {
 	gzipWriters     map[string]*gzip.Writer // Gzip writers for compressed streams
 	timingFile      *os.File
 	logJSONPath     string // path to log.json; writes go through writeFileAtomic
-	cumulativeDelay map[string]time.Duration
+	// cumulativeDelay is a SINGLE counter summed across every I/O, winsize, and
+	// suspend delay — mirroring C sudo_logsrvd's one closure->elapsed_time. Every
+	// commit_point (periodic and the final one on Exit) reports this value, which
+	// is exactly what the client compares against its own global elapsed time
+	// before leaving the CLOSING state. A per-stream value would never satisfy
+	// the client's committed==elapsed equality for multi-stream sessions.
+	cumulativeDelay time.Duration
 	logMeta         map[string]any
 	passwordFilter  *PasswordFilter // Password filtering for security
 	lastCommitTime  time.Time       // Tracks when last commit point was sent
@@ -227,7 +233,6 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 		sessionDir:      sessionDir,
 		files:           make(map[string]*os.File),
 		gzipWriters:     make(map[string]*gzip.Writer),
-		cumulativeDelay: make(map[string]time.Duration),
 		logMeta:         make(map[string]any),
 	}
 
@@ -739,8 +744,14 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	case *pb.ClientMessage_SuspendEvent:
 		return s.handleSuspend(event.SuspendEvent)
 	case *pb.ClientMessage_ExitMsg:
+		// Send a FINAL commit_point carrying the full cumulative elapsed time,
+		// matching C sudo_logsrvd's handle_exit (it schedules an immediate commit
+		// event before closing). The stock client enters CLOSING after Exit and
+		// blocks until it receives a commit_point where committed==elapsed; without
+		// this the client stalls log_server_timeout (default 30s) and warns.
+		final := s.commitPointMsg()
 		s.finalize(event.ExitMsg)
-		return nil, nil // No response needed for Exit
+		return final, nil
 	default:
 		slog.Warn("Local storage session received unhandled message type", "type", fmt.Sprintf("%T", event))
 		return nil, nil // Ignore unhandled
@@ -985,8 +996,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	}
 
 	// Write timing info using integer format matching C sudo_logsrvd: "%d %lld.%09d %zu\n"
-	delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
-	s.cumulativeDelay[streamName] += delayDur
+	s.cumulativeDelay += durationFromTimeSpec(delay)
 
 	timingRecord := fmt.Sprintf("%d %d.%09d %d\n",
 		streamInfo.marker,
@@ -1002,22 +1012,40 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	// The first I/O event always sends one (zero-value lastCommitTime guarantees this).
 	if time.Since(s.lastCommitTime) >= commitPointInterval {
 		s.lastCommitTime = time.Now()
-		commitPoint := s.cumulativeDelay[streamName]
-		return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
-			CommitPoint: &pb.TimeSpec{
-				TvSec:  int64(commitPoint.Seconds()),
-				TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
-			},
-		}}, nil
+		return s.commitPointMsg(), nil
 	}
 
 	return nil, nil
+}
+
+// durationFromTimeSpec converts a protobuf TimeSpec delay into a time.Duration.
+func durationFromTimeSpec(ts *pb.TimeSpec) time.Duration {
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())*time.Nanosecond
+}
+
+// commitPointMsg builds a ServerMessage carrying the session's cumulative
+// elapsed time. The client compares this value against its own global elapsed
+// time; integer second/nanosecond split matches C's commit_point encoding.
+// Callers must hold fileMux (cumulativeDelay is mutated under it).
+func (s *Session) commitPointMsg() *pb.ServerMessage {
+	d := s.cumulativeDelay
+	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+		CommitPoint: &pb.TimeSpec{
+			TvSec:  int64(d / time.Second),
+			TvNsec: int32(d % time.Second),
+		},
+	}}
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
 	if event.Delay == nil {
 		return nil, fmt.Errorf("missing delay in ChangeWindowSize event")
 	}
+	// Advance the cumulative elapsed clock, matching C's update_elapsed_time on
+	// winsize events. The value is reported by the next periodic commit and by
+	// the final commit on Exit; winsize itself emits no commit point.
+	s.cumulativeDelay += durationFromTimeSpec(event.Delay)
+
 	timingRecord := fmt.Sprintf("%d %d.%09d %d %d\n", IO_EVENT_WINSIZE, event.Delay.TvSec, event.Delay.TvNsec, event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
@@ -1035,6 +1063,10 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 	if !validSuspendSignals[event.Signal] {
 		return nil, fmt.Errorf("invalid CommandSuspend signal: %q", event.Signal)
 	}
+
+	// Advance the cumulative elapsed clock, matching C's update_elapsed_time on
+	// suspend events, so the final commit on Exit includes suspend/resume gaps.
+	s.cumulativeDelay += durationFromTimeSpec(event.Delay)
 
 	// Sudo uses marker 7 for all suspend/resume events; signal name differentiates them
 	timingRecord := fmt.Sprintf("%d %d.%09d %s\n", IO_EVENT_SUSPEND, event.Delay.TvSec, event.Delay.TvNsec, event.Signal)
@@ -1232,14 +1264,11 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		files[streamName] = f
 	}
 
-	// Restore cumulative delay from resume_point
-	cumulativeDelay := make(map[string]time.Duration)
+	// Restore the cumulative elapsed clock from resume_point so commit points
+	// after the restart continue from where the prior session left off.
+	var cumulativeDelay time.Duration
 	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
-		dur := time.Duration(resumePoint.TvSec)*time.Second + time.Duration(resumePoint.TvNsec)*time.Nanosecond
-		// Apply to all streams as a starting point
-		for streamName := range streamMap {
-			cumulativeDelay[streamName] = dur
-		}
+		cumulativeDelay = durationFromTimeSpec(resumePoint)
 	}
 
 	session := &Session{

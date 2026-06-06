@@ -1621,3 +1621,80 @@ func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
 		t.Fatalf("expected path traversal error, got: %v", err)
 	}
 }
+
+// TestStorageSessionCommitPoints verifies the commit_point handshake that lets a
+// stock sudo client complete its CLOSING state:
+//   - the cumulative clock is a single value summed across ALL streams plus
+//     winsize and suspend (not per-stream), and
+//   - ExitMessage returns a FINAL commit_point equal to that total.
+//
+// Without both, a real client stalls log_server_timeout (default 30s) at the end
+// of every multi-stream I/O session and warns "lost connection to log server".
+func TestStorageSessionCommitPoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(uuid.New(), createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
+	}
+
+	// First I/O event always emits a commit point (zero-value lastCommitTime),
+	// and it must carry the GLOBAL cumulative value — here just the ttyout delay.
+	resp, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 100000000}, Data: []byte("out"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(ttyout) failed: %v", err)
+	}
+	if cp := resp.GetCommitPoint(); cp == nil {
+		t.Fatal("expected commit_point on first I/O event")
+	} else if cp.TvSec != 1 || cp.TvNsec != 100000000 {
+		t.Errorf("first commit_point = %d.%09d, want 1.100000000", cp.TvSec, cp.TvNsec)
+	}
+
+	// A second stream, plus winsize and suspend — all advance the SAME clock and
+	// (being within the throttle interval / non-I/O) emit no commit point.
+	for _, m := range []*pb.ClientMessage{
+		{Type: &pb.ClientMessage_StdinBuf{StdinBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvNsec: 200000000}, Data: []byte("in")}}},
+		{Type: &pb.ClientMessage_WinsizeEvent{WinsizeEvent: &pb.ChangeWindowSize{Delay: &pb.TimeSpec{TvNsec: 300000000}, Rows: 40, Cols: 100}}},
+		{Type: &pb.ClientMessage_SuspendEvent{SuspendEvent: &pb.CommandSuspend{Delay: &pb.TimeSpec{TvNsec: 400000000}, Signal: "TSTP"}}},
+	} {
+		if r, err := session.HandleClientMessage(m); err != nil {
+			t.Fatalf("HandleClientMessage(%T) failed: %v", m.Type, err)
+		} else if r != nil {
+			t.Errorf("expected no commit_point for %T, got %v", m.Type, r)
+		}
+	}
+
+	// Exit must return a FINAL commit_point equal to the sum of every delay:
+	// 1.1 + 0.2 + 0.3 + 0.4 = 2.0s exactly.
+	resp, err = session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(Exit) failed: %v", err)
+	}
+	cp := resp.GetCommitPoint()
+	if cp == nil {
+		t.Fatal("expected FINAL commit_point on Exit; without it a stock client hangs in CLOSING")
+	}
+	if cp.TvSec != 2 || cp.TvNsec != 0 {
+		t.Errorf("final commit_point = %d.%09d, want 2.000000000 (sum of all stream/winsize/suspend delays)", cp.TvSec, cp.TvNsec)
+	}
+}
