@@ -1188,3 +1188,75 @@ func TestWaitForRateToken(t *testing.T) {
 		t.Error("expected cancellation error while rate-limited, got nil")
 	}
 }
+
+// deadlineRecorderConn wraps a net.Conn and records SetReadDeadline calls so a
+// test can assert whether the handler armed a per-message idle read deadline.
+type deadlineRecorderConn struct {
+	net.Conn
+	mu           sync.Mutex
+	setCalls     int
+	lastDeadline time.Time
+}
+
+func (c *deadlineRecorderConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.setCalls++
+	c.lastDeadline = t
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *deadlineRecorderConn) calls() (int, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.setCalls, c.lastDeadline
+}
+
+// TestIdleReadDeadlineOptOut verifies that a non-positive idle_timeout disables
+// the per-message read deadline (matching C sudo_logsrvd's NULL read timeout),
+// while a positive value still arms it.
+func TestIdleReadDeadlineOptOut(t *testing.T) {
+	exchangeHello := func(t *testing.T, idle time.Duration) *deadlineRecorderConn {
+		t.Helper()
+		cfg := &config.Config{Server: config.ServerConfig{Mode: "local", IdleTimeout: idle, ServerID: "t"}}
+		clientConn, serverConn := net.Pipe()
+		rec := &deadlineRecorderConn{Conn: serverConn}
+		h := NewHandler(rec, cfg)
+		var wg sync.WaitGroup
+		wg.Go(h.Handle)
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+		if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "x"}},
+		}); err != nil {
+			t.Fatalf("client write Hello: %v", err)
+		}
+		if _, err := clientProc.ReadServerMessage(); err != nil {
+			t.Fatalf("client read ServerHello: %v", err)
+		}
+		// The loop has processed one message and is back at the top of the next
+		// iteration (where the deadline is armed) before blocking on read.
+		clientConn.Close()
+		serverConn.Close()
+		wg.Wait()
+		return rec
+	}
+
+	t.Run("NegativeDisablesReadDeadline", func(t *testing.T) {
+		rec := exchangeHello(t, -1*time.Second)
+		if n, _ := rec.calls(); n != 0 {
+			t.Errorf("expected 0 SetReadDeadline calls with idle_timeout<=0, got %d", n)
+		}
+	})
+
+	t.Run("PositiveArmsReadDeadline", func(t *testing.T) {
+		rec := exchangeHello(t, 30*time.Second)
+		n, last := rec.calls()
+		if n == 0 {
+			t.Error("expected SetReadDeadline to be armed with a positive idle_timeout")
+		}
+		if !last.After(time.Now()) {
+			t.Errorf("expected a future read deadline, got %v", last)
+		}
+	})
+}

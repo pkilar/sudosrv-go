@@ -152,6 +152,12 @@ func unmarshalConfig(data []byte, config *Config) error {
 // applyZeroValueDefaults restores default values for fields that yaml.Unmarshal
 // may have zeroed when a section was partially specified.
 func applyZeroValueDefaults(cfg *Config) {
+	// idle_timeout: a zero value (the field omitted, or "0s") is treated as
+	// "use the default" and restored to 10m, guarding a partially specified
+	// server section from accidentally zeroing it. A NEGATIVE value (e.g.
+	// "idle_timeout: -1s") is preserved and means "no read timeout", matching
+	// the reference C sudo_logsrvd, which never disconnects an idle client; the
+	// connection handler skips arming a read deadline when IdleTimeout <= 0.
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 10 * time.Minute
 	}

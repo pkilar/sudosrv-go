@@ -618,3 +618,42 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		}
 	})
 }
+
+// TestIdleTimeoutNegativeIsPreserved verifies that a negative idle_timeout is
+// preserved (not re-defaulted to 10m). A negative value is the opt-out sentinel
+// for "no read timeout", matching the reference C sudo_logsrvd which never
+// disconnects an idle client. A zero/omitted value still restores the default.
+func TestIdleTimeoutNegativeIsPreserved(t *testing.T) {
+	t.Run("NegativeDisablesAndIsPreserved", func(t *testing.T) {
+		content := "server:\n  mode: \"local\"\n  idle_timeout: -1s\n"
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		cfg, err := LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig() error: %v", err)
+		}
+		if cfg.Server.IdleTimeout != -1*time.Second {
+			t.Errorf("idle_timeout: got %v, want -1s (negative must be preserved, not re-defaulted)", cfg.Server.IdleTimeout)
+		}
+		if cfg.Server.IdleTimeout > 0 {
+			t.Errorf("idle_timeout %v should be non-positive so the handler skips the read deadline", cfg.Server.IdleTimeout)
+		}
+	})
+
+	t.Run("OmittedRestoresDefault", func(t *testing.T) {
+		content := "server:\n  mode: \"local\"\n"
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		cfg, err := LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig() error: %v", err)
+		}
+		if cfg.Server.IdleTimeout != 10*time.Minute {
+			t.Errorf("idle_timeout: got %v, want 10m default when omitted", cfg.Server.IdleTimeout)
+		}
+	})
+}

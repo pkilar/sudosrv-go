@@ -180,9 +180,16 @@ func (h *Handler) Handle() {
 		default:
 		}
 
-		if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
-			slog.Error("Failed to set read deadline", "error", err)
-			return
+		// Arm a per-message idle read deadline. A non-positive IdleTimeout means
+		// "no read timeout", matching the reference C sudo_logsrvd, which adds its
+		// steady-state read event with a NULL timeout so an idle-but-alive client
+		// (e.g. an interactive shell left at a prompt) is never disconnected for
+		// inactivity. Operators opt into that parity with idle_timeout: -1s.
+		if h.config.Server.IdleTimeout > 0 {
+			if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
+				slog.Error("Failed to set read deadline", "error", err)
+				return
+			}
 		}
 
 		clientMsg, err := h.processor.ReadClientMessage()
