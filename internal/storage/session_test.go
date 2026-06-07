@@ -1807,3 +1807,101 @@ func TestIologEscapeParity(t *testing.T) {
 		t.Errorf("buildSessionPath()\n got  %q\n want %q\n(runas_* aliases, strftime %%Y-%%m-%%d, %%%% -> %%, and '/' -> '_')", got, want)
 	}
 }
+
+// TestRestartResumeSeek verifies that a restart seeks to resume_point and
+// OVERWRITES the post-resume data (matching C's iolog_seekto) when the point
+// aligns, and falls back to append (preserving the old, never-fail behavior)
+// when it does not.
+func TestRestartResumeSeek(t *testing.T) {
+	newCfg := func(dir string) *config.LocalStorageConfig {
+		return &config.LocalStorageConfig{
+			LogDirectory:    dir,
+			IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+			IologFile:       "%{seq}",
+			DirPermissions:  0o755,
+			FilePermissions: 0o644,
+			PasswordFilter:  false,
+		}
+	}
+	// writeTtyout sends one ttyout buffer with a 1s delay (so each record adds
+	// exactly 1s to the elapsed clock and len(data) bytes to the ttyout file).
+	writeTtyout := func(t *testing.T, s *Session, data string) {
+		t.Helper()
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1}, Data: []byte(data),
+			}},
+		}); err != nil {
+			t.Fatalf("write %q: %v", data, err)
+		}
+	}
+	// seed creates a session, writes "AAAAA" (t=1s) then "BBBBB" (t=2s), and
+	// closes it WITHOUT finalizing (so the timing file stays writable). Returns
+	// the log_id and session dir.
+	seed := func(t *testing.T, cfg *config.LocalStorageConfig) (string, string) {
+		t.Helper()
+		s, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+		}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		writeTtyout(t, s, "AAAAA")
+		writeTtyout(t, s, "BBBBB")
+		if err := s.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		return s.logID, s.sessionDir
+	}
+
+	t.Run("AlignedResumePointOverwrites", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		logID, sessDir := seed(t, cfg)
+
+		// Resume at 1s — exactly after the first ttyout record. The second
+		// ("BBBBB") must be overwritten by the resumed data, not duplicated.
+		s2, err := NewRestartSession(&pb.RestartMessage{LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1}}, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession: %v", err)
+		}
+		writeTtyout(t, s2, "CCCCC")
+		if err := s2.Close(); err != nil {
+			t.Fatalf("close restart: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout: %v", err)
+		}
+		if string(got) != "AAAAACCCCC" {
+			t.Errorf("ttyout = %q, want %q (resume must overwrite the post-resume_point region)", got, "AAAAACCCCC")
+		}
+	})
+
+	t.Run("MisalignedResumePointFallsBackToAppend", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		logID, sessDir := seed(t, cfg)
+
+		// Resume at 1.5s — between record boundaries; cannot align, so the
+		// session must fall back to append (never fail) rather than seek.
+		s2, err := NewRestartSession(&pb.RestartMessage{LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 500000000}}, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession (misaligned should still succeed): %v", err)
+		}
+		writeTtyout(t, s2, "CCCCC")
+		if err := s2.Close(); err != nil {
+			t.Fatalf("close restart: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout: %v", err)
+		}
+		if string(got) != "AAAAABBBBBCCCCC" {
+			t.Errorf("ttyout = %q, want %q (misaligned resume must append, preserving prior data)", got, "AAAAABBBBBCCCCC")
+		}
+	})
+}

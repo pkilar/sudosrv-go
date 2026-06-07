@@ -1304,6 +1304,122 @@ func DecodeLogID(logID string) (uuid.UUID, string, error) {
 	return sessionUUID, relativePath, nil
 }
 
+// parseTimingDelay parses a "sec.nsec" timing delay field into a Duration.
+func parseTimingDelay(s string) (time.Duration, error) {
+	secStr, nsecStr, ok := strings.Cut(s, ".")
+	if !ok {
+		return 0, fmt.Errorf("missing decimal in delay %q", s)
+	}
+	sec, err := strconv.ParseInt(secStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad seconds in delay %q: %w", s, err)
+	}
+	// Written as %09d; pad short fields and use the first 9 digits defensively.
+	for len(nsecStr) < 9 {
+		nsecStr += "0"
+	}
+	nsec, err := strconv.ParseInt(nsecStr[:9], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad nanoseconds in delay %q: %w", s, err)
+	}
+	return time.Duration(sec)*time.Second + time.Duration(nsec)*time.Nanosecond, nil
+}
+
+// computeResumeOffsets replays the timing file to find the byte offset at which a
+// restart should resume so resent I/O OVERWRITES (not duplicates) everything
+// recorded after target. It mirrors C sudo's iolog_seekto: each record's delay
+// is accumulated and each stream's offset advanced by the record's byte count
+// until the cumulative elapsed time equals target. An exact match is required —
+// an overshoot or hitting EOF first means resume_point does not align with the
+// stored log (same condition C treats as an error), reported via the error so
+// the caller can fall back to append mode. A zero target resumes at the start.
+func computeResumeOffsets(timingPath string, target time.Duration) (int64, map[string]int64, error) {
+	streamOffsets := make(map[string]int64)
+	if target <= 0 {
+		return 0, streamOffsets, nil
+	}
+	data, err := os.ReadFile(timingPath)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read timing file: %w", err)
+	}
+	markerToStream := map[int]string{
+		IO_EVENT_STDIN: "stdin", IO_EVENT_STDOUT: "stdout", IO_EVENT_STDERR: "stderr",
+		IO_EVENT_TTYIN: "ttyin", IO_EVENT_TTYOUT: "ttyout",
+	}
+
+	var elapsed time.Duration
+	var timingOffset int64
+	content := string(data)
+	for len(content) > 0 {
+		var line string
+		if nl := strings.IndexByte(content, '\n'); nl >= 0 {
+			line = content[:nl]
+			timingOffset += int64(nl + 1)
+			content = content[nl+1:]
+		} else {
+			line = content
+			timingOffset += int64(len(content))
+			content = ""
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, nil, fmt.Errorf("malformed timing record %q", line)
+		}
+		marker, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return 0, nil, fmt.Errorf("bad timing marker %q: %w", fields[0], err)
+		}
+		delay, err := parseTimingDelay(fields[1])
+		if err != nil {
+			return 0, nil, err
+		}
+		elapsed += delay
+		if stream, isIO := markerToStream[marker]; isIO {
+			if len(fields) < 3 {
+				return 0, nil, fmt.Errorf("I/O timing record missing byte count: %q", line)
+			}
+			nbytes, err := strconv.ParseInt(fields[2], 10, 64)
+			if err != nil {
+				return 0, nil, fmt.Errorf("bad timing byte count %q: %w", fields[2], err)
+			}
+			streamOffsets[stream] += nbytes
+		}
+
+		if elapsed >= target {
+			if elapsed == target {
+				return timingOffset, streamOffsets, nil
+			}
+			return 0, nil, fmt.Errorf("resume_point %v overshoots stored timing (nearest boundary %v)", target, elapsed)
+		}
+	}
+	return 0, nil, fmt.Errorf("resume_point %v is beyond the end of the stored timing", target)
+}
+
+// openForRestart opens an existing session file for a restart. When seek is true
+// it truncates to off and positions the file there, so resumed I/O overwrites
+// the post-resume_point region (matching C's iolog_seekto read->write switch);
+// otherwise it opens in append mode. O_NOFOLLOW guards against a symlink swap
+// between finalize and restart.
+func openForRestart(path string, cfg *config.LocalStorageConfig, seek bool, off int64) (*os.File, error) {
+	if !seek {
+		return os.OpenFile(path, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Truncate(off); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("truncate to resume offset %d: %w", off, err)
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("seek to resume offset %d: %w", off, err)
+	}
+	return f, nil
+}
+
 // NewRestartSession creates a session that resumes an existing log from a RestartMessage.
 func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (*Session, error) {
 	sessionUUID, relativePath, err := DecodeLogID(restartMsg.GetLogId())
@@ -1359,9 +1475,26 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("restart not supported for compressed sessions")
 	}
 
-	// Open timing file in append mode. O_NOFOLLOW guards against an attacker
-	// swapping the timing file for a symlink between session finalize and restart.
-	timingFile, err := os.OpenFile(timingPath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	// Determine where to resume. C sudo's iolog_seekto (logsrvd/logsrv_util.c)
+	// replays the timing file to find the byte offset of resume_point in each
+	// stream, then OVERWRITES everything after it so resent I/O is not
+	// duplicated. We do the same: compute the offsets, then truncate+seek each
+	// file to its resume position. If resume_point does not align with the
+	// stored timing (overshoot or past EOF — e.g. an older client that sent
+	// per-stream commit points), fall back to append mode rather than failing
+	// the restart, logging a warning so the divergence is visible.
+	rp := restartMsg.GetResumePoint()
+	resumeDur := time.Duration(rp.GetTvSec())*time.Second + time.Duration(rp.GetTvNsec())*time.Nanosecond
+	timingOffset, streamOffsets, seekErr := computeResumeOffsets(timingPath, resumeDur)
+	useSeek := seekErr == nil
+	if seekErr != nil && resumeDur > 0 {
+		slog.Warn("Restart resume_point does not align with stored timing; appending instead of seeking (overlap region may be duplicated)",
+			"log_id", restartMsg.GetLogId(), "resume_point", resumeDur, "error", seekErr)
+	}
+
+	// Open the timing file positioned at the resume point (or append on fallback).
+	// O_NOFOLLOW guards against a symlink swap between finalize and restart.
+	timingFile, err := openForRestart(timingPath, cfg, useSeek, timingOffset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
 	}
@@ -1377,15 +1510,16 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, err
 	}
 
-	// Open existing I/O stream files in append mode.
-	// stdin/ttyin may not exist (on-demand creation), so only open files that are present.
+	// Open existing I/O stream files at their resume offset (or append on
+	// fallback). stdin/ttyin may not exist (on-demand creation), so only open
+	// files that are present; absent streams had no pre-resume data (offset 0).
 	files := make(map[string]*os.File)
 	for streamName, streamInfo := range streamMap {
 		filePath := filepath.Join(sessionDir, streamInfo.filename)
 		if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
 			continue // On-demand file not yet created, will be created on first write
 		}
-		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+		f, err := openForRestart(filePath, cfg, useSeek, streamOffsets[streamName])
 		if err != nil {
 			// Clean up already opened files
 			for _, openFile := range files {
@@ -1400,8 +1534,8 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	// Restore the cumulative elapsed clock from resume_point so commit points
 	// after the restart continue from where the prior session left off.
 	var cumulativeDelay time.Duration
-	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
-		cumulativeDelay = durationFromTimeSpec(resumePoint)
+	if resumeDur > 0 {
+		cumulativeDelay = resumeDur
 	}
 
 	session := &Session{
