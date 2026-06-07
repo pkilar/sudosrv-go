@@ -1709,3 +1709,65 @@ func TestStorageSessionCommitPoints(t *testing.T) {
 		t.Errorf("final commit_point = %d.%09d, want 2.000000000 (sum of all stream/winsize/suspend delays)", cp.TvSec, cp.TvNsec)
 	}
 }
+
+// TestSeqFileFormat verifies the sequence counter is stored as C sudo's ASCII
+// base36 text (so a C sudo_logsrvd and this server can share an iolog tree),
+// that a C-written file is read correctly, and that a legacy binary counter is
+// migrated in place without resetting (which could collide session dirs).
+func TestSeqFileFormat(t *testing.T) {
+	cfg := &config.LocalStorageConfig{DirPermissions: 0o755, FilePermissions: 0o644}
+
+	t.Run("WritesAsciiBase36", func(t *testing.T) {
+		dir := t.TempDir()
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		// The returned %{seq} value is the XX/XX/XX hierarchy; the on-disk
+		// counter is the flat 6-char ASCII base36 form.
+		if seq != "00/00/01" {
+			t.Errorf("first seq = %q, want 00/00/01", seq)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "seq"))
+		if err != nil {
+			t.Fatalf("read seq file: %v", err)
+		}
+		if string(raw) != "000001\n" {
+			t.Errorf("seq file = %q, want %q (ASCII base36 + newline)", raw, "000001\n")
+		}
+	})
+
+	t.Run("ReadsCStyleAsciiFile", func(t *testing.T) {
+		dir := t.TempDir()
+		// C-style file at value 35 ("Z"); next should be 36 -> "000010".
+		if err := os.WriteFile(filepath.Join(dir, "seq"), []byte("00000Z\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		if seq != "00/00/10" {
+			t.Errorf("seq after 00000Z = %q, want 00/00/10", seq)
+		}
+	})
+
+	t.Run("MigratesLegacyBinaryWithoutReset", func(t *testing.T) {
+		dir := t.TempDir()
+		// Legacy 4-byte big-endian counter at value 5.
+		if err := os.WriteFile(filepath.Join(dir, "seq"), []byte{0, 0, 0, 5}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		if seq != "00/00/06" {
+			t.Errorf("seq after legacy binary 5 = %q, want 00/00/06 (counter must not reset)", seq)
+		}
+		raw, _ := os.ReadFile(filepath.Join(dir, "seq"))
+		if string(raw) != "000006\n" {
+			t.Errorf("migrated seq file = %q, want %q (now ASCII)", raw, "000006\n")
+		}
+	})
+}

@@ -631,13 +631,15 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	}
 
 	var currentSeq uint32
-	if stat.Size() >= 4 {
-		// Read the current sequence number
-		data := make([]byte, 4)
-		if _, err := f.ReadAt(data, 0); err != nil {
+	if size := stat.Size(); size > 0 {
+		raw := make([]byte, size)
+		if _, err := f.ReadAt(raw, 0); err != nil && err != io.EOF {
 			return "", fmt.Errorf("could not read sequence file: %w", err)
 		}
-		currentSeq = binary.BigEndian.Uint32(data)
+		currentSeq, err = parseSeqFile(raw)
+		if err != nil {
+			return "", fmt.Errorf("could not parse sequence file %s: %w", seqFile, err)
+		}
 	}
 
 	// Sequence numbers are encoded as 6-char base36 strings; 36^6 = 2,176,782,336
@@ -651,11 +653,17 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	}
 	nextSeq := currentSeq + 1
 
-	// Write the new sequence number back to the file atomically
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint32(data, nextSeq)
+	// Write the new sequence back as ASCII base36 text (6 chars + newline),
+	// matching C sudo's on-disk seq format (lib/iolog/iolog_nextid.c) so a C
+	// sudo_logsrvd and this server can interoperate on a shared iolog tree.
+	data := formatSeqFile(nextSeq)
 	if _, err := f.WriteAt(data, 0); err != nil {
 		return "", fmt.Errorf("could not write to sequence file: %w", err)
+	}
+	// Truncate to the exact ASCII length so migrating from the shorter legacy
+	// binary format leaves no stale trailing bytes.
+	if err := f.Truncate(int64(len(data))); err != nil {
+		return "", fmt.Errorf("could not truncate sequence file: %w", err)
 	}
 
 	// Ensure the write is flushed to disk
@@ -678,6 +686,38 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	}
 
 	return fmt.Sprintf("%c%c/%c%c/%c%c", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]), nil
+}
+
+// parseSeqFile decodes the on-disk sequence counter. The canonical format
+// (matching C sudo's iolog_nextid) is ASCII base36 text, optionally followed by
+// a newline/NUL. Older Go servers wrote a 4-byte big-endian uint32, so we fall
+// back to that when the bytes are not valid base36 text — this migrates the
+// counter in place on the next write instead of resetting it (a reset could
+// collide new sessions with existing on-disk session directories).
+func parseSeqFile(raw []byte) (uint32, error) {
+	if s := strings.Trim(string(raw), "\x00\n\r \t"); s != "" {
+		if v, err := strconv.ParseUint(s, 36, 32); err == nil {
+			return uint32(v), nil
+		}
+	}
+	if len(raw) >= 4 {
+		return binary.BigEndian.Uint32(raw[:4]), nil
+	}
+	return 0, fmt.Errorf("unrecognized sequence file content (%d bytes)", len(raw))
+}
+
+// formatSeqFile renders the sequence counter in C sudo's on-disk format: six
+// uppercase base36 digits followed by a newline (7 bytes total).
+func formatSeqFile(seq uint32) []byte {
+	const base36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	buf := make([]byte, 7)
+	v := seq
+	for i := 5; i >= 0; i-- {
+		buf[i] = base36[v%36]
+		v /= 36
+	}
+	buf[6] = '\n'
+	return buf
 }
 
 // LogID returns the base64-encoded sudo log_id assigned when the session was
