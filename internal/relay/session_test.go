@@ -655,7 +655,7 @@ func TestRelayRestartResumesCachedSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.RelayConfig{
 		RelayCacheDirectory:  tmpDir,
-		ReconnectAttempts:    0,             // do not attempt upstream; we inspect the cache
+		ReconnectAttempts:    0, // do not attempt upstream; we inspect the cache
 		MaxReconnectInterval: 100 * time.Millisecond,
 		ConnectTimeout:       time.Second,
 		UpstreamHost:         "127.0.0.1:0",

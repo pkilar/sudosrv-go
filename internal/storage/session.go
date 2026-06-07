@@ -47,14 +47,14 @@ const commitPointInterval = 10 * time.Second
 // methods (CheckOutput/FilterInput) which take passwordFilter.mu internally.
 // Acquiring locks in the reverse order will deadlock.
 type Session struct {
-	logID           string
-	sessionUUID     uuid.UUID
-	config          *config.LocalStorageConfig
-	sessionDir      string
-	files           map[string]*os.File
-	gzipWriters     map[string]*gzip.Writer // Gzip writers for compressed streams
-	timingFile      *os.File
-	logJSONPath     string // path to log.json; writes go through writeFileAtomic
+	logID       string
+	sessionUUID uuid.UUID
+	config      *config.LocalStorageConfig
+	sessionDir  string
+	files       map[string]*os.File
+	gzipWriters map[string]*gzip.Writer // Gzip writers for compressed streams
+	timingFile  *os.File
+	logJSONPath string // path to log.json; writes go through writeFileAtomic
 	// cumulativeDelay is a SINGLE counter summed across every I/O, winsize, and
 	// suspend delay — mirroring C sudo_logsrvd's one closure->elapsed_time. Every
 	// commit_point (periodic and the final one on Exit) reports this value, which
@@ -301,13 +301,13 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	}
 
 	session := &Session{
-		logID:           logID,
-		sessionUUID:     sessionUUID,
-		config:          cfg,
-		sessionDir:      sessionDir,
-		files:           make(map[string]*os.File),
-		gzipWriters:     make(map[string]*gzip.Writer),
-		logMeta:         make(map[string]any),
+		logID:       logID,
+		sessionUUID: sessionUUID,
+		config:      cfg,
+		sessionDir:  sessionDir,
+		files:       make(map[string]*os.File),
+		gzipWriters: make(map[string]*gzip.Writer),
+		logMeta:     make(map[string]any),
 	}
 
 	// Initialize password filter if enabled

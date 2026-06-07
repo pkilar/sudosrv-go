@@ -69,10 +69,10 @@ type Session struct {
 	// flipping the closed flag and closing the channel. Without this,
 	// a sender that passed the closed check could still write to a buffer
 	// the writer goroutine has already abandoned, silently losing audit data.
-	sendMu    sync.RWMutex
-	closed    atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	sendMu          sync.RWMutex
+	closed          atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
+	wg              sync.WaitGroup
+	closeOnce       sync.Once
 	cacheFileName   string
 	mu              sync.Mutex    // Protects cumulativeDelay and lastCommitTime
 	cumulativeDelay time.Duration // Single elapsed clock summed across all I/O, winsize, and suspend delays (mirrors C closure->elapsed_time)

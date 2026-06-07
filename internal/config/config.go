@@ -134,7 +134,7 @@ func defaultConfig() *Config {
 			ServerID:                  "GoSudoLogSrv/1.0",
 			IdleTimeout:               10 * time.Minute,
 			MaxConnections:            10000,
-			TLSMinVersion:             "1.3", // Secure default; "1.2" available for legacy clients
+			TLSMinVersion:             "1.3",  // Secure default; "1.2" available for legacy clients
 			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
