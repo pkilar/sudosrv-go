@@ -198,13 +198,13 @@ func (h *Handler) Handle() {
 			}
 		}
 
-		// Apply rate limiting to prevent memory exhaustion.
-		// All writes below use h.ctx so a stalled client can't pin the handler
-		// past shutdown — see Server.Wait's bounded grace period.
-		if !h.checkRateLimit() {
-			slog.Warn("Rate limit exceeded, closing connection", "remote_addr", h.conn.RemoteAddr())
-			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Rate limit exceeded"}}
-			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
+		// Apply rate limiting as back-pressure: this blocks until a token is
+		// available rather than closing the connection, so a legitimate
+		// high-throughput session is throttled, not severed. It returns early
+		// only on context cancellation (shutdown), so a stalled client can't pin
+		// the handler past shutdown — see Server.Wait's bounded grace period.
+		if err := h.waitForRateToken(h.ctx); err != nil {
+			slog.Debug("Connection handler stopping while rate-limited", "remote_addr", h.conn.RemoteAddr(), "error", err)
 			return
 		}
 
@@ -369,29 +369,56 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
 
-// checkRateLimit implements token-bucket rate limiting to prevent memory
-// exhaustion attacks. Each connection is refilled at rateRefillPerSec tokens/sec
-// up to rateBurst; each processed message consumes one token. Unlike a simple
-// windowed counter, this correctly smooths bursts that straddle second boundaries.
-func (h *Handler) checkRateLimit() bool {
-	h.rateLimitMutex.Lock()
-	defer h.rateLimitMutex.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(h.rateLastRefill).Seconds()
-	if elapsed > 0 {
-		h.rateTokens += elapsed * rateRefillPerSec
-		if h.rateTokens > rateBurst {
-			h.rateTokens = rateBurst
+// waitForRateToken implements token-bucket rate limiting to bound the rate at
+// which a single connection's messages are processed. Each connection is
+// refilled at rateRefillPerSec tokens/sec up to rateBurst; each processed
+// message consumes one token. The token-bucket smooths bursts that straddle
+// second boundaries.
+//
+// When the bucket is empty this BLOCKS until the next token refills (returning
+// only on context cancellation) rather than terminating the connection. This is
+// deliberate: the reference C sudo_logsrvd imposes no application-level rate
+// limit, and a legitimate high-throughput session (a verbose build, `yes`, a
+// large `cat`) routinely emits hundreds of ttyout buffers in a sub-second burst.
+// Closing the connection on excess would truncate such a session and make the
+// stock client report a fatal log error. Blocking instead applies back-pressure:
+// the handler stops reading, TCP flow control slows the client, and no audit
+// data is lost. Memory stays bounded because at most one message is held in
+// flight while we wait.
+func (h *Handler) waitForRateToken(ctx context.Context) error {
+	for {
+		h.rateLimitMutex.Lock()
+		now := time.Now()
+		elapsed := now.Sub(h.rateLastRefill).Seconds()
+		if elapsed > 0 {
+			h.rateTokens += elapsed * rateRefillPerSec
+			if h.rateTokens > rateBurst {
+				h.rateTokens = rateBurst
+			}
+			h.rateLastRefill = now
 		}
-		h.rateLastRefill = now
-	}
+		if h.rateTokens >= 1 {
+			h.rateTokens--
+			h.rateLimitMutex.Unlock()
+			return nil
+		}
+		// Bucket empty: compute how long until one token refills, then sleep
+		// (without holding the mutex) before re-checking. The deficit is < 1
+		// token, so the wait is at most 1/rateRefillPerSec seconds.
+		wait := time.Duration((1 - h.rateTokens) / rateRefillPerSec * float64(time.Second))
+		h.rateLimitMutex.Unlock()
+		if wait <= 0 {
+			wait = time.Millisecond // floor to avoid a busy spin on rounding
+		}
 
-	if h.rateTokens < 1 {
-		return false
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
 	}
-	h.rateTokens--
-	return true
 }
 
 // applyRuncwdFallback implements the three-tier fallback logic for runcwd as per sudo logging.c:1008-1014.

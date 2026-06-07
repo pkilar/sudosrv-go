@@ -3,6 +3,7 @@
 package connection
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -1138,4 +1139,52 @@ func TestRelay_DoneBeforeRegisterDoesNotOrphan(t *testing.T) {
 
 	serverConn.Close()
 	wg.Wait()
+}
+
+// TestWaitForRateToken verifies that exceeding the per-connection rate limit
+// applies back-pressure (blocks until a token refills) instead of terminating
+// the connection — the reference C sudo_logsrvd has no such limit, and a
+// legitimate high-throughput session must not be severed. It also verifies the
+// wait is abortable via context so shutdown is never pinned by a slow client.
+func TestWaitForRateToken(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Mode: "local", IdleTimeout: time.Second, ServerID: "t"},
+	}
+	_, serverConn := net.Pipe()
+	defer serverConn.Close()
+	h := NewHandler(serverConn, cfg)
+
+	// The initial burst (rateBurst tokens) drains effectively instantly.
+	start := time.Now()
+	for range int(rateBurst) {
+		if err := h.waitForRateToken(context.Background()); err != nil {
+			t.Fatalf("unexpected error draining burst: %v", err)
+		}
+	}
+	if d := time.Since(start); d > 250*time.Millisecond {
+		t.Fatalf("draining the burst took %s, expected near-instant", d)
+	}
+
+	// With the bucket empty the next token must BLOCK and then SUCCEED — never
+	// return an error (which the caller turns into a connection teardown). It
+	// should take roughly one refill interval (1/rateRefillPerSec).
+	start = time.Now()
+	if err := h.waitForRateToken(context.Background()); err != nil {
+		t.Fatalf("expected back-pressure (block then succeed), got error: %v", err)
+	}
+	if d := time.Since(start); d < 5*time.Millisecond {
+		t.Errorf("expected throttle delay ~%v, got %s (was it actually throttled?)", time.Second/time.Duration(rateRefillPerSec), d)
+	}
+
+	// Force the bucket empty, then a cancelled context must abort the wait
+	// promptly rather than blocking forever.
+	h.rateLimitMutex.Lock()
+	h.rateTokens = 0
+	h.rateLastRefill = time.Now()
+	h.rateLimitMutex.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.waitForRateToken(ctx); err == nil {
+		t.Error("expected cancellation error while rate-limited, got nil")
+	}
 }
