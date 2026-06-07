@@ -133,11 +133,85 @@ var seqMutexMapLock sync.RWMutex
 
 const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-// sanitizePathComponent removes forward slashes from user-controlled path values
-// to prevent path traversal attacks via escape sequence expansion.
-// Matches the behavior of strlcpy_no_slash() in C sudo_logsrvd.
+// sanitizePathComponent replaces forward slashes in user-controlled path values
+// with underscores, preventing path traversal via escape-sequence expansion
+// while matching C sudo_logsrvd's strlcpy_no_slash() (lib/iolog/iolog_path.c),
+// which maps '/' to '_'. This both blocks traversal and produces the same
+// on-disk component a C server would (e.g. a submituser "a/b" -> "a_b").
 func sanitizePathComponent(s string) string {
-	return strings.ReplaceAll(s, "/", "")
+	return strings.ReplaceAll(s, "/", "_")
+}
+
+// strftimeExpand expands C strftime-style "%X" date/time escapes against t,
+// matching the strftime pass C sudo applies to an iolog path after %{...}
+// expansion (lib/iolog/iolog_path.c). "%%" collapses to a literal "%". Only the
+// common atomic codes are supported; codes that would introduce a path
+// separator or control character (e.g. %D, %F, %T, %n, %t) and any unrecognized
+// code are copied through verbatim, so an unknown escape can never inject a "/"
+// into a path component.
+func strftimeExpand(s string, t time.Time) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch c := s[i]; c {
+		case '%':
+			b.WriteByte('%')
+		case 'Y':
+			b.WriteString(t.Format("2006"))
+		case 'y':
+			b.WriteString(t.Format("06"))
+		case 'C':
+			fmt.Fprintf(&b, "%02d", t.Year()/100)
+		case 'm':
+			b.WriteString(t.Format("01"))
+		case 'd':
+			b.WriteString(t.Format("02"))
+		case 'e':
+			fmt.Fprintf(&b, "%2d", t.Day())
+		case 'H':
+			b.WriteString(t.Format("15"))
+		case 'I':
+			b.WriteString(t.Format("03"))
+		case 'M':
+			b.WriteString(t.Format("04"))
+		case 'S':
+			b.WriteString(t.Format("05"))
+		case 'p':
+			b.WriteString(t.Format("PM"))
+		case 'A':
+			b.WriteString(t.Format("Monday"))
+		case 'a':
+			b.WriteString(t.Format("Mon"))
+		case 'B':
+			b.WriteString(t.Format("January"))
+		case 'b', 'h':
+			b.WriteString(t.Format("Jan"))
+		case 'j':
+			fmt.Fprintf(&b, "%03d", t.YearDay())
+		case 'u': // ISO weekday, 1=Mon .. 7=Sun
+			if wd := int(t.Weekday()); wd == 0 {
+				b.WriteByte('7')
+			} else {
+				b.WriteString(strconv.Itoa(wd))
+			}
+		case 'w': // weekday, 0=Sun .. 6=Sat
+			b.WriteString(strconv.Itoa(int(t.Weekday())))
+		default:
+			// Unknown / unsupported code: copy verbatim (never expands to a
+			// path separator), matching glibc's pass-through for unknown codes.
+			b.WriteByte('%')
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // writeNewFile is a symlink- and clobber-safe replacement for os.WriteFile used
@@ -494,18 +568,25 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 	epochStr := strconv.FormatInt(now.Unix(), 10)
 
 	// Replacer for sudoers-style escape sequences.
-	// User-controlled values are sanitized to strip "/" characters,
+	// User-controlled values are sanitized ("/" -> "_") to prevent traversal,
 	// matching C sudo_logsrvd's strlcpy_no_slash() behavior.
+	runuser := sanitizePathComponent(infoMap["runuser"])
+	rungroup := sanitizePathComponent(infoMap["rungroup"])
 	replacer := strings.NewReplacer(
 		// User/Group escapes (sanitized — user-controlled)
 		"%{user}", sanitizePathComponent(infoMap["submituser"]),
 		"%{uid}", sanitizePathComponent(infoMap["submituid"]),
 		"%{group}", sanitizePathComponent(infoMap["submitgroup"]),
 		"%{gid}", sanitizePathComponent(infoMap["submitgid"]),
-		"%{runuser}", sanitizePathComponent(infoMap["runuser"]),
+		"%{runuser}", runuser,
 		"%{runuid}", sanitizePathComponent(infoMap["runuid"]),
-		"%{rungroup}", sanitizePathComponent(infoMap["rungroup"]),
+		"%{rungroup}", rungroup,
 		"%{rungid}", sanitizePathComponent(infoMap["rungid"]),
+		// Canonical sudo names for the run-as identity (lib/iolog/iolog_path.c:
+		// fill_runas_user / fill_runas_group). Aliased to the same values so a
+		// template copied from a C sudoers config expands identically.
+		"%{runas_user}", runuser,
+		"%{runas_group}", rungroup,
 		// Host/Command escapes (sanitized — user-controlled)
 		"%{hostname}", sanitizePathComponent(infoMap["submithost"]),
 		"%{command_path}", sanitizePathComponent(infoMap["command"]),
@@ -513,7 +594,7 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		// Sequence and Random escapes (server-generated, safe)
 		"%{seq}", seq,
 		"%{rand}", randStr,
-		// Time/Date escapes (server-generated, safe)
+		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
 		"%{year}", fmt.Sprintf("%04d", now.Year()),
 		"%{month}", fmt.Sprintf("%02d", now.Month()),
 		"%{day}", fmt.Sprintf("%02d", now.Day()),
@@ -523,12 +604,19 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		"%{epoch}", epochStr,
 		// Path escapes
 		"%{LIVEDIR}", cfg.LogDirectory,
-		// Literal percent escape
-		"%%", "%",
+		// NOTE: literal "%%" and bare strftime "%X" codes are handled by
+		// strftimeExpand below (after brace expansion), matching C's model.
 	)
 
 	iologDir := replacer.Replace(cfg.IologDir)
 	iologFile := replacer.Replace(cfg.IologFile)
+
+	// After %{...} expansion, apply C-style strftime over the path for bare
+	// "%X" date/time codes and to collapse "%%" -> "%". C sudo runs strftime on
+	// the whole iolog path (lib/iolog/iolog_path.c), so a template using the
+	// standard sudo date escapes (e.g. "%Y-%m-%d") expands the same way here.
+	iologDir = strftimeExpand(iologDir, now)
+	iologFile = strftimeExpand(iologFile, now)
 
 	// Reject paths containing ".." to prevent directory traversal.
 	// This check must run before filepath.Join, which cleans the path and

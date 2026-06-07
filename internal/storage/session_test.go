@@ -1771,3 +1771,39 @@ func TestSeqFileFormat(t *testing.T) {
 		}
 	})
 }
+
+// TestIologEscapeParity covers the C-compatibility escape behaviors:
+//   - %{runas_user}/%{runas_group} aliases expand to the run-as identity,
+//   - strftime-style %Y/%m/%d and %% are expanded over the path,
+//   - a '/' in a user-controlled value becomes '_' (not stripped).
+func TestIologEscapeParity(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        "%{LIVEDIR}/%{runas_user}/%{runas_group}",
+		IologFile:       "%Y-%m-%d/%{user}-%%end",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "a/b"}}, // slash -> "_"
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "rungroup", Value: &pb.InfoMessage_Strval{Strval: "wheel"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}
+
+	got, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	if err != nil {
+		t.Fatalf("buildSessionPath() failed: %v", err)
+	}
+
+	now := time.Now()
+	date := fmt.Sprintf("%04d-%02d-%02d", now.Year(), int(now.Month()), now.Day())
+	want := filepath.Join(tmpDir, "root", "wheel", date, "a_b-%end")
+	if got != want {
+		t.Errorf("buildSessionPath()\n got  %q\n want %q\n(runas_* aliases, strftime %%Y-%%m-%%d, %%%% -> %%, and '/' -> '_')", got, want)
+	}
+}
