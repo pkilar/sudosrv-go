@@ -4,6 +4,7 @@ package relay
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -620,4 +621,109 @@ func TestRelayFinalCommitOnExit(t *testing.T) {
 
 	session.Close()
 	waitRelaySession(t, session, 2*time.Second)
+}
+
+// readCachedMessages reads all length-prefixed ClientMessages from a relay cache
+// file in order.
+func readCachedMessages(t *testing.T, path string) []*pb.ClientMessage {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open cache file: %v", err)
+	}
+	defer f.Close()
+	proc := protocol.NewProcessor(f, f)
+	var msgs []*pb.ClientMessage
+	for {
+		m, err := proc.ReadClientMessage()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("read cached message: %v", err)
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs
+}
+
+// TestRelayRestartResumesCachedSession verifies that a RestartMessage in relay
+// mode resumes the interrupted session's cache (appending the resumed I/O into
+// one continuous session) instead of being rejected. Go's batch relay cannot
+// forward the restart upstream as C does, so it continues locally.
+func TestRelayRestartResumesCachedSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.RelayConfig{
+		RelayCacheDirectory:  tmpDir,
+		ReconnectAttempts:    0,             // do not attempt upstream; we inspect the cache
+		MaxReconnectInterval: 100 * time.Millisecond,
+		ConnectTimeout:       time.Second,
+		UpstreamHost:         "127.0.0.1:0",
+	}
+	sessionUUID := uuid.MustParse("d4e5f6a7-b8c9-4d4e-bf5a-2b3c4d5e6f70")
+	acceptMsg := createTestAcceptMessage()
+
+	ttyout := func(s *Session, data string) {
+		t.Helper()
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 1}, Data: []byte(data)}},
+		}); err != nil {
+			t.Fatalf("ttyout %q: %v", data, err)
+		}
+	}
+
+	// Original session: Accept + one ttyout, then interrupted (Close, no Exit).
+	s1, err := NewSession(t.Context(), sessionUUID, acceptMsg, cfg, nil)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, err := s1.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	ttyout(s1, "AAAAA")
+	s1.Close()
+	waitRelaySession(t, s1, 2*time.Second)
+
+	cacheFile := filepath.Join(tmpDir, sessionUUID.String()+".log")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected cache file to remain after interrupt: %v", err)
+	}
+
+	// Restart: resume by the relay-local log_id, send more I/O + Exit.
+	logID := base64.StdEncoding.EncodeToString(sessionUUID[:])
+	s2, err := NewRestartSession(t.Context(), &pb.RestartMessage{LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1}}, cfg, nil)
+	if err != nil {
+		t.Fatalf("NewRestartSession: %v", err)
+	}
+	ttyout(s2, "BBBBB")
+	if _, err := s2.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}}}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	s2.Close()
+	waitRelaySession(t, s2, 2*time.Second)
+
+	// The cache must now be one continuous session: Accept, AAAAA, BBBBB, Exit.
+	msgs := readCachedMessages(t, cacheFile)
+	if len(msgs) != 4 {
+		t.Fatalf("cache has %d messages, want 4 (Accept, 2x ttyout, Exit)", len(msgs))
+	}
+	if msgs[0].GetAcceptMsg() == nil {
+		t.Errorf("msg[0] = %T, want AcceptMessage", msgs[0].Type)
+	}
+	if b := msgs[1].GetTtyoutBuf(); b == nil || string(b.Data) != "AAAAA" {
+		t.Errorf("msg[1] = %v, want ttyout AAAAA", msgs[1])
+	}
+	if b := msgs[2].GetTtyoutBuf(); b == nil || string(b.Data) != "BBBBB" {
+		t.Errorf("msg[2] = %v, want ttyout BBBBB (resumed I/O must be appended)", msgs[2])
+	}
+	if msgs[3].GetExitMsg() == nil {
+		t.Errorf("msg[3] = %T, want ExitMessage", msgs[3].Type)
+	}
+
+	// A restart for an unknown/already-flushed log_id cannot resume locally.
+	goneUUID := uuid.New()
+	gone := base64.StdEncoding.EncodeToString(goneUUID[:])
+	if _, err := NewRestartSession(t.Context(), &pb.RestartMessage{LogId: gone}, cfg, nil); err == nil {
+		t.Error("expected error resuming a relay session with no cache file")
+	}
 }

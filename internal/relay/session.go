@@ -57,7 +57,11 @@ type Session struct {
 	logID            string
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
-	fromClientChan   chan *pb.ClientMessage
+	// resume is true for a session created via NewRestartSession: it appends the
+	// resumed I/O to an existing cache file (which already begins with the
+	// original AcceptMessage) instead of writing a fresh AcceptMessage opener.
+	resume         bool
+	fromClientChan chan *pb.ClientMessage
 	// sendMu serializes Close against in-flight HandleClientMessage calls.
 	// HandleClientMessage holds RLock for its entire critical section
 	// (closed check + channel send); Close takes the exclusive Lock so it
@@ -139,6 +143,62 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 
 	s.wg.Add(1)
 	go s.run() // Start the single, durable goroutine for this session.
+
+	return s, nil
+}
+
+// NewRestartSession resumes a relay session interrupted earlier on this server.
+//
+// Go's relay is store-and-forward: it caches a session to {uuid}.log and only
+// flushes upstream after the client's ExitMessage, so the client was handed a
+// LOCAL log_id (base64(uuid)) and the upstream never saw the original session.
+// C's relay forwards the RestartMessage upstream, which cannot work here because
+// the upstream has no log to resume. Instead we resume LOCALLY: decode the uuid
+// from the client's log_id, reopen that still-cached file, and append the
+// resumed I/O so the upstream eventually receives one continuous session
+// (Accept + original I/O + resumed I/O + Exit). The RestartMessage itself is
+// consumed here and not cached/forwarded.
+//
+// resume_point is advisory here: any I/O cached past it (cached but not yet
+// flushed, then re-sent by the client) is appended, so the overlap region can
+// be duplicated — the same narrow window that exists whenever a client resends
+// already-stored I/O. If the cache file is gone (already flushed upstream, or
+// an unknown log_id) the session cannot be resumed and an error is returned.
+func NewRestartSession(ctx context.Context, restartMsg *pb.RestartMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
+	decoded, err := base64.StdEncoding.DecodeString(restartMsg.GetLogId())
+	if err != nil || len(decoded) < 16 {
+		return nil, fmt.Errorf("relay restart: invalid log_id %q", restartMsg.GetLogId())
+	}
+	var sessionUUID uuid.UUID
+	copy(sessionUUID[:], decoded[:16])
+
+	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", sessionUUID.String()))
+	if info, statErr := os.Stat(cacheFileName); statErr != nil {
+		return nil, fmt.Errorf("relay restart: no cached session for log_id %s (cannot resume): %w", restartMsg.GetLogId(), statErr)
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("relay restart: cache path %s is a directory", cacheFileName)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	s := &Session{
+		logID:          restartMsg.GetLogId(),
+		config:         cfg,
+		resume:         true,
+		fromClientChan: make(chan *pb.ClientMessage, 1000),
+		cacheFileName:  cacheFileName,
+		ctx:            ctx,
+		cancel:         cancel,
+		onDone:         onDone,
+	}
+	// Restore the single elapsed clock from resume_point so the synthesized
+	// commit points continue from where the interrupted session left off.
+	if rp := restartMsg.GetResumePoint(); rp != nil {
+		s.cumulativeDelay = durationFromTimeSpec(rp)
+	}
+	s.phase.Store(&phaseWriting)
+
+	s.wg.Add(1)
+	go s.run()
 
 	return s, nil
 }
@@ -246,10 +306,15 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		}
 	}()
 
-	// Write the essential AcceptMessage first to ensure the cache file is valid for flushing.
-	if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
-		slog.Error("Failed to write initial accept message to cache", "log_id", s.logID, "error", err)
-		return
+	// Write the essential AcceptMessage first to ensure the cache file is valid
+	// for flushing. On a resume (restart), the existing cache file already opens
+	// with the original AcceptMessage, so we append the resumed I/O directly and
+	// the upstream ultimately receives one continuous session.
+	if !s.resume {
+		if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
+			slog.Error("Failed to write initial accept message to cache", "log_id", s.logID, "error", err)
+			return
+		}
 	}
 
 	// Loop until the session context is cancelled (server shutdown), Close()

@@ -46,6 +46,7 @@ type Handler struct {
 		newLocalEventSession   func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
 		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
+		newRelayRestartSession func(restartMsg *pb.RestartMessage, cfg *config.RelayConfig) (SessionHandler, error)
 	}
 }
 
@@ -137,6 +138,19 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 	}
 	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
 		return storage.NewRestartSession(restartMsg, localCfg)
+	}
+	h.sessionFactories.newRelayRestartSession = func(restartMsg *pb.RestartMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
+		// Like newRelaySession, the relay restart session self-deregisters when
+		// its background flusher exits. The registry key is the restart log_id,
+		// matching registerRestartSession's h.sessionID.
+		logID := restartMsg.GetLogId()
+		onDone := func() {
+			if h.registry != nil {
+				h.registry.Deregister(logID)
+			}
+			metrics.Global.DecrementActiveSessions()
+		}
+		return relay.NewRestartSession(h.ctx, restartMsg, relayCfg, onDone)
 	}
 	return h
 }
@@ -333,7 +347,7 @@ func (h *Handler) registerSession(sessionUUID uuid.UUID, mode string, acceptMsg 
 // registerRestartSession is the restart-path equivalent of registerSession.
 // Restart sessions resume an existing log, so the base64 log_id is provided
 // up-front by the client and used as the registry key directly.
-func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
+func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage, mode string) {
 	if h.registry == nil || h.session == nil {
 		return
 	}
@@ -341,7 +355,7 @@ func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
 	info := sessions.SessionInfo{
 		SessionID:   h.sessionID,
 		ServerLogID: restartMsg.GetLogId(),
-		Mode:        "local",
+		Mode:        mode,
 		RemoteAddr:  h.conn.RemoteAddr().String(),
 		StartedAt:   h.startedAt,
 		Info:        map[string]any{"event_type": "restart"},
@@ -353,6 +367,12 @@ func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
 		info.Provider = p
 	}
 	h.registry.Register(info)
+	// Same race guard as registerSession: a self-deregistering (relay) session
+	// whose runner finished before we registered would have had its onDone
+	// Deregister no-op; detect that and remove our just-added entry.
+	if d, ok := h.session.(doneNotifier); ok && d.IsDone() {
+		h.registry.Deregister(h.sessionID)
+	}
 }
 
 // refreshLogIDFromSession overwrites h.logID with the session's authoritative
@@ -552,25 +572,45 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 
 // handleRestart resumes an existing session from a RestartMessage.
 func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessage, error) {
-	if h.config.Server.Mode != "local" {
+	switch h.config.Server.Mode {
+	case "local":
+		session, err := h.sessionFactories.newLocalRestartSession(restartMsg, &h.config.LocalStorage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create restart session: %w", err)
+		}
+		h.session = session
+		h.logID = restartMsg.GetLogId()
+		h.registerRestartSession(restartMsg, "local")
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementLocalSessions()
+		slog.Info("Resumed local storage session via restart",
+			"log_id", h.logID, "total_sessions", metrics.Global.GetTotalSessions())
+		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: restartMsg.GetLogId()}}, nil
+
+	case "relay":
+		// Resume locally by appending to the still-cached session (see
+		// relay.NewRestartSession). Go's batch relay cannot forward the restart
+		// upstream the way C does, because the upstream never saw the original
+		// session and the client holds a relay-local log_id.
+		session, err := h.sessionFactories.newRelayRestartSession(restartMsg, &h.config.Relay)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resume relay session: %w", err)
+		}
+		h.session = session
+		h.logID = restartMsg.GetLogId()
+		h.registerRestartSession(restartMsg, "relay")
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementRelaySessions()
+		slog.Info("Resumed relay session via restart",
+			"log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
+			"total_sessions", metrics.Global.GetTotalSessions())
+		// The client transitions straight to SEND_IO after a RestartMessage and
+		// does not await a reply, so we send none (avoiding an extra log_id msg).
+		return nil, nil
+
+	default:
 		return nil, fmt.Errorf("restart not supported in %s mode", h.config.Server.Mode)
 	}
-
-	session, err := h.sessionFactories.newLocalRestartSession(restartMsg, &h.config.LocalStorage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create restart session: %w", err)
-	}
-
-	h.session = session
-	h.logID = restartMsg.GetLogId()
-	h.registerRestartSession(restartMsg)
-	metrics.Global.IncrementSessions()
-	metrics.Global.IncrementLocalSessions()
-	slog.Info("Resumed local storage session via restart",
-		"log_id", h.logID,
-		"total_sessions", metrics.Global.GetTotalSessions())
-
-	return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: restartMsg.GetLogId()}}, nil
 }
 
 // handleAccept sets up a session for an accepted command.
