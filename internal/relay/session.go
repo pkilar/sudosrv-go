@@ -716,7 +716,11 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS13}
+		minVer, verErr := config.TLSVersion(cfg.TLSMinVersion)
+		if verErr != nil {
+			return nil, fmt.Errorf("invalid relay tls_min_version: %w", verErr)
+		}
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: minVer}
 		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
 		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
 	} else {

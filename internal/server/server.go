@@ -92,9 +92,14 @@ func (s *Server) Start() error {
 			s.closeListeners()
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
 		}
+		minVer, err := config.TLSVersion(cfg.Server.TLSMinVersion)
+		if err != nil {
+			s.closeListeners()
+			return fmt.Errorf("invalid server tls_min_version: %w", err)
+		}
 		tlsConfig := &tls.Config{
 			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
+			MinVersion:   minVer,
 		}
 		tlsListener, err := tls.Listen("tcp", cfg.Server.ListenAddressTLS, tlsConfig)
 		if err != nil {

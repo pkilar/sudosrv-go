@@ -126,6 +126,11 @@ func (s *Server) Listen() error {
 // stapling, custom curve preferences) lives in one place. TLS 1.3 is the
 // floor — its cipher suites are not configurable and are all AEAD, so we
 // don't enumerate CipherSuites (those entries would be silently ignored).
+//
+// Unlike the sudo protocol surfaces (server.tls_min_version / relay.tls_min_version,
+// which may be lowered to 1.2 for legacy peers), the management API is pinned to
+// TLS 1.3: it is a new admin-only endpoint with no legacy-client compatibility
+// requirement, so there is no reason to weaken its floor.
 func buildTLSConfig(cfg config.APIConfig) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {

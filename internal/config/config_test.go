@@ -3,6 +3,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -654,6 +655,91 @@ func TestIdleTimeoutNegativeIsPreserved(t *testing.T) {
 		}
 		if cfg.Server.IdleTimeout != 10*time.Minute {
 			t.Errorf("idle_timeout: got %v, want 10m default when omitted", cfg.Server.IdleTimeout)
+		}
+	})
+}
+
+// TestTLSVersion verifies the "1.2"/"1.3" string maps to the right crypto/tls
+// constant, that an empty string defaults to the secure 1.3 floor, and that a
+// bad value is rejected (so a typo cannot silently weaken TLS).
+func TestTLSVersion(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    uint16
+		wantErr bool
+	}{
+		{"1.3", tls.VersionTLS13, false},
+		{"", tls.VersionTLS13, false},
+		{"1.2", tls.VersionTLS12, false},
+		{"1.1", 0, true},
+		{"garbage", 0, true},
+	}
+	for _, c := range cases {
+		got, err := TLSVersion(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("TLSVersion(%q): expected error, got nil", c.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("TLSVersion(%q): unexpected error %v", c.in, err)
+		}
+		if got != c.want {
+			t.Errorf("TLSVersion(%q) = %#x, want %#x", c.in, got, c.want)
+		}
+	}
+}
+
+// TestTLSMinVersionConfig verifies the secure 1.3 default, the documented 1.2
+// opt-in for legacy peers (server + relay), and that Validate rejects an invalid
+// value.
+func TestTLSMinVersionConfig(t *testing.T) {
+	t.Run("DefaultIs13", func(t *testing.T) {
+		cfg := defaultConfig()
+		if cfg.Server.TLSMinVersion != "1.3" || cfg.Relay.TLSMinVersion != "1.3" {
+			t.Fatalf("defaults: server=%q relay=%q, want 1.3/1.3", cfg.Server.TLSMinVersion, cfg.Relay.TLSMinVersion)
+		}
+	})
+
+	t.Run("OptInTo12", func(t *testing.T) {
+		content := "server:\n  mode: \"local\"\n  tls_min_version: \"1.2\"\nrelay:\n  tls_min_version: \"1.2\"\n"
+		tmpFile := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.Server.TLSMinVersion != "1.2" || cfg.Relay.TLSMinVersion != "1.2" {
+			t.Fatalf("got server=%q relay=%q, want 1.2/1.2", cfg.Server.TLSMinVersion, cfg.Relay.TLSMinVersion)
+		}
+		if v, _ := TLSVersion(cfg.Server.TLSMinVersion); v != tls.VersionTLS12 {
+			t.Errorf("resolved server min = %#x, want TLS 1.2", v)
+		}
+	})
+
+	t.Run("OmittedDefaultsTo13", func(t *testing.T) {
+		content := "server:\n  mode: \"local\"\n"
+		tmpFile := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.Server.TLSMinVersion != "1.3" {
+			t.Errorf("omitted server tls_min_version = %q, want 1.3", cfg.Server.TLSMinVersion)
+		}
+	})
+
+	t.Run("ValidateRejectsBadVersion", func(t *testing.T) {
+		cfg := defaultConfig()
+		cfg.Server.TLSMinVersion = "1.1"
+		if err := Validate(cfg); err == nil {
+			t.Error("expected Validate to reject tls_min_version 1.1")
 		}
 	})
 }
