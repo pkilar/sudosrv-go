@@ -67,8 +67,9 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
 		}
 
-		// Check for correct server response (log_id should be base64-encoded)
-		expectedRelPath := "testuser/000001"
+		// Check for correct server response (log_id should be base64-encoded).
+		// %{seq}=1 expands to the C-compatible XX/XX/XX hierarchy "00/00/01".
+		expectedRelPath := "testuser/00/00/01"
 		idBytes := append(sessionUUID[:], []byte(expectedRelPath)...)
 		expectedLogID := base64.StdEncoding.EncodeToString(idBytes)
 		if serverResponse.GetLogId() != expectedLogID {
@@ -89,9 +90,9 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("HandleClientMessage(ExitMsg) failed: %v", err)
 		}
 
-		// Verify that directories and files were created
-		// The sequence number will be "000001" since this test has its own tmpDir.
-		sessDir := filepath.Join(tmpDir, "testuser", "000001")
+		// Verify that directories and files were created.
+		// %{seq}=1 expands to "00/00/01" (C-compatible XX/XX/XX hierarchy).
+		sessDir := filepath.Join(tmpDir, "testuser", "00", "00", "01")
 		if _, err := os.Stat(sessDir); os.IsNotExist(err) {
 			t.Fatalf("Session directory '%s' was not created", sessDir)
 		}
@@ -157,7 +158,7 @@ func TestStorageSession(t *testing.T) {
 		}
 
 		// Verify ttyout file content
-		sessDir := filepath.Join(tmpDir, "testuser", "000001") // Sequence is 1 because of new tmpDir
+		sessDir := filepath.Join(tmpDir, "testuser", "00", "00", "01") // Sequence 1 -> "00/00/01"
 		ttyoutFile := filepath.Join(sessDir, "ttyout")
 		content, err := os.ReadFile(ttyoutFile)
 		if err != nil {
@@ -241,9 +242,19 @@ func TestStorageSession(t *testing.T) {
 			t.Errorf("Expected different sequence numbers, got same: %s", seq1)
 		}
 
-		// Test sequence file format (should be 6 characters, base36)
-		if len(seq1) != 6 {
-			t.Errorf("Expected sequence length 6, got %d", len(seq1))
+		// %{seq} expands to C's XX/XX/XX hierarchy: 6 uppercase base36 chars
+		// split by two slashes (length 8), so `sudoreplay <id>` resolves it.
+		for _, seq := range []string{seq1, seq2} {
+			if len(seq) != 8 || seq[2] != '/' || seq[5] != '/' {
+				t.Errorf("expected seq in XX/XX/XX form, got %q", seq)
+			}
+			if strings.ToUpper(seq) != seq {
+				t.Errorf("expected uppercase base36 seq (matching C), got %q", seq)
+			}
+		}
+		// First two sequences are 1 and 2 -> "00/00/01" and "00/00/02".
+		if seq1 != "00/00/01" || seq2 != "00/00/02" {
+			t.Errorf("expected seq1=00/00/01 seq2=00/00/02, got %q and %q", seq1, seq2)
 		}
 	})
 
@@ -1013,7 +1024,7 @@ func TestNewSessionLogIDSiblingPrefixPath(t *testing.T) {
 	}
 	defer session.Close()
 
-	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "000001")
+	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "00", "00", "01")
 	if session.sessionDir != expectedPath {
 		t.Fatalf("unexpected session dir: expected %q, got %q", expectedPath, session.sessionDir)
 	}

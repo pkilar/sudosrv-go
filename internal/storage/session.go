@@ -663,16 +663,21 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 		return "", fmt.Errorf("could not sync sequence file: %w", err)
 	}
 
-	// Convert the number to a 6-character, zero-padded, base36 string
-	const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
-	seqStr := ""
+	// Convert the number to a 6-character, zero-padded base36 string using the
+	// UPPERCASE alphabet C sudo uses (lib/iolog/iolog_nextid.c:57), then split it
+	// into the XX/XX/XX directory hierarchy C's fill_seq emits
+	// (logsrvd/iolog_writer.c:469). sudoreplay resolves a session by building
+	// session_dir/%.2s/%.2s/%.2s from the 6-char id (sudoreplay.c:327), so the
+	// on-disk layout must use this split form, not a flat 6-char directory.
+	const base36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var raw [6]byte
 	val := nextSeq
-	for range 6 {
-		seqStr = string(base36[val%36]) + seqStr
+	for i := 5; i >= 0; i-- {
+		raw[i] = base36[val%36]
 		val /= 36
 	}
 
-	return seqStr, nil
+	return fmt.Sprintf("%c%c/%c%c/%c%c", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]), nil
 }
 
 // LogID returns the base64-encoded sudo log_id assigned when the session was
