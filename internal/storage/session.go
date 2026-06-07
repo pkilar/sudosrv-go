@@ -47,15 +47,21 @@ const commitPointInterval = 10 * time.Second
 // methods (CheckOutput/FilterInput) which take passwordFilter.mu internally.
 // Acquiring locks in the reverse order will deadlock.
 type Session struct {
-	logID           string
-	sessionUUID     uuid.UUID
-	config          *config.LocalStorageConfig
-	sessionDir      string
-	files           map[string]*os.File
-	gzipWriters     map[string]*gzip.Writer // Gzip writers for compressed streams
-	timingFile      *os.File
-	logJSONPath     string // path to log.json; writes go through writeFileAtomic
-	cumulativeDelay map[string]time.Duration
+	logID       string
+	sessionUUID uuid.UUID
+	config      *config.LocalStorageConfig
+	sessionDir  string
+	files       map[string]*os.File
+	gzipWriters map[string]*gzip.Writer // Gzip writers for compressed streams
+	timingFile  *os.File
+	logJSONPath string // path to log.json; writes go through writeFileAtomic
+	// cumulativeDelay is a SINGLE counter summed across every I/O, winsize, and
+	// suspend delay — mirroring C sudo_logsrvd's one closure->elapsed_time. Every
+	// commit_point (periodic and the final one on Exit) reports this value, which
+	// is exactly what the client compares against its own global elapsed time
+	// before leaving the CLOSING state. A per-stream value would never satisfy
+	// the client's committed==elapsed equality for multi-stream sessions.
+	cumulativeDelay time.Duration
 	logMeta         map[string]any
 	passwordFilter  *PasswordFilter // Password filtering for security
 	lastCommitTime  time.Time       // Tracks when last commit point was sent
@@ -127,11 +133,85 @@ var seqMutexMapLock sync.RWMutex
 
 const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-// sanitizePathComponent removes forward slashes from user-controlled path values
-// to prevent path traversal attacks via escape sequence expansion.
-// Matches the behavior of strlcpy_no_slash() in C sudo_logsrvd.
+// sanitizePathComponent replaces forward slashes in user-controlled path values
+// with underscores, preventing path traversal via escape-sequence expansion
+// while matching C sudo_logsrvd's strlcpy_no_slash() (lib/iolog/iolog_path.c),
+// which maps '/' to '_'. This both blocks traversal and produces the same
+// on-disk component a C server would (e.g. a submituser "a/b" -> "a_b").
 func sanitizePathComponent(s string) string {
-	return strings.ReplaceAll(s, "/", "")
+	return strings.ReplaceAll(s, "/", "_")
+}
+
+// strftimeExpand expands C strftime-style "%X" date/time escapes against t,
+// matching the strftime pass C sudo applies to an iolog path after %{...}
+// expansion (lib/iolog/iolog_path.c). "%%" collapses to a literal "%". Only the
+// common atomic codes are supported; codes that would introduce a path
+// separator or control character (e.g. %D, %F, %T, %n, %t) and any unrecognized
+// code are copied through verbatim, so an unknown escape can never inject a "/"
+// into a path component.
+func strftimeExpand(s string, t time.Time) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch c := s[i]; c {
+		case '%':
+			b.WriteByte('%')
+		case 'Y':
+			b.WriteString(t.Format("2006"))
+		case 'y':
+			b.WriteString(t.Format("06"))
+		case 'C':
+			fmt.Fprintf(&b, "%02d", t.Year()/100)
+		case 'm':
+			b.WriteString(t.Format("01"))
+		case 'd':
+			b.WriteString(t.Format("02"))
+		case 'e':
+			fmt.Fprintf(&b, "%2d", t.Day())
+		case 'H':
+			b.WriteString(t.Format("15"))
+		case 'I':
+			b.WriteString(t.Format("03"))
+		case 'M':
+			b.WriteString(t.Format("04"))
+		case 'S':
+			b.WriteString(t.Format("05"))
+		case 'p':
+			b.WriteString(t.Format("PM"))
+		case 'A':
+			b.WriteString(t.Format("Monday"))
+		case 'a':
+			b.WriteString(t.Format("Mon"))
+		case 'B':
+			b.WriteString(t.Format("January"))
+		case 'b', 'h':
+			b.WriteString(t.Format("Jan"))
+		case 'j':
+			fmt.Fprintf(&b, "%03d", t.YearDay())
+		case 'u': // ISO weekday, 1=Mon .. 7=Sun
+			if wd := int(t.Weekday()); wd == 0 {
+				b.WriteByte('7')
+			} else {
+				b.WriteString(strconv.Itoa(wd))
+			}
+		case 'w': // weekday, 0=Sun .. 6=Sat
+			b.WriteString(strconv.Itoa(int(t.Weekday())))
+		default:
+			// Unknown / unsupported code: copy verbatim (never expands to a
+			// path separator), matching glibc's pass-through for unknown codes.
+			b.WriteByte('%')
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // writeNewFile is a symlink- and clobber-safe replacement for os.WriteFile used
@@ -221,14 +301,13 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	}
 
 	session := &Session{
-		logID:           logID,
-		sessionUUID:     sessionUUID,
-		config:          cfg,
-		sessionDir:      sessionDir,
-		files:           make(map[string]*os.File),
-		gzipWriters:     make(map[string]*gzip.Writer),
-		cumulativeDelay: make(map[string]time.Duration),
-		logMeta:         make(map[string]any),
+		logID:       logID,
+		sessionUUID: sessionUUID,
+		config:      cfg,
+		sessionDir:  sessionDir,
+		files:       make(map[string]*os.File),
+		gzipWriters: make(map[string]*gzip.Writer),
+		logMeta:     make(map[string]any),
 	}
 
 	// Initialize password filter if enabled
@@ -489,18 +568,25 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 	epochStr := strconv.FormatInt(now.Unix(), 10)
 
 	// Replacer for sudoers-style escape sequences.
-	// User-controlled values are sanitized to strip "/" characters,
+	// User-controlled values are sanitized ("/" -> "_") to prevent traversal,
 	// matching C sudo_logsrvd's strlcpy_no_slash() behavior.
+	runuser := sanitizePathComponent(infoMap["runuser"])
+	rungroup := sanitizePathComponent(infoMap["rungroup"])
 	replacer := strings.NewReplacer(
 		// User/Group escapes (sanitized — user-controlled)
 		"%{user}", sanitizePathComponent(infoMap["submituser"]),
 		"%{uid}", sanitizePathComponent(infoMap["submituid"]),
 		"%{group}", sanitizePathComponent(infoMap["submitgroup"]),
 		"%{gid}", sanitizePathComponent(infoMap["submitgid"]),
-		"%{runuser}", sanitizePathComponent(infoMap["runuser"]),
+		"%{runuser}", runuser,
 		"%{runuid}", sanitizePathComponent(infoMap["runuid"]),
-		"%{rungroup}", sanitizePathComponent(infoMap["rungroup"]),
+		"%{rungroup}", rungroup,
 		"%{rungid}", sanitizePathComponent(infoMap["rungid"]),
+		// Canonical sudo names for the run-as identity (lib/iolog/iolog_path.c:
+		// fill_runas_user / fill_runas_group). Aliased to the same values so a
+		// template copied from a C sudoers config expands identically.
+		"%{runas_user}", runuser,
+		"%{runas_group}", rungroup,
 		// Host/Command escapes (sanitized — user-controlled)
 		"%{hostname}", sanitizePathComponent(infoMap["submithost"]),
 		"%{command_path}", sanitizePathComponent(infoMap["command"]),
@@ -508,7 +594,7 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		// Sequence and Random escapes (server-generated, safe)
 		"%{seq}", seq,
 		"%{rand}", randStr,
-		// Time/Date escapes (server-generated, safe)
+		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
 		"%{year}", fmt.Sprintf("%04d", now.Year()),
 		"%{month}", fmt.Sprintf("%02d", now.Month()),
 		"%{day}", fmt.Sprintf("%02d", now.Day()),
@@ -518,12 +604,19 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 		"%{epoch}", epochStr,
 		// Path escapes
 		"%{LIVEDIR}", cfg.LogDirectory,
-		// Literal percent escape
-		"%%", "%",
+		// NOTE: literal "%%" and bare strftime "%X" codes are handled by
+		// strftimeExpand below (after brace expansion), matching C's model.
 	)
 
 	iologDir := replacer.Replace(cfg.IologDir)
 	iologFile := replacer.Replace(cfg.IologFile)
+
+	// After %{...} expansion, apply C-style strftime over the path for bare
+	// "%X" date/time codes and to collapse "%%" -> "%". C sudo runs strftime on
+	// the whole iolog path (lib/iolog/iolog_path.c), so a template using the
+	// standard sudo date escapes (e.g. "%Y-%m-%d") expands the same way here.
+	iologDir = strftimeExpand(iologDir, now)
+	iologFile = strftimeExpand(iologFile, now)
 
 	// Reject paths containing ".." to prevent directory traversal.
 	// This check must run before filepath.Join, which cleans the path and
@@ -626,13 +719,15 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	}
 
 	var currentSeq uint32
-	if stat.Size() >= 4 {
-		// Read the current sequence number
-		data := make([]byte, 4)
-		if _, err := f.ReadAt(data, 0); err != nil {
+	if size := stat.Size(); size > 0 {
+		raw := make([]byte, size)
+		if _, err := f.ReadAt(raw, 0); err != nil && err != io.EOF {
 			return "", fmt.Errorf("could not read sequence file: %w", err)
 		}
-		currentSeq = binary.BigEndian.Uint32(data)
+		currentSeq, err = parseSeqFile(raw)
+		if err != nil {
+			return "", fmt.Errorf("could not parse sequence file %s: %w", seqFile, err)
+		}
 	}
 
 	// Sequence numbers are encoded as 6-char base36 strings; 36^6 = 2,176,782,336
@@ -646,11 +741,17 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	}
 	nextSeq := currentSeq + 1
 
-	// Write the new sequence number back to the file atomically
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint32(data, nextSeq)
+	// Write the new sequence back as ASCII base36 text (6 chars + newline),
+	// matching C sudo's on-disk seq format (lib/iolog/iolog_nextid.c) so a C
+	// sudo_logsrvd and this server can interoperate on a shared iolog tree.
+	data := formatSeqFile(nextSeq)
 	if _, err := f.WriteAt(data, 0); err != nil {
 		return "", fmt.Errorf("could not write to sequence file: %w", err)
+	}
+	// Truncate to the exact ASCII length so migrating from the shorter legacy
+	// binary format leaves no stale trailing bytes.
+	if err := f.Truncate(int64(len(data))); err != nil {
+		return "", fmt.Errorf("could not truncate sequence file: %w", err)
 	}
 
 	// Ensure the write is flushed to disk
@@ -658,16 +759,53 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 		return "", fmt.Errorf("could not sync sequence file: %w", err)
 	}
 
-	// Convert the number to a 6-character, zero-padded, base36 string
-	const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
-	seqStr := ""
+	// Convert the number to a 6-character, zero-padded base36 string using the
+	// UPPERCASE alphabet C sudo uses (lib/iolog/iolog_nextid.c:57), then split it
+	// into the XX/XX/XX directory hierarchy C's fill_seq emits
+	// (logsrvd/iolog_writer.c:469). sudoreplay resolves a session by building
+	// session_dir/%.2s/%.2s/%.2s from the 6-char id (sudoreplay.c:327), so the
+	// on-disk layout must use this split form, not a flat 6-char directory.
+	const base36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var raw [6]byte
 	val := nextSeq
-	for range 6 {
-		seqStr = string(base36[val%36]) + seqStr
+	for i := 5; i >= 0; i-- {
+		raw[i] = base36[val%36]
 		val /= 36
 	}
 
-	return seqStr, nil
+	return fmt.Sprintf("%c%c/%c%c/%c%c", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]), nil
+}
+
+// parseSeqFile decodes the on-disk sequence counter. The canonical format
+// (matching C sudo's iolog_nextid) is ASCII base36 text, optionally followed by
+// a newline/NUL. Older Go servers wrote a 4-byte big-endian uint32, so we fall
+// back to that when the bytes are not valid base36 text — this migrates the
+// counter in place on the next write instead of resetting it (a reset could
+// collide new sessions with existing on-disk session directories).
+func parseSeqFile(raw []byte) (uint32, error) {
+	if s := strings.Trim(string(raw), "\x00\n\r \t"); s != "" {
+		if v, err := strconv.ParseUint(s, 36, 32); err == nil {
+			return uint32(v), nil
+		}
+	}
+	if len(raw) >= 4 {
+		return binary.BigEndian.Uint32(raw[:4]), nil
+	}
+	return 0, fmt.Errorf("unrecognized sequence file content (%d bytes)", len(raw))
+}
+
+// formatSeqFile renders the sequence counter in C sudo's on-disk format: six
+// uppercase base36 digits followed by a newline (7 bytes total).
+func formatSeqFile(seq uint32) []byte {
+	const base36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	buf := make([]byte, 7)
+	v := seq
+	for i := 5; i >= 0; i-- {
+		buf[i] = base36[v%36]
+		v /= 36
+	}
+	buf[6] = '\n'
+	return buf
 }
 
 // LogID returns the base64-encoded sudo log_id assigned when the session was
@@ -739,8 +877,14 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	case *pb.ClientMessage_SuspendEvent:
 		return s.handleSuspend(event.SuspendEvent)
 	case *pb.ClientMessage_ExitMsg:
+		// Send a FINAL commit_point carrying the full cumulative elapsed time,
+		// matching C sudo_logsrvd's handle_exit (it schedules an immediate commit
+		// event before closing). The stock client enters CLOSING after Exit and
+		// blocks until it receives a commit_point where committed==elapsed; without
+		// this the client stalls log_server_timeout (default 30s) and warns.
+		final := s.commitPointMsg()
 		s.finalize(event.ExitMsg)
-		return nil, nil // No response needed for Exit
+		return final, nil
 	default:
 		slog.Warn("Local storage session received unhandled message type", "type", fmt.Sprintf("%T", event))
 		return nil, nil // Ignore unhandled
@@ -985,8 +1129,7 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	}
 
 	// Write timing info using integer format matching C sudo_logsrvd: "%d %lld.%09d %zu\n"
-	delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
-	s.cumulativeDelay[streamName] += delayDur
+	s.cumulativeDelay += durationFromTimeSpec(delay)
 
 	timingRecord := fmt.Sprintf("%d %d.%09d %d\n",
 		streamInfo.marker,
@@ -1002,22 +1145,40 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 	// The first I/O event always sends one (zero-value lastCommitTime guarantees this).
 	if time.Since(s.lastCommitTime) >= commitPointInterval {
 		s.lastCommitTime = time.Now()
-		commitPoint := s.cumulativeDelay[streamName]
-		return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
-			CommitPoint: &pb.TimeSpec{
-				TvSec:  int64(commitPoint.Seconds()),
-				TvNsec: int32(commitPoint.Nanoseconds() % 1e9),
-			},
-		}}, nil
+		return s.commitPointMsg(), nil
 	}
 
 	return nil, nil
+}
+
+// durationFromTimeSpec converts a protobuf TimeSpec delay into a time.Duration.
+func durationFromTimeSpec(ts *pb.TimeSpec) time.Duration {
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())*time.Nanosecond
+}
+
+// commitPointMsg builds a ServerMessage carrying the session's cumulative
+// elapsed time. The client compares this value against its own global elapsed
+// time; integer second/nanosecond split matches C's commit_point encoding.
+// Callers must hold fileMux (cumulativeDelay is mutated under it).
+func (s *Session) commitPointMsg() *pb.ServerMessage {
+	d := s.cumulativeDelay
+	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+		CommitPoint: &pb.TimeSpec{
+			TvSec:  int64(d / time.Second),
+			TvNsec: int32(d % time.Second),
+		},
+	}}
 }
 
 func (s *Session) handleWinsize(event *pb.ChangeWindowSize) (*pb.ServerMessage, error) {
 	if event.Delay == nil {
 		return nil, fmt.Errorf("missing delay in ChangeWindowSize event")
 	}
+	// Advance the cumulative elapsed clock, matching C's update_elapsed_time on
+	// winsize events. The value is reported by the next periodic commit and by
+	// the final commit on Exit; winsize itself emits no commit point.
+	s.cumulativeDelay += durationFromTimeSpec(event.Delay)
+
 	timingRecord := fmt.Sprintf("%d %d.%09d %d %d\n", IO_EVENT_WINSIZE, event.Delay.TvSec, event.Delay.TvNsec, event.Rows, event.Cols)
 	slog.Debug("Writing winsize entry", "log_id", s.logID, "record", strings.TrimSpace(timingRecord))
 	if _, err := s.timingFile.WriteString(timingRecord); err != nil {
@@ -1035,6 +1196,10 @@ func (s *Session) handleSuspend(event *pb.CommandSuspend) (*pb.ServerMessage, er
 	if !validSuspendSignals[event.Signal] {
 		return nil, fmt.Errorf("invalid CommandSuspend signal: %q", event.Signal)
 	}
+
+	// Advance the cumulative elapsed clock, matching C's update_elapsed_time on
+	// suspend events, so the final commit on Exit includes suspend/resume gaps.
+	s.cumulativeDelay += durationFromTimeSpec(event.Delay)
 
 	// Sudo uses marker 7 for all suspend/resume events; signal name differentiates them
 	timingRecord := fmt.Sprintf("%d %d.%09d %s\n", IO_EVENT_SUSPEND, event.Delay.TvSec, event.Delay.TvNsec, event.Signal)
@@ -1139,6 +1304,122 @@ func DecodeLogID(logID string) (uuid.UUID, string, error) {
 	return sessionUUID, relativePath, nil
 }
 
+// parseTimingDelay parses a "sec.nsec" timing delay field into a Duration.
+func parseTimingDelay(s string) (time.Duration, error) {
+	secStr, nsecStr, ok := strings.Cut(s, ".")
+	if !ok {
+		return 0, fmt.Errorf("missing decimal in delay %q", s)
+	}
+	sec, err := strconv.ParseInt(secStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad seconds in delay %q: %w", s, err)
+	}
+	// Written as %09d; pad short fields and use the first 9 digits defensively.
+	for len(nsecStr) < 9 {
+		nsecStr += "0"
+	}
+	nsec, err := strconv.ParseInt(nsecStr[:9], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad nanoseconds in delay %q: %w", s, err)
+	}
+	return time.Duration(sec)*time.Second + time.Duration(nsec)*time.Nanosecond, nil
+}
+
+// computeResumeOffsets replays the timing file to find the byte offset at which a
+// restart should resume so resent I/O OVERWRITES (not duplicates) everything
+// recorded after target. It mirrors C sudo's iolog_seekto: each record's delay
+// is accumulated and each stream's offset advanced by the record's byte count
+// until the cumulative elapsed time equals target. An exact match is required —
+// an overshoot or hitting EOF first means resume_point does not align with the
+// stored log (same condition C treats as an error), reported via the error so
+// the caller can fall back to append mode. A zero target resumes at the start.
+func computeResumeOffsets(timingPath string, target time.Duration) (int64, map[string]int64, error) {
+	streamOffsets := make(map[string]int64)
+	if target <= 0 {
+		return 0, streamOffsets, nil
+	}
+	data, err := os.ReadFile(timingPath)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read timing file: %w", err)
+	}
+	markerToStream := map[int]string{
+		IO_EVENT_STDIN: "stdin", IO_EVENT_STDOUT: "stdout", IO_EVENT_STDERR: "stderr",
+		IO_EVENT_TTYIN: "ttyin", IO_EVENT_TTYOUT: "ttyout",
+	}
+
+	var elapsed time.Duration
+	var timingOffset int64
+	content := string(data)
+	for len(content) > 0 {
+		var line string
+		if nl := strings.IndexByte(content, '\n'); nl >= 0 {
+			line = content[:nl]
+			timingOffset += int64(nl + 1)
+			content = content[nl+1:]
+		} else {
+			line = content
+			timingOffset += int64(len(content))
+			content = ""
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, nil, fmt.Errorf("malformed timing record %q", line)
+		}
+		marker, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return 0, nil, fmt.Errorf("bad timing marker %q: %w", fields[0], err)
+		}
+		delay, err := parseTimingDelay(fields[1])
+		if err != nil {
+			return 0, nil, err
+		}
+		elapsed += delay
+		if stream, isIO := markerToStream[marker]; isIO {
+			if len(fields) < 3 {
+				return 0, nil, fmt.Errorf("I/O timing record missing byte count: %q", line)
+			}
+			nbytes, err := strconv.ParseInt(fields[2], 10, 64)
+			if err != nil {
+				return 0, nil, fmt.Errorf("bad timing byte count %q: %w", fields[2], err)
+			}
+			streamOffsets[stream] += nbytes
+		}
+
+		if elapsed >= target {
+			if elapsed == target {
+				return timingOffset, streamOffsets, nil
+			}
+			return 0, nil, fmt.Errorf("resume_point %v overshoots stored timing (nearest boundary %v)", target, elapsed)
+		}
+	}
+	return 0, nil, fmt.Errorf("resume_point %v is beyond the end of the stored timing", target)
+}
+
+// openForRestart opens an existing session file for a restart. When seek is true
+// it truncates to off and positions the file there, so resumed I/O overwrites
+// the post-resume_point region (matching C's iolog_seekto read->write switch);
+// otherwise it opens in append mode. O_NOFOLLOW guards against a symlink swap
+// between finalize and restart.
+func openForRestart(path string, cfg *config.LocalStorageConfig, seek bool, off int64) (*os.File, error) {
+	if !seek {
+		return os.OpenFile(path, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Truncate(off); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("truncate to resume offset %d: %w", off, err)
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("seek to resume offset %d: %w", off, err)
+	}
+	return f, nil
+}
+
 // NewRestartSession creates a session that resumes an existing log from a RestartMessage.
 func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (*Session, error) {
 	sessionUUID, relativePath, err := DecodeLogID(restartMsg.GetLogId())
@@ -1194,9 +1475,26 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("restart not supported for compressed sessions")
 	}
 
-	// Open timing file in append mode. O_NOFOLLOW guards against an attacker
-	// swapping the timing file for a symlink between session finalize and restart.
-	timingFile, err := os.OpenFile(timingPath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	// Determine where to resume. C sudo's iolog_seekto (logsrvd/logsrv_util.c)
+	// replays the timing file to find the byte offset of resume_point in each
+	// stream, then OVERWRITES everything after it so resent I/O is not
+	// duplicated. We do the same: compute the offsets, then truncate+seek each
+	// file to its resume position. If resume_point does not align with the
+	// stored timing (overshoot or past EOF — e.g. an older client that sent
+	// per-stream commit points), fall back to append mode rather than failing
+	// the restart, logging a warning so the divergence is visible.
+	rp := restartMsg.GetResumePoint()
+	resumeDur := time.Duration(rp.GetTvSec())*time.Second + time.Duration(rp.GetTvNsec())*time.Nanosecond
+	timingOffset, streamOffsets, seekErr := computeResumeOffsets(timingPath, resumeDur)
+	useSeek := seekErr == nil
+	if seekErr != nil && resumeDur > 0 {
+		slog.Warn("Restart resume_point does not align with stored timing; appending instead of seeking (overlap region may be duplicated)",
+			"log_id", restartMsg.GetLogId(), "resume_point", resumeDur, "error", seekErr)
+	}
+
+	// Open the timing file positioned at the resume point (or append on fallback).
+	// O_NOFOLLOW guards against a symlink swap between finalize and restart.
+	timingFile, err := openForRestart(timingPath, cfg, useSeek, timingOffset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
 	}
@@ -1212,15 +1510,16 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, err
 	}
 
-	// Open existing I/O stream files in append mode.
-	// stdin/ttyin may not exist (on-demand creation), so only open files that are present.
+	// Open existing I/O stream files at their resume offset (or append on
+	// fallback). stdin/ttyin may not exist (on-demand creation), so only open
+	// files that are present; absent streams had no pre-resume data (offset 0).
 	files := make(map[string]*os.File)
 	for streamName, streamInfo := range streamMap {
 		filePath := filepath.Join(sessionDir, streamInfo.filename)
 		if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
 			continue // On-demand file not yet created, will be created on first write
 		}
-		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+		f, err := openForRestart(filePath, cfg, useSeek, streamOffsets[streamName])
 		if err != nil {
 			// Clean up already opened files
 			for _, openFile := range files {
@@ -1232,14 +1531,11 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		files[streamName] = f
 	}
 
-	// Restore cumulative delay from resume_point
-	cumulativeDelay := make(map[string]time.Duration)
-	if resumePoint := restartMsg.GetResumePoint(); resumePoint != nil {
-		dur := time.Duration(resumePoint.TvSec)*time.Second + time.Duration(resumePoint.TvNsec)*time.Nanosecond
-		// Apply to all streams as a starting point
-		for streamName := range streamMap {
-			cumulativeDelay[streamName] = dur
-		}
+	// Restore the cumulative elapsed clock from resume_point so commit points
+	// after the restart continue from where the prior session left off.
+	var cumulativeDelay time.Duration
+	if resumeDur > 0 {
+		cumulativeDelay = resumeDur
 	}
 
 	session := &Session{

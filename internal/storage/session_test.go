@@ -67,8 +67,9 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
 		}
 
-		// Check for correct server response (log_id should be base64-encoded)
-		expectedRelPath := "testuser/000001"
+		// Check for correct server response (log_id should be base64-encoded).
+		// %{seq}=1 expands to the C-compatible XX/XX/XX hierarchy "00/00/01".
+		expectedRelPath := "testuser/00/00/01"
 		idBytes := append(sessionUUID[:], []byte(expectedRelPath)...)
 		expectedLogID := base64.StdEncoding.EncodeToString(idBytes)
 		if serverResponse.GetLogId() != expectedLogID {
@@ -89,9 +90,9 @@ func TestStorageSession(t *testing.T) {
 			t.Fatalf("HandleClientMessage(ExitMsg) failed: %v", err)
 		}
 
-		// Verify that directories and files were created
-		// The sequence number will be "000001" since this test has its own tmpDir.
-		sessDir := filepath.Join(tmpDir, "testuser", "000001")
+		// Verify that directories and files were created.
+		// %{seq}=1 expands to "00/00/01" (C-compatible XX/XX/XX hierarchy).
+		sessDir := filepath.Join(tmpDir, "testuser", "00", "00", "01")
 		if _, err := os.Stat(sessDir); os.IsNotExist(err) {
 			t.Fatalf("Session directory '%s' was not created", sessDir)
 		}
@@ -157,7 +158,7 @@ func TestStorageSession(t *testing.T) {
 		}
 
 		// Verify ttyout file content
-		sessDir := filepath.Join(tmpDir, "testuser", "000001") // Sequence is 1 because of new tmpDir
+		sessDir := filepath.Join(tmpDir, "testuser", "00", "00", "01") // Sequence 1 -> "00/00/01"
 		ttyoutFile := filepath.Join(sessDir, "ttyout")
 		content, err := os.ReadFile(ttyoutFile)
 		if err != nil {
@@ -241,9 +242,19 @@ func TestStorageSession(t *testing.T) {
 			t.Errorf("Expected different sequence numbers, got same: %s", seq1)
 		}
 
-		// Test sequence file format (should be 6 characters, base36)
-		if len(seq1) != 6 {
-			t.Errorf("Expected sequence length 6, got %d", len(seq1))
+		// %{seq} expands to C's XX/XX/XX hierarchy: 6 uppercase base36 chars
+		// split by two slashes (length 8), so `sudoreplay <id>` resolves it.
+		for _, seq := range []string{seq1, seq2} {
+			if len(seq) != 8 || seq[2] != '/' || seq[5] != '/' {
+				t.Errorf("expected seq in XX/XX/XX form, got %q", seq)
+			}
+			if strings.ToUpper(seq) != seq {
+				t.Errorf("expected uppercase base36 seq (matching C), got %q", seq)
+			}
+		}
+		// First two sequences are 1 and 2 -> "00/00/01" and "00/00/02".
+		if seq1 != "00/00/01" || seq2 != "00/00/02" {
+			t.Errorf("expected seq1=00/00/01 seq2=00/00/02, got %q and %q", seq1, seq2)
 		}
 	})
 
@@ -1013,7 +1024,7 @@ func TestNewSessionLogIDSiblingPrefixPath(t *testing.T) {
 	}
 	defer session.Close()
 
-	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "000001")
+	expectedPath := filepath.Join(siblingPrefixDir, "testuser", "00", "00", "01")
 	if session.sessionDir != expectedPath {
 		t.Fatalf("unexpected session dir: expected %q, got %q", expectedPath, session.sessionDir)
 	}
@@ -1620,4 +1631,277 @@ func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
 	if !strings.Contains(err.Error(), "path traversal") {
 		t.Fatalf("expected path traversal error, got: %v", err)
 	}
+}
+
+// TestStorageSessionCommitPoints verifies the commit_point handshake that lets a
+// stock sudo client complete its CLOSING state:
+//   - the cumulative clock is a single value summed across ALL streams plus
+//     winsize and suspend (not per-stream), and
+//   - ExitMessage returns a FINAL commit_point equal to that total.
+//
+// Without both, a real client stalls log_server_timeout (default 30s) at the end
+// of every multi-stream I/O session and warns "lost connection to log server".
+func TestStorageSessionCommitPoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+		IologFile:       "%{seq}",
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	session, err := NewSession(uuid.New(), createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(Accept) failed: %v", err)
+	}
+
+	// First I/O event always emits a commit point (zero-value lastCommitTime),
+	// and it must carry the GLOBAL cumulative value — here just the ttyout delay.
+	resp, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 100000000}, Data: []byte("out"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(ttyout) failed: %v", err)
+	}
+	if cp := resp.GetCommitPoint(); cp == nil {
+		t.Fatal("expected commit_point on first I/O event")
+	} else if cp.TvSec != 1 || cp.TvNsec != 100000000 {
+		t.Errorf("first commit_point = %d.%09d, want 1.100000000", cp.TvSec, cp.TvNsec)
+	}
+
+	// A second stream, plus winsize and suspend — all advance the SAME clock and
+	// (being within the throttle interval / non-I/O) emit no commit point.
+	for _, m := range []*pb.ClientMessage{
+		{Type: &pb.ClientMessage_StdinBuf{StdinBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvNsec: 200000000}, Data: []byte("in")}}},
+		{Type: &pb.ClientMessage_WinsizeEvent{WinsizeEvent: &pb.ChangeWindowSize{Delay: &pb.TimeSpec{TvNsec: 300000000}, Rows: 40, Cols: 100}}},
+		{Type: &pb.ClientMessage_SuspendEvent{SuspendEvent: &pb.CommandSuspend{Delay: &pb.TimeSpec{TvNsec: 400000000}, Signal: "TSTP"}}},
+	} {
+		if r, err := session.HandleClientMessage(m); err != nil {
+			t.Fatalf("HandleClientMessage(%T) failed: %v", m.Type, err)
+		} else if r != nil {
+			t.Errorf("expected no commit_point for %T, got %v", m.Type, r)
+		}
+	}
+
+	// Exit must return a FINAL commit_point equal to the sum of every delay:
+	// 1.1 + 0.2 + 0.3 + 0.4 = 2.0s exactly.
+	resp, err = session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+	})
+	if err != nil {
+		t.Fatalf("HandleClientMessage(Exit) failed: %v", err)
+	}
+	cp := resp.GetCommitPoint()
+	if cp == nil {
+		t.Fatal("expected FINAL commit_point on Exit; without it a stock client hangs in CLOSING")
+	}
+	if cp.TvSec != 2 || cp.TvNsec != 0 {
+		t.Errorf("final commit_point = %d.%09d, want 2.000000000 (sum of all stream/winsize/suspend delays)", cp.TvSec, cp.TvNsec)
+	}
+}
+
+// TestSeqFileFormat verifies the sequence counter is stored as C sudo's ASCII
+// base36 text (so a C sudo_logsrvd and this server can share an iolog tree),
+// that a C-written file is read correctly, and that a legacy binary counter is
+// migrated in place without resetting (which could collide session dirs).
+func TestSeqFileFormat(t *testing.T) {
+	cfg := &config.LocalStorageConfig{DirPermissions: 0o755, FilePermissions: 0o644}
+
+	t.Run("WritesAsciiBase36", func(t *testing.T) {
+		dir := t.TempDir()
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		// The returned %{seq} value is the XX/XX/XX hierarchy; the on-disk
+		// counter is the flat 6-char ASCII base36 form.
+		if seq != "00/00/01" {
+			t.Errorf("first seq = %q, want 00/00/01", seq)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "seq"))
+		if err != nil {
+			t.Fatalf("read seq file: %v", err)
+		}
+		if string(raw) != "000001\n" {
+			t.Errorf("seq file = %q, want %q (ASCII base36 + newline)", raw, "000001\n")
+		}
+	})
+
+	t.Run("ReadsCStyleAsciiFile", func(t *testing.T) {
+		dir := t.TempDir()
+		// C-style file at value 35 ("Z"); next should be 36 -> "000010".
+		if err := os.WriteFile(filepath.Join(dir, "seq"), []byte("00000Z\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		if seq != "00/00/10" {
+			t.Errorf("seq after 00000Z = %q, want 00/00/10", seq)
+		}
+	})
+
+	t.Run("MigratesLegacyBinaryWithoutReset", func(t *testing.T) {
+		dir := t.TempDir()
+		// Legacy 4-byte big-endian counter at value 5.
+		if err := os.WriteFile(filepath.Join(dir, "seq"), []byte{0, 0, 0, 5}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := getNextSeq(dir, cfg)
+		if err != nil {
+			t.Fatalf("getNextSeq: %v", err)
+		}
+		if seq != "00/00/06" {
+			t.Errorf("seq after legacy binary 5 = %q, want 00/00/06 (counter must not reset)", seq)
+		}
+		raw, _ := os.ReadFile(filepath.Join(dir, "seq"))
+		if string(raw) != "000006\n" {
+			t.Errorf("migrated seq file = %q, want %q (now ASCII)", raw, "000006\n")
+		}
+	})
+}
+
+// TestIologEscapeParity covers the C-compatibility escape behaviors:
+//   - %{runas_user}/%{runas_group} aliases expand to the run-as identity,
+//   - strftime-style %Y/%m/%d and %% are expanded over the path,
+//   - a '/' in a user-controlled value becomes '_' (not stripped).
+func TestIologEscapeParity(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        "%{LIVEDIR}/%{runas_user}/%{runas_group}",
+		IologFile:       "%Y-%m-%d/%{user}-%%end",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "a/b"}}, // slash -> "_"
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "rungroup", Value: &pb.InfoMessage_Strval{Strval: "wheel"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}
+
+	got, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	if err != nil {
+		t.Fatalf("buildSessionPath() failed: %v", err)
+	}
+
+	now := time.Now()
+	date := fmt.Sprintf("%04d-%02d-%02d", now.Year(), int(now.Month()), now.Day())
+	want := filepath.Join(tmpDir, "root", "wheel", date, "a_b-%end")
+	if got != want {
+		t.Errorf("buildSessionPath()\n got  %q\n want %q\n(runas_* aliases, strftime %%Y-%%m-%%d, %%%% -> %%, and '/' -> '_')", got, want)
+	}
+}
+
+// TestRestartResumeSeek verifies that a restart seeks to resume_point and
+// OVERWRITES the post-resume data (matching C's iolog_seekto) when the point
+// aligns, and falls back to append (preserving the old, never-fail behavior)
+// when it does not.
+func TestRestartResumeSeek(t *testing.T) {
+	newCfg := func(dir string) *config.LocalStorageConfig {
+		return &config.LocalStorageConfig{
+			LogDirectory:    dir,
+			IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+			IologFile:       "%{seq}",
+			DirPermissions:  0o755,
+			FilePermissions: 0o644,
+			PasswordFilter:  false,
+		}
+	}
+	// writeTtyout sends one ttyout buffer with a 1s delay (so each record adds
+	// exactly 1s to the elapsed clock and len(data) bytes to the ttyout file).
+	writeTtyout := func(t *testing.T, s *Session, data string) {
+		t.Helper()
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1}, Data: []byte(data),
+			}},
+		}); err != nil {
+			t.Fatalf("write %q: %v", data, err)
+		}
+	}
+	// seed creates a session, writes "AAAAA" (t=1s) then "BBBBB" (t=2s), and
+	// closes it WITHOUT finalizing (so the timing file stays writable). Returns
+	// the log_id and session dir.
+	seed := func(t *testing.T, cfg *config.LocalStorageConfig) (string, string) {
+		t.Helper()
+		s, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+		}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		writeTtyout(t, s, "AAAAA")
+		writeTtyout(t, s, "BBBBB")
+		if err := s.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		return s.logID, s.sessionDir
+	}
+
+	t.Run("AlignedResumePointOverwrites", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		logID, sessDir := seed(t, cfg)
+
+		// Resume at 1s — exactly after the first ttyout record. The second
+		// ("BBBBB") must be overwritten by the resumed data, not duplicated.
+		s2, err := NewRestartSession(&pb.RestartMessage{LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1}}, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession: %v", err)
+		}
+		writeTtyout(t, s2, "CCCCC")
+		if err := s2.Close(); err != nil {
+			t.Fatalf("close restart: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout: %v", err)
+		}
+		if string(got) != "AAAAACCCCC" {
+			t.Errorf("ttyout = %q, want %q (resume must overwrite the post-resume_point region)", got, "AAAAACCCCC")
+		}
+	})
+
+	t.Run("MisalignedResumePointFallsBackToAppend", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		logID, sessDir := seed(t, cfg)
+
+		// Resume at 1.5s — between record boundaries; cannot align, so the
+		// session must fall back to append (never fail) rather than seek.
+		s2, err := NewRestartSession(&pb.RestartMessage{LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1, TvNsec: 500000000}}, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession (misaligned should still succeed): %v", err)
+		}
+		writeTtyout(t, s2, "CCCCC")
+		if err := s2.Close(); err != nil {
+			t.Fatalf("close restart: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout: %v", err)
+		}
+		if string(got) != "AAAAABBBBBCCCCC" {
+			t.Errorf("ttyout = %q, want %q (misaligned resume must append, preserving prior data)", got, "AAAAABBBBBCCCCC")
+		}
+	})
 }

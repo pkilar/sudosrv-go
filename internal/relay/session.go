@@ -57,7 +57,11 @@ type Session struct {
 	logID            string
 	config           *config.RelayConfig
 	initialAcceptMsg *pb.AcceptMessage
-	fromClientChan   chan *pb.ClientMessage
+	// resume is true for a session created via NewRestartSession: it appends the
+	// resumed I/O to an existing cache file (which already begins with the
+	// original AcceptMessage) instead of writing a fresh AcceptMessage opener.
+	resume         bool
+	fromClientChan chan *pb.ClientMessage
 	// sendMu serializes Close against in-flight HandleClientMessage calls.
 	// HandleClientMessage holds RLock for its entire critical section
 	// (closed check + channel send); Close takes the exclusive Lock so it
@@ -65,14 +69,14 @@ type Session struct {
 	// flipping the closed flag and closing the channel. Without this,
 	// a sender that passed the closed check could still write to a buffer
 	// the writer goroutine has already abandoned, silently losing audit data.
-	sendMu    sync.RWMutex
-	closed    atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	sendMu          sync.RWMutex
+	closed          atomic.Bool // mutated under sendMu.Lock; read under sendMu.RLock
+	wg              sync.WaitGroup
+	closeOnce       sync.Once
 	cacheFileName   string
-	mu              sync.Mutex               // Protects cumulativeDelay and lastCommitTime
-	cumulativeDelay map[string]time.Duration // Tracks cumulative I/O delay per stream for commit points
-	lastCommitTime  time.Time                // When last commit point was sent to client
+	mu              sync.Mutex    // Protects cumulativeDelay and lastCommitTime
+	cumulativeDelay time.Duration // Single elapsed clock summed across all I/O, winsize, and suspend delays (mirrors C closure->elapsed_time)
+	lastCommitTime  time.Time     // When last commit point was sent to client
 	ctx             context.Context
 	cancel          context.CancelFunc
 	// onDone is invoked exactly once after the background runner exits — i.e.
@@ -131,7 +135,6 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		initialAcceptMsg: acceptMsg,
 		fromClientChan:   make(chan *pb.ClientMessage, 1000), // Buffered channel for client messages
 		cacheFileName:    cacheFileName,
-		cumulativeDelay:  make(map[string]time.Duration),
 		ctx:              ctx,
 		cancel:           cancel,
 		onDone:           onDone,
@@ -140,6 +143,62 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 
 	s.wg.Add(1)
 	go s.run() // Start the single, durable goroutine for this session.
+
+	return s, nil
+}
+
+// NewRestartSession resumes a relay session interrupted earlier on this server.
+//
+// Go's relay is store-and-forward: it caches a session to {uuid}.log and only
+// flushes upstream after the client's ExitMessage, so the client was handed a
+// LOCAL log_id (base64(uuid)) and the upstream never saw the original session.
+// C's relay forwards the RestartMessage upstream, which cannot work here because
+// the upstream has no log to resume. Instead we resume LOCALLY: decode the uuid
+// from the client's log_id, reopen that still-cached file, and append the
+// resumed I/O so the upstream eventually receives one continuous session
+// (Accept + original I/O + resumed I/O + Exit). The RestartMessage itself is
+// consumed here and not cached/forwarded.
+//
+// resume_point is advisory here: any I/O cached past it (cached but not yet
+// flushed, then re-sent by the client) is appended, so the overlap region can
+// be duplicated — the same narrow window that exists whenever a client resends
+// already-stored I/O. If the cache file is gone (already flushed upstream, or
+// an unknown log_id) the session cannot be resumed and an error is returned.
+func NewRestartSession(ctx context.Context, restartMsg *pb.RestartMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
+	decoded, err := base64.StdEncoding.DecodeString(restartMsg.GetLogId())
+	if err != nil || len(decoded) < 16 {
+		return nil, fmt.Errorf("relay restart: invalid log_id %q", restartMsg.GetLogId())
+	}
+	var sessionUUID uuid.UUID
+	copy(sessionUUID[:], decoded[:16])
+
+	cacheFileName := filepath.Join(cfg.RelayCacheDirectory, fmt.Sprintf("%s.log", sessionUUID.String()))
+	if info, statErr := os.Stat(cacheFileName); statErr != nil {
+		return nil, fmt.Errorf("relay restart: no cached session for log_id %s (cannot resume): %w", restartMsg.GetLogId(), statErr)
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("relay restart: cache path %s is a directory", cacheFileName)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	s := &Session{
+		logID:          restartMsg.GetLogId(),
+		config:         cfg,
+		resume:         true,
+		fromClientChan: make(chan *pb.ClientMessage, 1000),
+		cacheFileName:  cacheFileName,
+		ctx:            ctx,
+		cancel:         cancel,
+		onDone:         onDone,
+	}
+	// Restore the single elapsed clock from resume_point so the synthesized
+	// commit points continue from where the interrupted session left off.
+	if rp := restartMsg.GetResumePoint(); rp != nil {
+		s.cumulativeDelay = durationFromTimeSpec(rp)
+	}
+	s.phase.Store(&phaseWriting)
+
+	s.wg.Add(1)
+	go s.run()
 
 	return s, nil
 }
@@ -247,10 +306,15 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 		}
 	}()
 
-	// Write the essential AcceptMessage first to ensure the cache file is valid for flushing.
-	if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
-		slog.Error("Failed to write initial accept message to cache", "log_id", s.logID, "error", err)
-		return
+	// Write the essential AcceptMessage first to ensure the cache file is valid
+	// for flushing. On a resume (restart), the existing cache file already opens
+	// with the original AcceptMessage, so we append the resumed I/O directly and
+	// the upstream ultimately receives one continuous session.
+	if !s.resume {
+		if err := writeProtoMessage(file, &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: s.initialAcceptMsg}}); err != nil {
+			slog.Error("Failed to write initial accept message to cache", "log_id", s.logID, "error", err)
+			return
+		}
 	}
 
 	// Loop until the session context is cancelled (server shutdown), Close()
@@ -340,6 +404,54 @@ func extractIoDelay(msg *pb.ClientMessage) (string, *pb.TimeSpec) {
 	}
 }
 
+// messageDelay returns the delay of any event that advances sudo's elapsed-time
+// clock: the five I/O buffers plus winsize and suspend. Returns nil for messages
+// that carry no delay (Accept/Reject/Restart/Alert/Exit). Mirrors the set of
+// update_elapsed_time call sites in C sudo_logsrvd.
+func messageDelay(msg *pb.ClientMessage) *pb.TimeSpec {
+	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_TtyinBuf:
+		return event.TtyinBuf.GetDelay()
+	case *pb.ClientMessage_TtyoutBuf:
+		return event.TtyoutBuf.GetDelay()
+	case *pb.ClientMessage_StdinBuf:
+		return event.StdinBuf.GetDelay()
+	case *pb.ClientMessage_StdoutBuf:
+		return event.StdoutBuf.GetDelay()
+	case *pb.ClientMessage_StderrBuf:
+		return event.StderrBuf.GetDelay()
+	case *pb.ClientMessage_WinsizeEvent:
+		return event.WinsizeEvent.GetDelay()
+	case *pb.ClientMessage_SuspendEvent:
+		return event.SuspendEvent.GetDelay()
+	default:
+		return nil
+	}
+}
+
+// isExitMessage reports whether msg is an ExitMessage.
+func isExitMessage(msg *pb.ClientMessage) bool {
+	_, ok := msg.Type.(*pb.ClientMessage_ExitMsg)
+	return ok
+}
+
+// durationFromTimeSpec converts a protobuf TimeSpec into a time.Duration.
+func durationFromTimeSpec(ts *pb.TimeSpec) time.Duration {
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())*time.Nanosecond
+}
+
+// commitPointMsg builds a commit_point ServerMessage carrying the cumulative
+// elapsed time d. Integer second/nanosecond split matches C's encoding and the
+// value the client compares against its own global elapsed time.
+func commitPointMsg(d time.Duration) *pb.ServerMessage {
+	return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
+		CommitPoint: &pb.TimeSpec{
+			TvSec:  int64(d / time.Second),
+			TvNsec: int32(d % time.Second),
+		},
+	}}
+}
+
 // LogID returns the base64-encoded sudo log_id assigned when the relay session
 // was created. It is stable for the lifetime of the session.
 func (s *Session) LogID() string { return s.logID }
@@ -396,28 +508,36 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 		return nil, fmt.Errorf("relay session cancelled")
 	}
 
-	// Generate local commit points for relay clients on I/O events,
-	// throttled to commitPointInterval matching C sudo_logsrvd behavior.
-	// Lock protects cumulativeDelay and lastCommitTime which are also
-	// read by the run() goroutine's context (indirectly via Close/wg.Wait).
-	if streamName, delay := extractIoDelay(msg); streamName != "" {
+	// Generate local commit points for the downstream client so it can complete
+	// its CLOSING handshake without waiting on the (asynchronously flushed)
+	// upstream. The cumulative clock is advanced by EVERY delay-bearing event
+	// (I/O, winsize, suspend) — one counter, mirroring C's closure->elapsed_time —
+	// because the client compares the final commit_point against its own global
+	// elapsed time. Lock protects cumulativeDelay and lastCommitTime which are
+	// also read by the run() goroutine's context (indirectly via Close/wg.Wait).
+	streamName, _ := extractIoDelay(msg)
+	if delay := messageDelay(msg); delay != nil {
 		s.mu.Lock()
-		if delay != nil {
-			delayDur := time.Duration(delay.TvSec)*time.Second + time.Duration(delay.TvNsec)*time.Nanosecond
-			s.cumulativeDelay[streamName] += delayDur
-		}
-		if time.Since(s.lastCommitTime) >= commitPointInterval {
+		s.cumulativeDelay += durationFromTimeSpec(delay)
+		// Throttled periodic commit on I/O events (matches C's ACK_FREQUENCY).
+		// winsize/suspend advance the clock but do not themselves emit a commit.
+		if streamName != "" && time.Since(s.lastCommitTime) >= commitPointInterval {
 			s.lastCommitTime = time.Now()
-			commitPoint := s.cumulativeDelay[streamName]
+			cp := s.cumulativeDelay
 			s.mu.Unlock()
-			return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{
-				CommitPoint: &pb.TimeSpec{
-					TvSec:  int64(commitPoint / time.Second),
-					TvNsec: int32(commitPoint % time.Second),
-				},
-			}}, nil
+			return commitPointMsg(cp), nil
 		}
 		s.mu.Unlock()
+	}
+
+	// Unconditional FINAL commit on Exit (matches C handle_exit). Exit carries no
+	// delay so it is handled outside the accumulation block above; without this
+	// the stock client stalls in CLOSING until log_server_timeout (default 30s).
+	if isExitMessage(msg) {
+		s.mu.Lock()
+		cp := s.cumulativeDelay
+		s.mu.Unlock()
+		return commitPointMsg(cp), nil
 	}
 
 	return nil, nil
@@ -661,7 +781,11 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 
 	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
 	if cfg.UseTLS {
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: tls.VersionTLS13}
+		minVer, verErr := config.TLSVersion(cfg.TLSMinVersion)
+		if verErr != nil {
+			return nil, fmt.Errorf("invalid relay tls_min_version: %w", verErr)
+		}
+		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: minVer}
 		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
 		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
 	} else {

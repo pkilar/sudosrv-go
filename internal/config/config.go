@@ -3,6 +3,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,21 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// TLSVersion maps a "1.2"/"1.3" config string to the crypto/tls version
+// constant. An empty string defaults to TLS 1.3 (the secure default), so
+// manually-constructed configs that omit the field still resolve. Any other
+// value is rejected so a typo cannot silently weaken the floor.
+func TLSVersion(s string) (uint16, error) {
+	switch s {
+	case "", "1.3":
+		return tls.VersionTLS13, nil
+	case "1.2":
+		return tls.VersionTLS12, nil
+	default:
+		return 0, fmt.Errorf("unsupported tls_min_version %q (supported: \"1.2\", \"1.3\")", s)
+	}
+}
 
 // Config holds the application's configuration.
 type Config struct {
@@ -28,6 +44,7 @@ type ServerConfig struct {
 	ListenAddressTLS          string        `yaml:"listen_address_tls"`
 	TLSCertFile               string        `yaml:"tls_cert_file"`
 	TLSKeyFile                string        `yaml:"tls_key_file"`
+	TLSMinVersion             string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
 	ServerID                  string        `yaml:"server_id"`
 	IdleTimeout               time.Duration `yaml:"idle_timeout"`
 	MaxConnections            int           `yaml:"max_connections"`              // 0 disables the cap
@@ -39,6 +56,7 @@ type RelayConfig struct {
 	UpstreamHost         string        `yaml:"upstream_host"`
 	UseTLS               bool          `yaml:"use_tls"`
 	TLSSkipVerify        bool          `yaml:"tls_skip_verify"`
+	TLSMinVersion        string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
 	ConnectTimeout       time.Duration `yaml:"connect_timeout"`
 	RelayCacheDirectory  string        `yaml:"relay_cache_directory"`
 	ReconnectAttempts    int           `yaml:"reconnect_attempts"`
@@ -116,6 +134,7 @@ func defaultConfig() *Config {
 			ServerID:                  "GoSudoLogSrv/1.0",
 			IdleTimeout:               10 * time.Minute,
 			MaxConnections:            10000,
+			TLSMinVersion:             "1.3",  // Secure default; "1.2" available for legacy clients
 			ServerOperationalLogLevel: "info", // Default log level
 		},
 		Relay: RelayConfig{
@@ -124,6 +143,7 @@ func defaultConfig() *Config {
 			ReconnectAttempts:    -1, // Default to trying forever
 			MaxReconnectInterval: 1 * time.Minute,
 			TLSSkipVerify:        false, // Default to secure TLS verification
+			TLSMinVersion:        "1.3", // Secure default; "1.2" available for legacy upstreams
 		},
 		LocalStorage: LocalStorageConfig{
 			LogDirectory:    "/var/log/gosudo-io",
@@ -152,11 +172,23 @@ func unmarshalConfig(data []byte, config *Config) error {
 // applyZeroValueDefaults restores default values for fields that yaml.Unmarshal
 // may have zeroed when a section was partially specified.
 func applyZeroValueDefaults(cfg *Config) {
+	// idle_timeout: a zero value (the field omitted, or "0s") is treated as
+	// "use the default" and restored to 10m, guarding a partially specified
+	// server section from accidentally zeroing it. A NEGATIVE value (e.g.
+	// "idle_timeout: -1s") is preserved and means "no read timeout", matching
+	// the reference C sudo_logsrvd, which never disconnects an idle client; the
+	// connection handler skips arming a read deadline when IdleTimeout <= 0.
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 10 * time.Minute
 	}
 	if cfg.Server.MaxConnections < 0 {
 		cfg.Server.MaxConnections = 0
+	}
+	if cfg.Server.TLSMinVersion == "" {
+		cfg.Server.TLSMinVersion = "1.3"
+	}
+	if cfg.Relay.TLSMinVersion == "" {
+		cfg.Relay.TLSMinVersion = "1.3"
 	}
 	if cfg.LocalStorage.DirPermissions == 0 {
 		cfg.LocalStorage.DirPermissions = 0750
@@ -192,6 +224,12 @@ func Validate(cfg *Config) error {
 		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
 			return fmt.Errorf("TLS certificate and key files must be specified for TLS listener")
 		}
+	}
+	if _, err := TLSVersion(cfg.Server.TLSMinVersion); err != nil {
+		return fmt.Errorf("server.%w", err)
+	}
+	if _, err := TLSVersion(cfg.Relay.TLSMinVersion); err != nil {
+		return fmt.Errorf("relay.%w", err)
 	}
 	if cfg.Server.Mode == "relay" {
 		if cfg.Relay.UpstreamHost == "" {

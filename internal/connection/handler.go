@@ -46,6 +46,7 @@ type Handler struct {
 		newLocalEventSession   func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
 		newRelaySession        func(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig) (SessionHandler, error)
 		newLocalRestartSession func(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (SessionHandler, error)
+		newRelayRestartSession func(restartMsg *pb.RestartMessage, cfg *config.RelayConfig) (SessionHandler, error)
 	}
 }
 
@@ -138,6 +139,19 @@ func NewHandlerWithContext(ctx context.Context, conn net.Conn, cfg *config.Confi
 	h.sessionFactories.newLocalRestartSession = func(restartMsg *pb.RestartMessage, localCfg *config.LocalStorageConfig) (SessionHandler, error) {
 		return storage.NewRestartSession(restartMsg, localCfg)
 	}
+	h.sessionFactories.newRelayRestartSession = func(restartMsg *pb.RestartMessage, relayCfg *config.RelayConfig) (SessionHandler, error) {
+		// Like newRelaySession, the relay restart session self-deregisters when
+		// its background flusher exits. The registry key is the restart log_id,
+		// matching registerRestartSession's h.sessionID.
+		logID := restartMsg.GetLogId()
+		onDone := func() {
+			if h.registry != nil {
+				h.registry.Deregister(logID)
+			}
+			metrics.Global.DecrementActiveSessions()
+		}
+		return relay.NewRestartSession(h.ctx, restartMsg, relayCfg, onDone)
+	}
 	return h
 }
 
@@ -180,9 +194,16 @@ func (h *Handler) Handle() {
 		default:
 		}
 
-		if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
-			slog.Error("Failed to set read deadline", "error", err)
-			return
+		// Arm a per-message idle read deadline. A non-positive IdleTimeout means
+		// "no read timeout", matching the reference C sudo_logsrvd, which adds its
+		// steady-state read event with a NULL timeout so an idle-but-alive client
+		// (e.g. an interactive shell left at a prompt) is never disconnected for
+		// inactivity. Operators opt into that parity with idle_timeout: -1s.
+		if h.config.Server.IdleTimeout > 0 {
+			if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
+				slog.Error("Failed to set read deadline", "error", err)
+				return
+			}
 		}
 
 		clientMsg, err := h.processor.ReadClientMessage()
@@ -198,13 +219,13 @@ func (h *Handler) Handle() {
 			}
 		}
 
-		// Apply rate limiting to prevent memory exhaustion.
-		// All writes below use h.ctx so a stalled client can't pin the handler
-		// past shutdown — see Server.Wait's bounded grace period.
-		if !h.checkRateLimit() {
-			slog.Warn("Rate limit exceeded, closing connection", "remote_addr", h.conn.RemoteAddr())
-			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Rate limit exceeded"}}
-			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
+		// Apply rate limiting as back-pressure: this blocks until a token is
+		// available rather than closing the connection, so a legitimate
+		// high-throughput session is throttled, not severed. It returns early
+		// only on context cancellation (shutdown), so a stalled client can't pin
+		// the handler past shutdown — see Server.Wait's bounded grace period.
+		if err := h.waitForRateToken(h.ctx); err != nil {
+			slog.Debug("Connection handler stopping while rate-limited", "remote_addr", h.conn.RemoteAddr(), "error", err)
 			return
 		}
 
@@ -326,7 +347,7 @@ func (h *Handler) registerSession(sessionUUID uuid.UUID, mode string, acceptMsg 
 // registerRestartSession is the restart-path equivalent of registerSession.
 // Restart sessions resume an existing log, so the base64 log_id is provided
 // up-front by the client and used as the registry key directly.
-func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
+func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage, mode string) {
 	if h.registry == nil || h.session == nil {
 		return
 	}
@@ -334,7 +355,7 @@ func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
 	info := sessions.SessionInfo{
 		SessionID:   h.sessionID,
 		ServerLogID: restartMsg.GetLogId(),
-		Mode:        "local",
+		Mode:        mode,
 		RemoteAddr:  h.conn.RemoteAddr().String(),
 		StartedAt:   h.startedAt,
 		Info:        map[string]any{"event_type": "restart"},
@@ -346,6 +367,12 @@ func (h *Handler) registerRestartSession(restartMsg *pb.RestartMessage) {
 		info.Provider = p
 	}
 	h.registry.Register(info)
+	// Same race guard as registerSession: a self-deregistering (relay) session
+	// whose runner finished before we registered would have had its onDone
+	// Deregister no-op; detect that and remove our just-added entry.
+	if d, ok := h.session.(doneNotifier); ok && d.IsDone() {
+		h.registry.Deregister(h.sessionID)
+	}
 }
 
 // refreshLogIDFromSession overwrites h.logID with the session's authoritative
@@ -369,29 +396,56 @@ func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	return &pb.ServerMessage{Type: &pb.ServerMessage_Hello{Hello: helloResponse}}, nil
 }
 
-// checkRateLimit implements token-bucket rate limiting to prevent memory
-// exhaustion attacks. Each connection is refilled at rateRefillPerSec tokens/sec
-// up to rateBurst; each processed message consumes one token. Unlike a simple
-// windowed counter, this correctly smooths bursts that straddle second boundaries.
-func (h *Handler) checkRateLimit() bool {
-	h.rateLimitMutex.Lock()
-	defer h.rateLimitMutex.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(h.rateLastRefill).Seconds()
-	if elapsed > 0 {
-		h.rateTokens += elapsed * rateRefillPerSec
-		if h.rateTokens > rateBurst {
-			h.rateTokens = rateBurst
+// waitForRateToken implements token-bucket rate limiting to bound the rate at
+// which a single connection's messages are processed. Each connection is
+// refilled at rateRefillPerSec tokens/sec up to rateBurst; each processed
+// message consumes one token. The token-bucket smooths bursts that straddle
+// second boundaries.
+//
+// When the bucket is empty this BLOCKS until the next token refills (returning
+// only on context cancellation) rather than terminating the connection. This is
+// deliberate: the reference C sudo_logsrvd imposes no application-level rate
+// limit, and a legitimate high-throughput session (a verbose build, `yes`, a
+// large `cat`) routinely emits hundreds of ttyout buffers in a sub-second burst.
+// Closing the connection on excess would truncate such a session and make the
+// stock client report a fatal log error. Blocking instead applies back-pressure:
+// the handler stops reading, TCP flow control slows the client, and no audit
+// data is lost. Memory stays bounded because at most one message is held in
+// flight while we wait.
+func (h *Handler) waitForRateToken(ctx context.Context) error {
+	for {
+		h.rateLimitMutex.Lock()
+		now := time.Now()
+		elapsed := now.Sub(h.rateLastRefill).Seconds()
+		if elapsed > 0 {
+			h.rateTokens += elapsed * rateRefillPerSec
+			if h.rateTokens > rateBurst {
+				h.rateTokens = rateBurst
+			}
+			h.rateLastRefill = now
 		}
-		h.rateLastRefill = now
-	}
+		if h.rateTokens >= 1 {
+			h.rateTokens--
+			h.rateLimitMutex.Unlock()
+			return nil
+		}
+		// Bucket empty: compute how long until one token refills, then sleep
+		// (without holding the mutex) before re-checking. The deficit is < 1
+		// token, so the wait is at most 1/rateRefillPerSec seconds.
+		wait := time.Duration((1 - h.rateTokens) / rateRefillPerSec * float64(time.Second))
+		h.rateLimitMutex.Unlock()
+		if wait <= 0 {
+			wait = time.Millisecond // floor to avoid a busy spin on rounding
+		}
 
-	if h.rateTokens < 1 {
-		return false
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
 	}
-	h.rateTokens--
-	return true
 }
 
 // applyRuncwdFallback implements the three-tier fallback logic for runcwd as per sudo logging.c:1008-1014.
@@ -518,25 +572,45 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 
 // handleRestart resumes an existing session from a RestartMessage.
 func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessage, error) {
-	if h.config.Server.Mode != "local" {
+	switch h.config.Server.Mode {
+	case "local":
+		session, err := h.sessionFactories.newLocalRestartSession(restartMsg, &h.config.LocalStorage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create restart session: %w", err)
+		}
+		h.session = session
+		h.logID = restartMsg.GetLogId()
+		h.registerRestartSession(restartMsg, "local")
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementLocalSessions()
+		slog.Info("Resumed local storage session via restart",
+			"log_id", h.logID, "total_sessions", metrics.Global.GetTotalSessions())
+		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: restartMsg.GetLogId()}}, nil
+
+	case "relay":
+		// Resume locally by appending to the still-cached session (see
+		// relay.NewRestartSession). Go's batch relay cannot forward the restart
+		// upstream the way C does, because the upstream never saw the original
+		// session and the client holds a relay-local log_id.
+		session, err := h.sessionFactories.newRelayRestartSession(restartMsg, &h.config.Relay)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resume relay session: %w", err)
+		}
+		h.session = session
+		h.logID = restartMsg.GetLogId()
+		h.registerRestartSession(restartMsg, "relay")
+		metrics.Global.IncrementSessions()
+		metrics.Global.IncrementRelaySessions()
+		slog.Info("Resumed relay session via restart",
+			"log_id", h.logID, "upstream", h.config.Relay.UpstreamHost,
+			"total_sessions", metrics.Global.GetTotalSessions())
+		// The client transitions straight to SEND_IO after a RestartMessage and
+		// does not await a reply, so we send none (avoiding an extra log_id msg).
+		return nil, nil
+
+	default:
 		return nil, fmt.Errorf("restart not supported in %s mode", h.config.Server.Mode)
 	}
-
-	session, err := h.sessionFactories.newLocalRestartSession(restartMsg, &h.config.LocalStorage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create restart session: %w", err)
-	}
-
-	h.session = session
-	h.logID = restartMsg.GetLogId()
-	h.registerRestartSession(restartMsg)
-	metrics.Global.IncrementSessions()
-	metrics.Global.IncrementLocalSessions()
-	slog.Info("Resumed local storage session via restart",
-		"log_id", h.logID,
-		"total_sessions", metrics.Global.GetTotalSessions())
-
-	return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: restartMsg.GetLogId()}}, nil
 }
 
 // handleAccept sets up a session for an accepted command.
