@@ -221,8 +221,16 @@ func initializeRelayMode(cfg *config.Config) error {
 			"upstream_host", cfg.Relay.UpstreamHost)
 	}
 
-	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0750); err != nil {
+	// 0700 matches relay.NewSession: cache files carry raw sudo I/O (keystrokes,
+	// sometimes passwords — the storage password filter does not apply to the
+	// relay cache writer), so group/other must not even traverse the directory.
+	// MkdirAll does not chmod a pre-existing directory, so enforce the mode
+	// explicitly to repair directories created by older releases (0750).
+	if err := os.MkdirAll(cfg.Relay.RelayCacheDirectory, 0700); err != nil {
 		return fmt.Errorf("failed to create relay cache directory: %w", err)
+	}
+	if err := os.Chmod(cfg.Relay.RelayCacheDirectory, 0700); err != nil {
+		return fmt.Errorf("failed to tighten relay cache directory permissions: %w", err)
 	}
 
 	return nil

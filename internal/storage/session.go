@@ -142,6 +142,25 @@ func sanitizePathComponent(s string) string {
 	return strings.ReplaceAll(s, "/", "_")
 }
 
+// sanitizeLogSummaryField makes a client-supplied value safe for the plaintext
+// `log` summary file, whose first line is colon-delimited and whose records are
+// newline-delimited. Control characters (including CR/LF) are replaced with '?'
+// so a hostile client cannot split a record or forge additional ones, and ':'
+// is replaced with '_' in colon-delimited fields so field boundaries cannot be
+// shifted. log.json is unaffected — JSON encoding already escapes these.
+func sanitizeLogSummaryField(s string, colonDelimited bool) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case colonDelimited && r == ':':
+			return '_'
+		case r < 0x20 || r == 0x7f:
+			return '?'
+		default:
+			return r
+		}
+	}, s)
+}
+
 // strftimeExpand expands C strftime-style "%X" date/time escapes against t,
 // matching the strftime pass C sudo applies to an iolog path after %{...}
 // expansion (lib/iolog/iolog_path.c). "%%" collapses to a literal "%". Only the
@@ -963,14 +982,14 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	logSummaryPath := filepath.Join(s.sessionDir, "log")
 	summaryLine := fmt.Sprintf("%d:%s:%s:%s:%s:%s:%s\n%s\n%s\n",
 		submitTime.Unix(),
-		infoMap["submituser"],
-		infoMap["runuser"],
-		infoMap["rungroup"],
-		infoMap["ttyname"],
-		infoMap["lines"],
-		infoMap["columns"],
-		infoMap["submitcwd"],
-		infoMap["command"],
+		sanitizeLogSummaryField(infoMap["submituser"], true),
+		sanitizeLogSummaryField(infoMap["runuser"], true),
+		sanitizeLogSummaryField(infoMap["rungroup"], true),
+		sanitizeLogSummaryField(infoMap["ttyname"], true),
+		sanitizeLogSummaryField(infoMap["lines"], true),
+		sanitizeLogSummaryField(infoMap["columns"], true),
+		sanitizeLogSummaryField(infoMap["submitcwd"], false),
+		sanitizeLogSummaryField(infoMap["command"], false),
 	)
 	if err := writeNewFile(logSummaryPath, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
