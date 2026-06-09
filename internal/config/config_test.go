@@ -743,3 +743,25 @@ func TestTLSMinVersionConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestIsLoopbackListenAddress(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:8888", true},
+		{"localhost:8888", true},
+		{"[::1]:8888", true},
+		{"0.0.0.0:8888", false},
+		{"[::]:8888", false},
+		{":8888", false},
+		{"10.0.0.5:8888", false},
+		{"example.com:8888", false},
+		{"not-an-address", false},
+	}
+	for _, tt := range tests {
+		if got := isLoopbackListenAddress(tt.addr); got != tt.want {
+			t.Errorf("isLoopbackListenAddress(%q) = %v, want %v", tt.addr, got, tt.want)
+		}
+	}
+}

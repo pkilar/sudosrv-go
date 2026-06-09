@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,8 +255,35 @@ func Validate(cfg *Config) error {
 		if err := validateAuthTokenFile(cfg.API.AuthTokenFile); err != nil {
 			return err
 		}
+		// Plaintext HTTP is acceptable only for loopback deployments: every
+		// request carries the static bearer token, so serving it on a routable
+		// interface without TLS exposes the credential to the network. Warn
+		// rather than refuse so existing trusted-network deployments keep
+		// working, but make the exposure unmissable in the startup log.
+		if cfg.API.TLSCertFile == "" && !isLoopbackListenAddress(cfg.API.ListenAddress) {
+			slog.Warn("INSECURE: api.listen_address is not loopback and api TLS is not configured — "+
+				"the bearer token will traverse the network in cleartext. "+
+				"Configure api.tls_cert_file/api.tls_key_file or bind to 127.0.0.1.",
+				"listen_address", cfg.API.ListenAddress)
+		}
 	}
 	return nil
+}
+
+// isLoopbackListenAddress reports whether a listen address string is bound to
+// a loopback interface. An empty host (":8080"), a wildcard address, or an
+// unparsable host is treated as NOT loopback, so the caller errs on the side
+// of warning.
+func isLoopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // validateAuthTokenFile enforces the security preconditions documented for the

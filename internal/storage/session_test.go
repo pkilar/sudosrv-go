@@ -1905,3 +1905,78 @@ func TestRestartResumeSeek(t *testing.T) {
 		}
 	})
 }
+
+func TestSanitizeLogSummaryField(t *testing.T) {
+	tests := []struct {
+		name           string
+		in             string
+		colonDelimited bool
+		want           string
+	}{
+		{"CleanPassthrough", "alice", true, "alice"},
+		{"ColonReplacedWhenDelimited", "evil:root", true, "evil_root"},
+		{"ColonKeptWhenNotDelimited", "/usr/bin/foo:bar", false, "/usr/bin/foo:bar"},
+		{"NewlineReplaced", "user\nroot:root:tty:1:1\nforged", true, "user?root_root_tty_1_1?forged"},
+		{"CarriageReturnAndDELReplaced", "a\rb\x7fc", false, "a?b?c"},
+		{"TabAndEscapeReplaced", "a\tb\x1b[2Jc", false, "a?b?[2Jc"},
+		{"UTF8Preserved", "пароль密码", true, "пароль密码"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeLogSummaryField(tt.in, tt.colonDelimited); got != tt.want {
+				t.Errorf("sanitizeLogSummaryField(%q, %v) = %q, want %q", tt.in, tt.colonDelimited, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLogSummaryFileInjection verifies end-to-end that a hostile client cannot
+// split or forge records in the plaintext `log` summary file via control
+// characters or colons embedded in AcceptMessage info fields.
+func TestLogSummaryFileInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+	}
+
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: 1700000000},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "alice\nroot:root:root:tty9:1:1"}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "host"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root:extra"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/evil\n/bin/innocent"}},
+		},
+	}
+
+	sessionUUID := uuid.New()
+	session, err := NewSession(sessionUUID, acceptMsg, cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptMsg}}); err != nil {
+		t.Fatalf("HandleClientMessage(Accept): %v", err)
+	}
+	defer session.Close()
+
+	data, err := os.ReadFile(filepath.Join(session.sessionDir, "log"))
+	if err != nil {
+		t.Fatalf("read log summary: %v", err)
+	}
+	content := string(data)
+
+	// The format is exactly 3 lines: header, cwd, command. Injected newlines
+	// must not add more.
+	if lines := strings.Split(strings.TrimRight(content, "\n"), "\n"); len(lines) != 3 {
+		t.Errorf("log summary has %d lines, want 3 (newline injection not neutralized):\n%s", len(lines), content)
+	}
+	if strings.Contains(content, "root:root:root") {
+		t.Errorf("forged colon-delimited fields survived sanitization:\n%s", content)
+	}
+	if strings.Contains(content, "\n/bin/innocent") {
+		t.Errorf("newline in command field survived sanitization:\n%s", content)
+	}
+}
