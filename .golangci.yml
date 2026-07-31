@@ -27,8 +27,14 @@ linters:
         # G115 — int→uint32/int32 conversions are length-prefix and timestamp
         # encodings bounded by upstream protocol/syscall semantics.
         - G115
-        # G304 — file paths are derived from config-driven sudoers escape
-        # sequences with explicit sanitisation (containsDotDot, sanitizePathComponent).
+        # G304 — three variable-path opens remain: the config file
+        # (config/config.go), the relay cache file (relay/session.go, named from
+        # a server-generated UUID), and the iolog sequence file
+        # (storage/session.go). Per-session I/O is no longer among them — it
+        # resolves through an os.Root pinned to the session directory, so the
+        # path is never re-walked. The session path itself is still built from
+        # sudoers escape sequences under explicit sanitisation
+        # (containsDotDot, sanitizePathComponent).
         - G304
         # G302 — timing files are deliberately written 0440 (read-only after
         # session close) to match C sudo_logsrvd behaviour for sudoreplay.

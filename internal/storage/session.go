@@ -51,10 +51,12 @@ type Session struct {
 	sessionUUID uuid.UUID
 	config      *config.LocalStorageConfig
 	sessionDir  string
+	// root pins sessionDir; all session file I/O is resolved relative to it.
+	// Closed by Close() after every file handle inside it. See openSessionRoot.
+	root        *os.Root
 	files       map[string]*os.File
 	gzipWriters map[string]*gzip.Writer // Gzip writers for compressed streams
 	timingFile  *os.File
-	logJSONPath string // path to log.json; writes go through writeFileAtomic
 	// cumulativeDelay is a SINGLE counter summed across every I/O, winsize, and
 	// suspend delay — mirroring C sudo_logsrvd's one closure->elapsed_time. Every
 	// commit_point (periodic and the final one on Exit) reports this value, which
@@ -132,6 +134,41 @@ var seqMutexMap = make(map[string]*sync.Mutex)
 var seqMutexMapLock sync.RWMutex
 
 const alphanumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// Fixed file names inside a session directory. Every session file operation
+// goes through Session.root / EventSession.root, so these are single-component
+// names resolved relative to that root — never joined into a full path.
+const (
+	fileUUID    = "uuid"
+	fileLog     = "log"
+	fileLogJSON = "log.json"
+	fileTiming  = "timing"
+	// tmp sibling used for the atomic log.json replace.
+	fileLogJSONTmp = fileLogJSON + ".tmp"
+)
+
+// openSessionRoot pins dir as an os.Root. Every file operation in the session
+// resolves relative to the returned directory descriptor, which supplies two
+// guarantees the session's on-disk integrity depends on:
+//
+//   - Symlinks are refused at every path component, so a symlink pre-planted
+//     inside a predictable session directory cannot redirect a write.
+//   - Resolution is bound to the descriptor, not to the path string. Renaming or
+//     swapping any component of dir after the root is open cannot redirect a
+//     later write, closing the TOCTOU window between creating the session
+//     directory and opening the files inside it.
+//
+// A symlinked directory ABOVE dir is not covered: os.OpenRoot resolves the root
+// path itself, and the os.MkdirAll that creates dir is a plain path-based call.
+//
+// On Linux the kernel enforces this via openat2(RESOLVE_BENEATH).
+func openSessionRoot(dir string) (*os.Root, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pin session directory %s: %w", dir, err)
+	}
+	return root, nil
+}
 
 // sanitizePathComponent replaces forward slashes in user-controlled path values
 // with underscores, preventing path traversal via escape-sequence expansion
@@ -233,13 +270,12 @@ func strftimeExpand(s string, t time.Time) string {
 	return b.String()
 }
 
-// writeNewFile is a symlink- and clobber-safe replacement for os.WriteFile used
-// for files that a session creates from scratch. O_EXCL refuses pre-existing
-// files and O_NOFOLLOW refuses to follow a symlink at the final path component,
-// blocking the classic symlink-redirect attack when sessionDir contains
-// attacker-controlled escape substitutions.
-func writeNewFile(path string, data []byte, perm os.FileMode) (err error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, perm)
+// writeNewFileAt is a clobber-safe replacement for os.WriteFile used for files
+// that a session creates from scratch. O_EXCL refuses pre-existing files;
+// symlink safety comes from root, which refuses to traverse a symlink at any
+// component (see openSessionRoot).
+func writeNewFileAt(root *os.Root, name string, data []byte, perm os.FileMode) (err error) {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
@@ -318,12 +354,17 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
 		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
 	}
+	root, err := openSessionRoot(sessionDir)
+	if err != nil {
+		return nil, err
+	}
 
 	session := &Session{
 		logID:       logID,
 		sessionUUID: sessionUUID,
 		config:      cfg,
 		sessionDir:  sessionDir,
+		root:        root,
 		files:       make(map[string]*os.File),
 		gzipWriters: make(map[string]*gzip.Writer),
 		logMeta:     make(map[string]any),
@@ -342,12 +383,13 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 // commands still need an audit record and final exit status, but they should not
 // create sudoreplay stream/timing files.
 type EventSession struct {
-	logID       string
-	config      *config.LocalStorageConfig
-	sessionDir  string
-	logJSONPath string
-	logMeta     map[string]any
-	closeOnce   sync.Once
+	logID      string
+	config     *config.LocalStorageConfig
+	sessionDir string
+	// root pins sessionDir; see Session.root and openSessionRoot.
+	root      *os.Root
+	logMeta   map[string]any
+	closeOnce sync.Once
 	// Live stats exposed to the management API. Same eventual-consistency
 	// contract as Session: each counter is an independent atomic and an API
 	// reader may observe an incoherent triple. Do not use for correctness.
@@ -361,7 +403,7 @@ var _ sessions.MetadataProvider = (*EventSession)(nil)
 
 // NewEventSession creates a local metadata-only session for an accepted command
 // where ExpectIobufs is false.
-func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (*EventSession, error) {
+func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.LocalStorageConfig) (_ *EventSession, retErr error) {
 	sessionDir, err := buildSessionPath(sessionUUID, cfg, acceptMsg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build event session path: %w", err)
@@ -372,13 +414,24 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
 		return nil, fmt.Errorf("failed to create event session directory %s: %w", sessionDir, err)
 	}
+	root, err := openSessionRoot(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	// The caller only gets a session it can Close() on the success path, so any
+	// failure below has to release the root descriptor here.
+	defer func() {
+		if retErr != nil {
+			_ = root.Close() // constructor failed; retErr is what the caller needs
+		}
+	}()
 
 	event := &EventSession{
-		logID:       logID,
-		config:      cfg,
-		sessionDir:  sessionDir,
-		logJSONPath: filepath.Join(sessionDir, "log.json"),
-		logMeta:     make(map[string]any),
+		logID:      logID,
+		config:     cfg,
+		sessionDir: sessionDir,
+		root:       root,
+		logMeta:    make(map[string]any),
 	}
 	maps.Copy(event.logMeta, protocol.InfoMsgsToMap(acceptMsg.GetInfoMsgs()))
 	event.logMeta["event_type"] = "accept"
@@ -390,8 +443,7 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	event.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
-	uuidPath := filepath.Join(sessionDir, "uuid")
-	if err := writeNewFile(uuidPath, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
+	if err := writeNewFileAt(root, fileUUID, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
 		return nil, fmt.Errorf("failed to write event uuid file: %w", err)
 	}
 	if err := event.updateLogJSON(); err != nil {
@@ -470,6 +522,9 @@ func (s *EventSession) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMes
 
 func (s *EventSession) Close() error {
 	s.closeOnce.Do(func() {
+		if err := s.root.Close(); err != nil {
+			slog.Error("Failed to close event session directory handle", "log_id", s.logID, "error", err)
+		}
 		slog.Info("Closed local event-only session", "log_id", s.logID)
 	})
 	return nil
@@ -512,14 +567,13 @@ func (s *EventSession) updateLogJSON() (err error) {
 	}
 	data = append(data, '\n')
 
-	tmpPath := s.logJSONPath + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return fmt.Errorf("failed to open event log.json tempfile: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			os.Remove(tmpPath)
+			_ = s.root.Remove(fileLogJSONTmp) // best-effort cleanup on failure
 		}
 	}()
 
@@ -534,7 +588,7 @@ func (s *EventSession) updateLogJSON() (err error) {
 	if err = f.Close(); err != nil {
 		return fmt.Errorf("failed to close event log.json tempfile: %w", err)
 	}
-	if err = os.Rename(tmpPath, s.logJSONPath); err != nil {
+	if err = s.root.Rename(fileLogJSONTmp, fileLogJSON); err != nil {
 		return fmt.Errorf("failed to rename event log.json tempfile into place: %w", err)
 	}
 	return nil
@@ -689,8 +743,8 @@ func mergePreservingExisting(dst, src map[string]any) {
 // handle scoped to this helper prevents the double-close hazard that arose
 // when the decode-then-close sequence was inlined into a restart path with
 // multiple downstream error returns.
-func readLogJSON(path string) (map[string]any, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+func readLogJSONAt(root *os.Root, name string) (map[string]any, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log.json for restart: %w", err)
 	}
@@ -969,17 +1023,15 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
 	// --- Write the UUID file (matches C sudo_logsrvd's iolog_store_uuid) ---
-	// O_EXCL|O_NOFOLLOW refuses to overwrite pre-existing files and refuses to
-	// follow symlinks at the final path component — defends against a local
+	// O_EXCL refuses to overwrite a pre-existing file, and s.root refuses to
+	// traverse a symlink at any component — together they defend against a local
 	// attacker pre-planting a symlink inside a predictable sessionDir.
-	uuidPath := filepath.Join(s.sessionDir, "uuid")
-	if err := writeNewFile(uuidPath, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeNewFileAt(s.root, fileUUID, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to write uuid file: %w", err)
 	}
-	slog.Debug("Created UUID file", "log_id", s.logID, "path", uuidPath)
+	slog.Debug("Created UUID file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileUUID))
 
 	// --- Write the plain text `log` file ---
-	logSummaryPath := filepath.Join(s.sessionDir, "log")
 	summaryLine := fmt.Sprintf("%d:%s:%s:%s:%s:%s:%s\n%s\n%s\n",
 		submitTime.Unix(),
 		sanitizeLogSummaryField(infoMap["submituser"], true),
@@ -991,23 +1043,18 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 		sanitizeLogSummaryField(infoMap["submitcwd"], false),
 		sanitizeLogSummaryField(infoMap["command"], false),
 	)
-	if err := writeNewFile(logSummaryPath, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeNewFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
-	slog.Debug("Created log summary file", "log_id", s.logID, "path", logSummaryPath)
+	slog.Debug("Created log summary file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileLog))
 
 	// --- Create timing and I/O stream files and initialize log.json ---
-	timingFilePath := filepath.Join(s.sessionDir, "timing")
 	var err error
-	s.timingFile, err = os.OpenFile(timingFilePath, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	s.timingFile, err = s.root.OpenFile(fileTiming, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
-	slog.Debug("Opened timing file for session", "log_id", s.logID, "path", timingFilePath)
-
-	// Register the log.json path; writes go through writeFileAtomic.
-	s.logJSONPath = filepath.Join(s.sessionDir, "log.json")
-	slog.Debug("Registered log.json path for session", "log_id", s.logID, "path", s.logJSONPath)
+	slog.Debug("Opened timing file for session", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileTiming))
 
 	// Write initial metadata to log.json
 	if err := s.updateLogJSON(); err != nil {
@@ -1034,12 +1081,12 @@ func (s *Session) ensureStreamFile(streamName string) error {
 	if !ok {
 		return fmt.Errorf("unknown stream name: %s", streamName)
 	}
-	filePath := filepath.Join(s.sessionDir, streamInfo.filename)
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	f, err := s.root.OpenFile(streamInfo.filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
-	slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName, "path", filePath, "compressed", s.config.Compress)
+	slog.Debug("Created IO stream file", "log_id", s.logID, "stream", streamName,
+		"path", filepath.Join(s.sessionDir, streamInfo.filename), "compressed", s.config.Compress)
 	s.files[streamName] = f
 
 	if s.config.Compress {
@@ -1053,9 +1100,13 @@ func (s *Session) ensureStreamFile(streamName string) error {
 // disk — never an empty or partial one. Implementation: marshal → write to
 // sibling ".tmp" → fsync → rename. The rename is atomic on POSIX when source
 // and destination are on the same filesystem.
+//
+// timingFile doubles as the "session files are open" sentinel: it is non-nil
+// from the moment initialize opens it (and from construction for a restart)
+// until Close nils it, which is exactly the window in which s.root is usable.
 func (s *Session) updateLogJSON() (err error) {
-	if s.logJSONPath == "" {
-		return fmt.Errorf("log.json path not initialized")
+	if s.timingFile == nil {
+		return fmt.Errorf("session files are not open")
 	}
 
 	data, err := json.MarshalIndent(s.logMeta, "", "  ")
@@ -1064,15 +1115,14 @@ func (s *Session) updateLogJSON() (err error) {
 	}
 	data = append(data, '\n')
 
-	tmpPath := s.logJSONPath + ".tmp"
 	// Clobber any stale tempfile from a prior interrupted write.
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, os.FileMode(s.config.FilePermissions))
+	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return fmt.Errorf("failed to open log.json tempfile: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			os.Remove(tmpPath) // best-effort cleanup on failure
+			_ = s.root.Remove(fileLogJSONTmp) // best-effort cleanup on failure
 		}
 	}()
 
@@ -1087,7 +1137,7 @@ func (s *Session) updateLogJSON() (err error) {
 	if err = f.Close(); err != nil {
 		return fmt.Errorf("failed to close log.json tempfile: %w", err)
 	}
-	if err = os.Rename(tmpPath, s.logJSONPath); err != nil {
+	if err = s.root.Rename(fileLogJSONTmp, fileLogJSON); err != nil {
 		return fmt.Errorf("failed to rename log.json tempfile into place: %w", err)
 	}
 
@@ -1352,12 +1402,12 @@ func parseTimingDelay(s string) (time.Duration, error) {
 // an overshoot or hitting EOF first means resume_point does not align with the
 // stored log (same condition C treats as an error), reported via the error so
 // the caller can fall back to append mode. A zero target resumes at the start.
-func computeResumeOffsets(timingPath string, target time.Duration) (int64, map[string]int64, error) {
+func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (int64, map[string]int64, error) {
 	streamOffsets := make(map[string]int64)
 	if target <= 0 {
 		return 0, streamOffsets, nil
 	}
-	data, err := os.ReadFile(timingPath)
+	data, err := root.ReadFile(name)
 	if err != nil {
 		return 0, nil, fmt.Errorf("read timing file: %w", err)
 	}
@@ -1415,16 +1465,16 @@ func computeResumeOffsets(timingPath string, target time.Duration) (int64, map[s
 	return 0, nil, fmt.Errorf("resume_point %v is beyond the end of the stored timing", target)
 }
 
-// openForRestart opens an existing session file for a restart. When seek is true
-// it truncates to off and positions the file there, so resumed I/O overwrites
-// the post-resume_point region (matching C's iolog_seekto read->write switch);
-// otherwise it opens in append mode. O_NOFOLLOW guards against a symlink swap
-// between finalize and restart.
-func openForRestart(path string, cfg *config.LocalStorageConfig, seek bool, off int64) (*os.File, error) {
+// openForRestartAt opens an existing session file for a restart. When seek is
+// true it truncates to off and positions the file there, so resumed I/O
+// overwrites the post-resume_point region (matching C's iolog_seekto read->write
+// switch); otherwise it opens in append mode. Resolution through root guards
+// against a symlink swap between finalize and restart.
+func openForRestartAt(root *os.Root, name string, cfg *config.LocalStorageConfig, seek bool, off int64) (*os.File, error) {
 	if !seek {
-		return os.OpenFile(path, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+		return root.OpenFile(name, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, os.FileMode(cfg.FilePermissions))
+	f, err := root.OpenFile(name, os.O_WRONLY, os.FileMode(cfg.FilePermissions))
 	if err != nil {
 		return nil, err
 	}
@@ -1440,7 +1490,7 @@ func openForRestart(path string, cfg *config.LocalStorageConfig, seek bool, off 
 }
 
 // NewRestartSession creates a session that resumes an existing log from a RestartMessage.
-func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (*Session, error) {
+func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageConfig) (_ *Session, retErr error) {
 	sessionUUID, relativePath, err := DecodeLogID(restartMsg.GetLogId())
 	if err != nil {
 		return nil, fmt.Errorf("invalid log_id in RestartMessage: %w", err)
@@ -1463,14 +1513,27 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		return nil, fmt.Errorf("log_id path escapes log root: %s", relativePath)
 	}
 
-	// Verify session directory exists
+	// Verify session directory exists, then pin it. Every check and open below
+	// resolves against this descriptor, so the directory the UUID is verified in
+	// is provably the same one the resumed writes land in: a path-string swap
+	// between the checks and the opens cannot redirect them.
 	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("session directory does not exist: %s", sessionDir)
 	}
+	root, err := openSessionRoot(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	// Released on every failure below; on success it transfers to the Session,
+	// whose Close() owns it.
+	defer func() {
+		if retErr != nil {
+			_ = root.Close() // constructor failed; retErr is what the caller needs
+		}
+	}()
 
 	// Read and verify UUID file
-	uuidPath := filepath.Join(sessionDir, "uuid")
-	uuidData, err := os.ReadFile(uuidPath)
+	uuidData, err := root.ReadFile(fileUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read uuid file: %w", err)
 	}
@@ -1480,8 +1543,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	// Check timing file is writable (not completed — finalize() sets 0440)
-	timingPath := filepath.Join(sessionDir, "timing")
-	timingInfo, err := os.Stat(timingPath)
+	timingInfo, err := root.Stat(fileTiming)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat timing file: %w", err)
 	}
@@ -1504,7 +1566,7 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	// the restart, logging a warning so the divergence is visible.
 	rp := restartMsg.GetResumePoint()
 	resumeDur := time.Duration(rp.GetTvSec())*time.Second + time.Duration(rp.GetTvNsec())*time.Nanosecond
-	timingOffset, streamOffsets, seekErr := computeResumeOffsets(timingPath, resumeDur)
+	timingOffset, streamOffsets, seekErr := computeResumeOffsetsAt(root, fileTiming, resumeDur)
 	useSeek := seekErr == nil
 	if seekErr != nil && resumeDur > 0 {
 		slog.Warn("Restart resume_point does not align with stored timing; appending instead of seeking (overlap region may be duplicated)",
@@ -1512,18 +1574,15 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	}
 
 	// Open the timing file positioned at the resume point (or append on fallback).
-	// O_NOFOLLOW guards against a symlink swap between finalize and restart.
-	timingFile, err := openForRestart(timingPath, cfg, useSeek, timingOffset)
+	timingFile, err := openForRestartAt(root, fileTiming, cfg, useSeek, timingOffset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timing file for restart: %w", err)
 	}
 
-	// Read existing log.json. O_NOFOLLOW guards against symlink swap between
-	// session finalize and restart; the subsequent atomic rewrite uses
-	// writeFileAtomic. Decoded in a helper so the file handle is scoped
-	// strictly to the decode and cannot leak into later error paths.
-	logJSONPath := filepath.Join(sessionDir, "log.json")
-	logMeta, err := readLogJSON(logJSONPath)
+	// Read existing log.json; the subsequent atomic rewrite goes through root.
+	// Decoded in a helper so the file handle is scoped strictly to the decode
+	// and cannot leak into later error paths.
+	logMeta, err := readLogJSONAt(root, fileLogJSON)
 	if err != nil {
 		timingFile.Close()
 		return nil, err
@@ -1534,11 +1593,10 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	// files that are present; absent streams had no pre-resume data (offset 0).
 	files := make(map[string]*os.File)
 	for streamName, streamInfo := range streamMap {
-		filePath := filepath.Join(sessionDir, streamInfo.filename)
-		if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+		if _, statErr := root.Stat(streamInfo.filename); os.IsNotExist(statErr) {
 			continue // On-demand file not yet created, will be created on first write
 		}
-		f, err := openForRestart(filePath, cfg, useSeek, streamOffsets[streamName])
+		f, err := openForRestartAt(root, streamInfo.filename, cfg, useSeek, streamOffsets[streamName])
 		if err != nil {
 			// Clean up already opened files
 			for _, openFile := range files {
@@ -1562,12 +1620,12 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 		sessionUUID:     sessionUUID,
 		config:          cfg,
 		sessionDir:      sessionDir,
+		root:            root,
 		files:           files,
 		gzipWriters:     make(map[string]*gzip.Writer), // empty — no compression for restart
 		cumulativeDelay: cumulativeDelay,
 		logMeta:         logMeta,
 		timingFile:      timingFile,
-		logJSONPath:     logJSONPath,
 		isInitialized:   true, // Already initialized from existing session
 	}
 
@@ -1635,15 +1693,20 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 		slog.Debug("Updated log.json with final metadata", "log_id", s.logID)
 	}
 
-	// Close all file handles
-	_ = s.Close()
-
-	// Mark timing file as read-only to indicate completion, per sudo spec.
-	timingFilePath := filepath.Join(s.sessionDir, "timing")
-	slog.Debug("Setting timing file to read-only", "log_id", s.logID, "path", timingFilePath)
-	if err := os.Chmod(timingFilePath, 0440); err != nil {
+	// Mark the timing file read-only to indicate completion, per sudo spec.
+	//
+	// This must precede Close(), which releases the s.root the chmod resolves
+	// through. Ordering against the close is otherwise immaterial: the timing
+	// handle is already open (POSIX checks permissions at open time, not per
+	// write) and finalize issues no further writes. A restart arriving between
+	// the chmod and the close is correctly rejected as already completed.
+	slog.Debug("Setting timing file to read-only", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileTiming))
+	if err := s.root.Chmod(fileTiming, 0440); err != nil {
 		slog.Error("Failed to make timing file read-only", "log_id", s.logID, "error", err)
 	}
+
+	// Close all file handles, then the session directory descriptor.
+	_ = s.Close()
 }
 
 // Close closes all open file handles for the session.
@@ -1681,6 +1744,15 @@ func (s *Session) Close() error {
 		s.files = nil
 		s.gzipWriters = nil
 		s.timingFile = nil
+
+		// Release the session directory descriptor last — every file opened
+		// through it is closed by this point. The field is deliberately left
+		// non-nil: a stray call after Close then fails with os.ErrClosed
+		// instead of panicking on a nil dereference.
+		if err := s.root.Close(); err != nil {
+			slog.Error("Failed to close session directory handle", "log_id", s.logID, "error", err)
+			lastErr = err
+		}
 		slog.Info("Closed all log files for session", "log_id", s.logID)
 	})
 	return lastErr
