@@ -1,3 +1,4 @@
 # Ignored modernization suggestions
 # Format: <date> <category> <description>
 2026-05-24 t-context internal/server/server_test.go:86 shutdown() helper is called from t.Cleanup blocks (api_e2e_test.go:45,199) where t.Context() is already canceled — using it would defeat apiServer.Shutdown's graceful drain. context.Background() with explicit 5s timeout is intentional.
+2026-07-31 cmp-or internal/config/config.go:175 applyZeroValueDefaults keeps explicit `if x == 0` blocks rather than cmp.Or. The comments there distinguish zero ("use the default") from negative ("no read timeout", preserved deliberately) — semantics cmp.Or would obscure. MaxConnections tests `< 0`, not a zero value, so it cannot use cmp.Or at all.

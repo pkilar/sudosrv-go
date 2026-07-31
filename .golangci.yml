@@ -71,3 +71,13 @@ linters:
           - errcheck
           - gosec
           - bodyclose
+
+# golangci-lint v2 moved formatters out of `linters:` into this top-level
+# section; without it `make lint` and CI silently accept unformatted code.
+# goimports runs without local-prefixes on purpose — this tree keeps stdlib and
+# module imports in one block, and grouping "sudosrv/..." separately would
+# rewrite the import block of nearly every file for no correctness gain.
+formatters:
+  enable:
+    - gofmt
+    - goimports

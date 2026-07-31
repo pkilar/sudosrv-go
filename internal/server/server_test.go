@@ -165,7 +165,7 @@ func TestStart_NoListeners(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"no listeners configured") {
+	if got := err.Error(); !strings.Contains(got, "no listeners configured") {
 		t.Errorf("Start error: got %q, want contains 'no listeners configured'", got)
 	}
 }
@@ -184,7 +184,7 @@ func TestStart_TLSWithoutCertKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"tls_cert_file") {
+	if got := err.Error(); !strings.Contains(got, "tls_cert_file") {
 		t.Errorf("Start error: got %q, want contains 'tls_cert_file'", got)
 	}
 	if len(srv.listeners) != 0 {
@@ -208,7 +208,7 @@ func TestStart_TLSBadCertPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"TLS key pair") {
+	if got := err.Error(); !strings.Contains(got, "TLS key pair") {
 		t.Errorf("Start error: got %q, want contains 'TLS key pair'", got)
 	}
 }
@@ -246,7 +246,7 @@ func TestStart_APIBindFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"management API") {
+	if got := err.Error(); !strings.Contains(got, "management API") {
 		t.Errorf("Start error: got %q, want contains 'management API'", got)
 	}
 	if srv.apiServer != nil {
@@ -284,7 +284,7 @@ func TestStart_APITLSFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start: want error, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"management API") {
+	if got := err.Error(); !strings.Contains(got, "management API") {
 		t.Errorf("Start error: got %q, want contains 'management API'", got)
 	}
 }

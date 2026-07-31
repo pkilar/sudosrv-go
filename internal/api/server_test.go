@@ -163,8 +163,8 @@ func TestAuth_RejectsWrongToken(t *testing.T) {
 	// "optimization" that replaces the constant-time compare with == would
 	// still pass the former; the latter is what catches that regression.
 	cases := []struct {
-		name    string
-		token   string
+		name  string
+		token string
 	}{
 		{"different length", "wrong"},
 		{"same length, single char differs", "sxcret"},
