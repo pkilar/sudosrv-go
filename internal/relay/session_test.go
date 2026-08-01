@@ -54,13 +54,11 @@ func newMockUpstreamServer(t *testing.T, addr string) (*mockUpstreamServer, erro
 		receivedMsgs: make(chan *pb.ClientMessage, 100),
 		t:            t,
 	}
-	s.wg.Add(1)
-	go s.acceptLoop()
+	s.wg.Go(s.acceptLoop)
 	return s, nil
 }
 
 func (s *mockUpstreamServer) acceptLoop() {
-	defer s.wg.Done()
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -69,11 +67,7 @@ func (s *mockUpstreamServer) acceptLoop() {
 			}
 			return // Listener was closed
 		}
-		s.wg.Add(1)
-		go func(c net.Conn) {
-			defer s.wg.Done()
-			s.handleConnection(c)
-		}(conn)
+		s.wg.Go(func() { s.handleConnection(conn) })
 	}
 }
 

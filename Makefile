@@ -12,6 +12,11 @@ GOMOD=$(GOCMD) mod
 
 # Protoc variables
 PROTOC=protoc
+# The protoc-gen-go plugin is pinned by the `tool` directive in go.mod (Go 1.24+)
+# rather than taken from PATH, so the generator version always matches the
+# google.golang.org/protobuf runtime this module compiles against. Resolved
+# lazily (=, not :=) so non-proto targets never pay for building the plugin.
+PROTOC_GEN_GO=$(shell $(GOCMD) tool -n protoc-gen-go)
 PROTO_SRC_DIR=pkg/sudosrv_proto
 PROTO_SRC_FILE=$(PROTO_SRC_DIR)/sudo_logsrv.proto
 PROTO_GO_OUT_DIR=$(PROTO_SRC_DIR)/
@@ -77,7 +82,7 @@ release-static-all: build-static-linux-amd64 build-static-linux-arm64
 # Generate Go code from the .proto file
 proto:
 	@echo "Generating protobuf Go code from $(PROTO_SRC_FILE)..."
-	$(PROTOC) --proto_path=$(PROTO_SRC_DIR) --go_out=$(PROTO_GO_OUT_DIR) --go_opt=paths=source_relative $(PROTO_SRC_FILE)
+	$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) --proto_path=$(PROTO_SRC_DIR) --go_out=$(PROTO_GO_OUT_DIR) --go_opt=paths=source_relative $(PROTO_SRC_FILE)
 
 # Run all unit tests verbosely with race detection
 test:

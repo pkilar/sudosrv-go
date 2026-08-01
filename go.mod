@@ -1,7 +1,7 @@
 // Filename: go.mod
 module sudosrv
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/google/uuid v1.6.0
@@ -13,3 +13,5 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	go.uber.org/goleak v1.3.0
 )
+
+tool google.golang.org/protobuf/cmd/protoc-gen-go

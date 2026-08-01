@@ -141,8 +141,7 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 	}
 	s.phase.Store(&phaseWriting)
 
-	s.wg.Add(1)
-	go s.run() // Start the single, durable goroutine for this session.
+	s.wg.Go(s.run) // Start the single, durable goroutine for this session.
 
 	return s, nil
 }
@@ -197,8 +196,7 @@ func NewRestartSession(ctx context.Context, restartMsg *pb.RestartMessage, cfg *
 	}
 	s.phase.Store(&phaseWriting)
 
-	s.wg.Add(1)
-	go s.run()
+	s.wg.Go(s.run)
 
 	return s, nil
 }
@@ -207,7 +205,7 @@ func NewRestartSession(ctx context.Context, restartMsg *pb.RestartMessage, cfg *
 // client to a local cache file. Once the session is complete (ExitMessage),
 // it proceeds to persistently try to flush that file to the upstream server.
 func (s *Session) run() {
-	defer s.wg.Done()
+	// Done is owned by the wg.Go that launched this goroutine.
 	defer s.cancel()
 	defer func() {
 		// Set done=true before firing onDone so any caller that observes
