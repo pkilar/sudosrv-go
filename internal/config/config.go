@@ -40,14 +40,19 @@ type Config struct {
 
 // ServerConfig holds server-specific settings.
 type ServerConfig struct {
-	Mode                      string        `yaml:"mode"` // "local" or "relay"
-	ListenAddress             string        `yaml:"listen_address"`
-	ListenAddressTLS          string        `yaml:"listen_address_tls"`
-	TLSCertFile               string        `yaml:"tls_cert_file"`
-	TLSKeyFile                string        `yaml:"tls_key_file"`
-	TLSMinVersion             string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
-	ServerID                  string        `yaml:"server_id"`
-	IdleTimeout               time.Duration `yaml:"idle_timeout"`
+	Mode             string        `yaml:"mode"` // "local" or "relay"
+	ListenAddress    string        `yaml:"listen_address"`
+	ListenAddressTLS string        `yaml:"listen_address_tls"`
+	TLSCertFile      string        `yaml:"tls_cert_file"`
+	TLSKeyFile       string        `yaml:"tls_key_file"`
+	TLSMinVersion    string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
+	ServerID         string        `yaml:"server_id"`
+	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	// ServerTimeout bounds writes to the client and the TLS handshake, mirroring
+	// C's [server] timeout (default 30s). It is NOT an idle read deadline — see
+	// IdleTimeout, which is a different knob with the opposite default. 0 or
+	// negative disables it, matching C's "A value of 0 will disable the timeout".
+	ServerTimeout             time.Duration `yaml:"server_timeout"`
 	MaxConnections            int           `yaml:"max_connections"`              // 0 disables the cap
 	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
@@ -133,7 +138,8 @@ func defaultConfig() *Config {
 			Mode:                      "local",
 			ListenAddress:             "127.0.0.1:30343",
 			ServerID:                  "GoSudoLogSrv/1.0",
-			IdleTimeout:               0, // 0 = no idle read deadline. DO NOT give this a finite default; see below.
+			IdleTimeout:               0,                // 0 = no idle read deadline. DO NOT give this a finite default; see below.
+			ServerTimeout:             30 * time.Second, // C's DEFAULT_SOCKET_TIMEOUT_SEC; bounds writes + TLS handshake.
 			MaxConnections:            10000,
 			TLSMinVersion:             "1.3",  // Secure default; "1.2" available for legacy clients
 			ServerOperationalLogLevel: "info", // Default log level

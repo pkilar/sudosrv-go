@@ -1212,6 +1212,54 @@ func (c *deadlineRecorderConn) calls() (int, time.Time) {
 	return c.setCalls, c.lastDeadline
 }
 
+// TestWriteTimeoutBoundsUnresponsivePeer checks that a peer which completes the
+// handshake and then stops reading cannot pin a handler goroutine forever.
+//
+// This is the other half of the idle_timeout change. Removing the idle read
+// deadline was correct — C never disconnects an idle client — but C is not
+// unbounded: it arms its *write* events with [server] timeout (default 30s,
+// DEFAULT_SOCKET_TIMEOUT_SEC), so a client that stops draining the socket is cut
+// loose. Without an equivalent, one silent peer holds a goroutine, its session
+// files and one of max_connections slots until the process exits, and repeating
+// that wedges the server.
+//
+// net.Pipe is unbuffered, so the server's reply blocks until someone reads it —
+// exactly the condition being tested.
+//
+// Conformance: docs/logsrvd-reference/ ARCH-032, ARCH-045, TLS-022.
+func TestWriteTimeoutBoundsUnresponsivePeer(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{
+		Mode:          "local",
+		ServerID:      "t",
+		ServerTimeout: 200 * time.Millisecond,
+	}}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	h := NewHandler(serverConn, cfg)
+	done := make(chan struct{})
+	go func() {
+		h.Handle()
+		close(done)
+	}()
+
+	// Send a ClientHello and then never read the ServerHello reply.
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "silent"}},
+	}); err != nil {
+		t.Fatalf("client write Hello: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler never returned: a peer that stops reading pins the goroutine " +
+			"and its connection slot indefinitely")
+	}
+}
+
 // TestIdleReadDeadlineOptOut verifies that a non-positive idle_timeout disables
 // the per-message read deadline (matching C sudo_logsrvd's NULL read timeout),
 // while a positive value still arms it.

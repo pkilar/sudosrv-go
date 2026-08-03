@@ -10,6 +10,8 @@ server:
   # ignore_iolog_errors defaults to false), so when this fires on an interactive
   # session the user's shell is killed, not just its log truncated.
   # idle_timeout: 30m
+  # server_timeout: 30s          # bounds writes to the client and the TLS
+  #                              # handshake (NOT an idle deadline). 0 disables.
   server_operational_log_level: "debug"
 
 # Settings for when server.mode is "local"

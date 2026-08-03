@@ -184,6 +184,18 @@ func (h *Handler) Handle() {
 			"active_connections", metrics.Global.GetActiveConnections(), "active_sessions", metrics.Global.GetActiveSessions())
 	}()
 
+	// Force the TLS handshake to complete under server_timeout. crypto/tls
+	// otherwise performs it lazily inside the first Read, where no deadline
+	// applies now that idle_timeout defaults to off — a peer could complete the
+	// TCP connection, send nothing, and hold this goroutine and one of
+	// max_connections slots forever. C bounds the handshake with the same
+	// [server] timeout it uses for writes. Conformance: TLS-022, ARCH-032.
+	if err := h.handshakeTLS(); err != nil {
+		slog.Warn("TLS handshake failed", "error", err, "remote_addr", h.conn.RemoteAddr())
+		metrics.Global.IncrementFailedConnections()
+		return
+	}
+
 	// Main message loop
 	for {
 		// Check if context is cancelled
@@ -252,19 +264,65 @@ func (h *Handler) Handle() {
 				"message_errors", metrics.Global.GetMessageErrors())
 			// Attempt to send a fatal error to the client
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
-			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
+			_ = h.writeServerMessage(errMsg)
 			return
 		}
 
 		metrics.Global.IncrementMessagesProcessed()
 
 		if serverMsg != nil {
-			if err := h.processor.WriteServerMessageContext(h.ctx, serverMsg); err != nil {
+			if err := h.writeServerMessage(serverMsg); err != nil {
 				slog.Error("Failed to write server message", "error", err, "remote_addr", h.conn.RemoteAddr())
 				return
 			}
 		}
 	}
+}
+
+// serverTimeoutContext derives a context bounded by server_timeout. A
+// non-positive server_timeout disables the bound, matching C's "A value of 0
+// will disable the timeout". The returned cancel must always be called.
+func (h *Handler) serverTimeoutContext() (context.Context, context.CancelFunc) {
+	if t := h.config.Server.ServerTimeout; t > 0 {
+		return context.WithTimeout(h.ctx, t)
+	}
+	return context.WithCancel(h.ctx)
+}
+
+// writeServerMessage writes one ServerMessage, bounded by server_timeout.
+//
+// Without a bound a client that completes the handshake and then stops reading
+// blocks this goroutine inside write(2) once the socket buffer fills, holding
+// its session and one of max_connections slots until the process exits. C arms
+// its write events with [server] timeout for exactly this reason
+// (logsrvd/logsrvd.c, sudo_ev_add(..., logsrvd_conf_server_timeout(), ...)).
+//
+// Conformance: docs/logsrvd-reference/ ARCH-032, ARCH-045.
+func (h *Handler) writeServerMessage(msg *pb.ServerMessage) error {
+	ctx, cancel := h.serverTimeoutContext()
+	defer cancel()
+	return h.processor.WriteServerMessageContext(ctx, msg)
+}
+
+// handshakeTLS completes the TLS handshake under server_timeout, or returns nil
+// immediately for a plaintext connection.
+//
+// crypto/tls would otherwise run the handshake lazily inside the first Read.
+// With idle_timeout off by default that read has no deadline, so a peer that
+// opens a TCP connection to the TLS port and then says nothing would pin a
+// goroutine indefinitely. Doing it explicitly here also means handshake
+// failures are reported as such instead of surfacing as a confusing protocol
+// read error.
+//
+// Conformance: docs/logsrvd-reference/ TLS-022, ARCH-032.
+func (h *Handler) handshakeTLS() error {
+	tlsConn, ok := h.conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := h.serverTimeoutContext()
+	defer cancel()
+	return tlsConn.HandshakeContext(ctx)
 }
 
 // processMessage contains the main state machine for the protocol.

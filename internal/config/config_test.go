@@ -647,6 +647,55 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 //
 // Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025 (breaking).
 // Operators who want a finite deadline must opt in explicitly.
+// TestServerTimeoutDefault pins the write/handshake deadline, the counterpart to
+// idle_timeout being disabled.
+//
+// C's [server] timeout (default 30s) bounds writes to the client and the TLS
+// handshake — it is NOT an idle read deadline, a distinction the man page
+// blurs. It is what stops an unresponsive peer holding a connection slot
+// forever, so it must have a finite default; 0 disables it, matching C's "A
+// value of 0 will disable the timeout."
+//
+// Conformance: docs/logsrvd-reference/ ARCH-032, ARCH-045, TLS-022, CONF-025.
+func TestServerTimeoutDefault(t *testing.T) {
+	load := func(t *testing.T, content string) *Config {
+		t.Helper()
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		cfg, err := LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig() error: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("OmittedGetsFiniteDefault", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n")
+		if cfg.Server.ServerTimeout != 30*time.Second {
+			t.Errorf("server_timeout: got %v, want 30s (C's DEFAULT_SOCKET_TIMEOUT_SEC). "+
+				"Unlike idle_timeout this MUST be finite by default — it is the only "+
+				"bound on a peer that stops reading.", cfg.Server.ServerTimeout)
+		}
+	})
+
+	t.Run("ExplicitZeroDisables", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n  server_timeout: 0s\n")
+		if cfg.Server.ServerTimeout > 0 {
+			t.Errorf("server_timeout: 0s was rewritten to %v; zero must disable the "+
+				"timeout, matching C", cfg.Server.ServerTimeout)
+		}
+	})
+
+	t.Run("PositiveIsPreserved", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n  server_timeout: 5s\n")
+		if cfg.Server.ServerTimeout != 5*time.Second {
+			t.Errorf("server_timeout: got %v, want 5s", cfg.Server.ServerTimeout)
+		}
+	})
+}
+
 func TestIdleTimeoutDefaultsToDisabled(t *testing.T) {
 	load := func(t *testing.T, content string) *Config {
 		t.Helper()

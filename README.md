@@ -89,6 +89,7 @@ server:
   # tls_cert_file: "server.crt"
   # tls_key_file: "server.key"
   # idle_timeout: 30m             # off by default; see note below
+  # server_timeout: 30s           # write + TLS handshake deadline (default 30s)
   server_operational_log_level: "info"
 
 # Settings for when server.mode is "local"
