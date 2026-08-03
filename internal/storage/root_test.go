@@ -106,11 +106,10 @@ func TestSessionRootPinsDirectoryAgainstSwap(t *testing.T) {
 	}
 }
 
-// TestSessionRootRefusesSymlinkedLogJSONTmp covers the one session file opened
-// without O_EXCL. log.json.tmp is deliberately clobberable (O_CREATE|O_TRUNC) so
-// a stale tempfile from an interrupted write cannot wedge the session — which
-// means O_EXCL cannot be what stops a symlink here. Containment has to come from
-// the root.
+// TestSessionRootRefusesSymlinkedLogJSONTmp covers log.json.tmp, which is
+// deliberately clobberable (O_CREATE|O_TRUNC) so a stale tempfile from an
+// interrupted write cannot wedge the session. No session file uses O_EXCL
+// (IOLOG-049), so containment has to come from the root.
 func TestSessionRootRefusesSymlinkedLogJSONTmp(t *testing.T) {
 	cfg, sessionDir := fixedPathConfig(t)
 
@@ -148,8 +147,8 @@ func TestSessionRootRefusesSymlinkedLogJSONTmp(t *testing.T) {
 }
 
 // TestRestartSessionRefusesSymlinkedStream checks the resume path, which opens
-// pre-existing files (so O_EXCL cannot apply there either) and is reachable by
-// any client holding a valid log_id.
+// pre-existing files for append and is reachable by any client holding a valid
+// log_id.
 func TestRestartSessionRefusesSymlinkedStream(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.LocalStorageConfig{

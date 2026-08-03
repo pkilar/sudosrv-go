@@ -121,7 +121,28 @@ func (s *Session) IsDone() bool { return s.done.Load() }
 // resources whose lifecycle exceeds the client connection (e.g. management
 // API registry entries) to the actual end of the session rather than the end
 // of the connection.
+// ErrUpstreamUnreachable is returned by NewSession when require_upstream is set
+// and the upstream cannot be reached. Callers should surface a specific error to
+// the client rather than a generic failure, so the operator can tell a refused
+// command from a server fault.
+var ErrUpstreamUnreachable = errors.New("relay upstream is unreachable and require_upstream is set")
+
 func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
+	// Fail-closed check, before anything is created on disk: if the operator
+	// requires an auditable path to exist, prove one does before letting the
+	// command run. Full connect (including TLS) rather than a bare TCP dial, so
+	// a broken certificate or a wrong port is caught here too.
+	// Conformance: docs/logsrvd-reference/ RELAY-010.
+	if cfg.RequireUpstream {
+		probe, err := connectToUpstream(ctx, cfg)
+		if err != nil {
+			slog.Error("Refusing session: require_upstream is set and the upstream is unreachable",
+				"upstream", cfg.UpstreamHost, "error", err)
+			return nil, fmt.Errorf("%w: %w", ErrUpstreamUnreachable, err)
+		}
+		_ = probe.Close()
+	}
+
 	// 0700: cache files and the directory carry raw sudo I/O (keystrokes,
 	// command output, sometimes passwords — the storage password filter
 	// does not apply to the relay cache writer). Group/other must not read.
@@ -259,17 +280,10 @@ func (s *Session) run() {
 		proc, err := connectToUpstream(s.ctx, s.config)
 		if err != nil {
 			slog.Warn("Upstream connection attempt failed", "log_id", s.logID, "error", err)
-			backoff := s.calculateBackoff(attempt)
-			slog.Info("Waiting before next reconnect attempt", "log_id", s.logID, "duration", backoff)
-
-			// Respect context cancellation during backoff
-			select {
-			case <-s.ctx.Done():
-				slog.Info("Relay session cancelled during backoff", "log_id", s.logID)
+			if !s.waitBeforeRetry(attempt) {
 				return
-			case <-time.After(backoff):
-				continue
 			}
+			continue
 		}
 
 		// Connection successful, now flush the file. Protocol operations use
@@ -284,10 +298,27 @@ func (s *Session) run() {
 				return
 			}
 			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
-		} else {
-			slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
-			return
+			// Back off here too, not only on the connect branch. A flush that
+			// fails after the connect succeeded — upstream error or abort, a
+			// mid-replay EOF, an operation timeout, or the cache file failing to
+			// open — is just as permanent as a refused connect, and with the
+			// default reconnect_attempts of -1 this loop never ends. Falling
+			// straight through re-connected and re-sent the entire session as
+			// fast as the round trip allowed: hundreds of upstream connections
+			// and full replays per second, one slog.Error each, until the local
+			// disk filled. C never does this. A post-connect failure there is
+			// not even re-queued in the running process (logsrvd/logsrvd.c:
+			// 108-111 re-queues only from CONNECTING), and anything that is
+			// re-queued waits relay.retry_interval — 30s by default
+			// (logsrvd/logsrvd_queue.c:194-196, logsrvd/logsrvd_conf.c:1642).
+			// Conformance: docs/logsrvd-reference/ RELAY-044, RELAY-049.
+			if !s.waitBeforeRetry(attempt) {
+				return
+			}
+			continue
 		}
+		slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
+		return
 	}
 
 	if s.config.ReconnectAttempts != -1 {
@@ -372,6 +403,26 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// waitBeforeRetry sleeps for the backoff belonging to the attempt that just
+// failed, and reports whether the caller should try again. It returns false only
+// when the session context was cancelled during the wait (server shutdown), in
+// which case the caller must stop — the cache file stays on disk for startup
+// orphan recovery.
+//
+// Every failed flush attempt goes through here, whatever it failed at, so no
+// error path can re-loop without a delay. See the RELAY-044 note in run().
+func (s *Session) waitBeforeRetry(attempt int) bool {
+	backoff := s.calculateBackoff(attempt)
+	slog.Info("Waiting before next upstream attempt", "log_id", s.logID, "duration", backoff)
+	select {
+	case <-s.ctx.Done():
+		slog.Info("Relay session cancelled during backoff", "log_id", s.logID)
+		return false
+	case <-time.After(backoff):
+		return true
 	}
 }
 
@@ -607,14 +658,37 @@ func (s *Session) Wait() {
 //
 // The supplied context governs goroutine lifetime; cancelling it aborts pending
 // flushes (the underlying cache file stays on disk for a future recovery pass).
-func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
+// ScanOrphans takes a point-in-time snapshot of the cache files left behind by
+// a previous run, restoring any mid-flush files to *.log on the way.
+//
+// It is deliberately separate from flushing them. The scan must happen BEFORE
+// the server starts accepting connections: a session accepted while a live glob
+// is running would have its own {uuid}.log picked up mid-write, renamed to
+// .flushing, replayed upstream in whatever partial state it was in, and
+// unlinked, truncating and duplicating a live session's audit record. Working
+// from a snapshot means any file created later is, by construction, someone
+// else's and is never touched.
+//
+// A cache directory that cannot be read is an error rather than an empty
+// result: filepath.Glob reports only ErrBadPattern and returns (nil, nil) for a
+// missing or unreadable directory, which would let a wrong mount or a bad chown
+// silently abandon the entire backlog while the daemon looked healthy.
+//
+// Conformance: docs/logsrvd-reference/ ARCH-043.
+func ScanOrphans(cfg *config.RelayConfig) ([]string, error) {
 	slog.Info("Scanning for orphaned relay cache files", "directory", cfg.RelayCacheDirectory)
+
+	// Probe the directory explicitly; Glob will not tell us it is unusable.
+	if _, err := os.ReadDir(cfg.RelayCacheDirectory); err != nil {
+		return nil, fmt.Errorf("relay cache directory %s is not readable: %w",
+			cfg.RelayCacheDirectory, err)
+	}
 
 	// Restore any mid-flush files from a prior crash by renaming them back to *.log.
 	flushingPattern := filepath.Join(cfg.RelayCacheDirectory, "*.log"+FlushingSuffix)
 	flushingFiles, err := filepath.Glob(flushingPattern)
 	if err != nil {
-		return fmt.Errorf("failed to scan for in-flight relay files: %w", err)
+		return nil, fmt.Errorf("failed to scan for in-flight relay files: %w", err)
 	}
 	for _, f := range flushingFiles {
 		restored := f[:len(f)-len(FlushingSuffix)]
@@ -634,8 +708,25 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 	pattern := filepath.Join(cfg.RelayCacheDirectory, "*.log")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
-		return fmt.Errorf("failed to scan relay cache directory: %w", err)
+		return nil, fmt.Errorf("failed to scan relay cache directory: %w", err)
 	}
+	return files, nil
+}
+
+// RecoverOrphans scans and then flushes in one step. Callers that must not race
+// live sessions should use ScanOrphans before opening listeners and pass the
+// snapshot to FlushOrphans; internal/server does exactly that.
+func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
+	files, err := ScanOrphans(cfg)
+	if err != nil {
+		return err
+	}
+	return FlushOrphans(ctx, cfg, files)
+}
+
+// FlushOrphans replays the given cache files upstream, at most
+// maxConcurrentFlushes at a time.
+func FlushOrphans(ctx context.Context, cfg *config.RelayConfig, files []string) error {
 	if len(files) == 0 {
 		slog.Info("No orphaned relay files found")
 		return nil
@@ -862,9 +953,26 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 // anything else — the upstream may have emitted periodic commit points during
 // the replay that are still queued ahead of the final one.
 //
-// A clean EOF is accepted as acknowledgement: C closes the connection once the
-// final commit point has been written and the closure reaches FINISHED
-// (logsrvd/logsrvd.c:1110-1116), so the close is itself a completion signal.
+// An EOF reached here is a FAILURE, never an acknowledgement. It is true that C
+// closes the connection once the final commit point has been written
+// (logsrvd/logsrvd.c:1110-1116), but that only makes a close meaningful when a
+// commit point preceded it — and this function returns as soon as one arrives,
+// so any EOF observed here arrived without one. C draws the same line: a
+// zero-length read while the closure is not yet FINISHED is "premature EOF from
+// <relay>" and becomes an error (logsrvd/logsrvd_relay.c:869-888, and the
+// SSL_ERROR_ZERO_RETURN twin at 995-1010); the journal is unlinked only at
+// FINISHED (logsrvd/logsrvd.c:296-305), which for an I/O session means after the
+// final commit point (logsrvd/logsrvd.c:1315-1316).
+//
+// Do not reinstate EOF-as-acknowledgement. An upstream killed (SIGKILL, OOM,
+// restart) after draining our replay into userspace but before persisting it
+// sends FIN, not RST — a clean EOF, byte-identical to a polite close. Accepting
+// it retires the cache file, which is the only remaining copy, so the session
+// ends up in no log server anywhere with no retry scheduled: silent audit loss.
+//
+// Event-only sessions are unaffected: they are never acknowledged at all, so
+// flushFile does not call this function for them.
+//
 // An error or abort from the upstream is always a failure.
 func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, waitCommit bool) error {
 	for {
@@ -874,8 +982,8 @@ func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.R
 			srvMsg, readErr = proc.ReadServerMessageContext(opCtx)
 			return readErr
 		})
-		if errors.Is(err, io.EOF) {
-			return nil
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("upstream closed the connection before acknowledging the session: %w", err)
 		}
 		if err != nil {
 			return err

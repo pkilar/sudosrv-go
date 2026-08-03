@@ -109,6 +109,7 @@ relay:
   connect_timeout: 15s
   relay_cache_directory: "/var/log/gosudo-relay-cache"
   reconnect_attempts: -1           # -1 = infinite
+  # require_upstream: false        # true = refuse commands when upstream is down
   # max_reconnect_interval: 1m
 
 # Optional read-only management API. Omit the block (or leave listen_address
@@ -138,6 +139,22 @@ value only delays that; a root shell left open overnight still dies.
 Any value `<= 0` (including omitting the key) disables the deadline. Set a
 positive duration only if you accept the above and specifically need idle
 connections reclaimed sooner than TCP keepalive does.
+
+### A note on `require_upstream`
+
+Relay mode is **store-and-forward**: a session is cached locally and delivered
+once the upstream is reachable. An upstream outage therefore does not stop people
+using sudo — but it does mean a privileged command can run before any log server
+has seen it, which is fail-open with respect to auditing.
+
+`require_upstream: true` inverts that. The upstream must be reachable when the
+session is accepted, or the command is refused and the user is told why. Use it
+where policy requires an auditable path to exist before privileged execution, and
+accept the consequence: while the upstream is down, sudo is down.
+
+This mirrors the choice `sudo_logsrvd` makes with `store_first` — its default
+relay streams upstream and refuses the command when the relay list is exhausted;
+its `store_first` mode behaves like this server's default.
 
 ### Supported Escape Sequences
 

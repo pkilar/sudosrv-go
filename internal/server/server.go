@@ -64,6 +64,38 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 	return s, nil
 }
 
+// listenTCP binds a protocol listener whose accepted connections carry
+// SO_KEEPALIVE with the *system's* keepalive timing and nothing else, matching
+// sudo_logsrvd (logsrvd/logsrvd.c:1744-1750: the accepted socket gets only
+// setsockopt(SO_KEEPALIVE), gated on the server tcp_keepalive setting whose
+// default is true at logsrvd_conf.c:1654; no idle time, probe interval or probe
+// count is ever configured).
+//
+// Do not drop this ListenConfig back to a plain net.Listen. Go's zero
+// KeepAliveConfig does not mean "leave the socket alone": net.newTCPConn
+// rewrites it to {Enable: true, Idle: 0} and SetKeepAliveConfig then substitutes
+// defaultTCPKeepAliveIdle=15s, defaultTCPKeepAliveInterval=15s and
+// defaultTCPKeepAliveCount=9 (net/dial.go, net/tcpsockopt_unix.go), declaring a
+// peer dead after roughly 150s where Linux defaults would wait ~2h11m. Because
+// sudoers leaves ignore_iolog_errors false, the client turns a lost log
+// connection into loopbreak and SIGKILLs the running command
+// (plugins/sudoers/log_client.c:1918-1922, plugins/sudoers/defaults.c:610), so
+// an idle `sudo -s` that rides out a laptop suspend, a wifi roam or a VPN
+// reconnect longer than ~2.5 minutes would have its root shell killed on resume.
+// Negative values are the documented "do not touch this option" signal.
+// Conformance: docs/logsrvd-reference/ ARCH-016.
+func listenTCP(ctx context.Context, address string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     -1,
+			Interval: -1,
+			Count:    -1,
+		},
+	}
+	return lc.Listen(ctx, "tcp", address)
+}
+
 // Start initializes listeners and begins accepting connections. It is
 // transactional: every listener (protocol plaintext, protocol TLS, management
 // API) is bound synchronously before any accept or serve goroutine is
@@ -75,7 +107,7 @@ func (s *Server) Start() error {
 
 	// Phase 1: bind every required listener.
 	if cfg.Server.ListenAddress != "" {
-		plainListener, err := net.Listen("tcp", cfg.Server.ListenAddress)
+		plainListener, err := listenTCP(s.ctx, cfg.Server.ListenAddress)
 		if err != nil {
 			return fmt.Errorf("failed to start plaintext listener on %s: %w", cfg.Server.ListenAddress, err)
 		}
@@ -87,7 +119,13 @@ func (s *Server) Start() error {
 			s.closeListeners()
 			return fmt.Errorf("tls_cert_file and tls_key_file must be configured for TLS listener")
 		}
-		cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		// The key pair is fetched per handshake, not pinned here, so a
+		// certificate renewed in place is picked up without a restart and
+		// without a signal. See keyPairReloader for why. Certificates is left
+		// empty on purpose: with it populated, crypto/tls skips GetCertificate
+		// for clients that send no SNI.
+		// Conformance: docs/logsrvd-reference/ CONF-018.
+		certReloader, err := newKeyPairReloader(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		if err != nil {
 			s.closeListeners()
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
@@ -98,15 +136,15 @@ func (s *Server) Start() error {
 			return fmt.Errorf("invalid server tls_min_version: %w", err)
 		}
 		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   minVer,
+			GetCertificate: certReloader.GetCertificate,
+			MinVersion:     minVer,
 		}
-		tlsListener, err := tls.Listen("tcp", cfg.Server.ListenAddressTLS, tlsConfig)
+		tlsBase, err := listenTCP(s.ctx, cfg.Server.ListenAddressTLS)
 		if err != nil {
 			s.closeListeners()
 			return fmt.Errorf("failed to start TLS listener on %s: %w", cfg.Server.ListenAddressTLS, err)
 		}
-		s.listeners = append(s.listeners, tlsListener)
+		s.listeners = append(s.listeners, tls.NewListener(tlsBase, tlsConfig))
 	}
 
 	if len(s.listeners) == 0 {
@@ -124,6 +162,22 @@ func (s *Server) Start() error {
 			return fmt.Errorf("failed to start management API: %w", err)
 		}
 		s.apiServer = apiSrv
+	}
+
+	// Phase 1.5: snapshot the relay cache BEFORE serving. Taking the list here
+	// rather than from a goroutine started after the accept loops means a session
+	// accepted moments later cannot have its own cache file globbed mid-write,
+	// replayed upstream half-finished and unlinked. An unusable cache directory
+	// fails startup instead of silently abandoning the backlog.
+	// Conformance: docs/logsrvd-reference/ ARCH-043.
+	var orphans []string
+	if cfg.Server.Mode == "relay" {
+		var scanErr error
+		orphans, scanErr = relay.ScanOrphans(&cfg.Relay)
+		if scanErr != nil {
+			s.closeListeners()
+			return fmt.Errorf("relay cache directory unusable: %w", scanErr)
+		}
 	}
 
 	// Phase 2: every listener is bound — start serving.
@@ -157,7 +211,9 @@ func (s *Server) Start() error {
 
 	if cfg.Server.Mode == "relay" {
 		s.waitGroup.Go(func() {
-			if err := relay.RecoverOrphans(s.ctx, &cfg.Relay); err != nil {
+			// Flush the Phase 1.5 snapshot. Files created after that scan belong
+			// to live sessions and are deliberately not in this list.
+			if err := relay.FlushOrphans(s.ctx, &cfg.Relay, orphans); err != nil {
 				slog.Error("Orphan relay recovery reported errors", "error", err)
 			}
 		})

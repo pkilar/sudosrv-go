@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` `main` @ `928da84` |
+| **Verified against** | `sudosrv` @ `81be2ba` — all 312 requirements re-derived |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -41,13 +41,18 @@ stale — it was not refreshed in the last pass. Trust the per-document header.
 `CONFORMANCE.md` is **generated** from the per-requirement verdicts, not hand-written.
 Re-verifying a subsystem means re-deriving its rows, not editing the table in place.
 
-## What the first pass found
+## Where conformance stands
 
-Of 312 requirements: **63 `MATCH`**, 22 `INTENTIONAL`, 97 `PARTIAL`, 63 `DIVERGENT`,
-57 `ABSENT`, 10 `NA`. After adversarial review, **3 are `breaking` and 11 are `high`** —
-see [Priority findings](CONFORMANCE.md#priority-findings).
+All 312 requirements were re-verified against the current tree and every non-`MATCH`
+verdict independently challenged: **92 `MATCH`**, 19 `INTENTIONAL`, 96 `PARTIAL`,
+42 `DIVERGENT`, 48 `ABSENT`, 15 `NA`.
 
-Two structural facts are worth stating up front, because they bound everything else:
+**Nothing is graded `breaking` or `high`.** The worst remaining grade is `medium` (28
+requirements); the rest are `low` or `informational`. Every finding the audit raised at
+those two severities — 20 in total across the initial pass and the full re-verification —
+has been remediated.
+
+Two structural facts bound everything else:
 
 - **The protobuf schema is field-for-field identical.** All 16 messages and 55 fields
   match the C `log_server.proto` in name, number, type, label, and `oneof` membership.
@@ -57,12 +62,7 @@ Two structural facts are worth stating up front, because they bound everything e
   prefix, a 2 MiB ceiling (C `logsrv_util.h:36`, Go `processor.go:20`), and
   `IO_EVENT_*` 0–7 including the legacy `TTYOUT_1_8_7 = 6`.
 
-The wire protocol is in good shape — 37 protocol findings were challenged and none
-survived above `medium`. The concentrations of real risk are the **idle-timeout default**
-(one defect reached independently from three subsystems: `ARCH-024`, `ARCH-045`,
-`CONF-025`) and **relay durability** (`RELAY-019/020/034/042/054`).
-
-`PARTIAL` is the largest bucket at 97, and that is expected rather than alarming: most
+`PARTIAL` is the largest bucket at 100, and that is expected rather than alarming: most
 are a supported main path plus an unimplemented option or edge case. Read the severity,
 not the verdict.
 

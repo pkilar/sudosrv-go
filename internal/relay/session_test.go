@@ -123,7 +123,19 @@ func (s *mockUpstreamServer) handleConnection(conn net.Conn) {
 			}
 			s.t.Logf("Mock server: sent LogId response")
 		case *pb.ClientMessage_ExitMsg:
-			s.t.Logf("Mock server: received ExitMsg, ending session")
+			// A real sudo_logsrvd answers the ExitMessage of an I/O session with
+			// a final commit_point before closing (logsrvd/logsrvd.c handle_exit
+			// -> EXITED -> commit_ev -> FINISHED at logsrvd.c:1315-1316), and so
+			// does this server's own local mode. Without it this mock is an
+			// upstream that closed before persisting, which the flush must now
+			// treat as failure (RELAY-022).
+			if err := proc.WriteServerMessage(&pb.ServerMessage{
+				Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{TvSec: 1}},
+			}); err != nil {
+				s.t.Logf("Mock server: failed to write final commit_point: %v", err)
+				return
+			}
+			s.t.Logf("Mock server: received ExitMsg, sent final commit_point, ending session")
 			return // Exit after processing exit message
 		}
 	}

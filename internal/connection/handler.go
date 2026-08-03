@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -275,6 +276,27 @@ func (h *Handler) Handle() {
 				slog.Error("Failed to write server message", "error", err, "remote_addr", h.conn.RemoteAddr())
 				return
 			}
+		}
+
+		// The ExitMessage ends the session; stop reading, exactly as C does by
+		// deleting the read event in handle_exit (sudo_ev_del(evbase, read_ev))
+		// and moving to EXITED/FINISHED, where any further message is a state
+		// machine error that closes the connection.
+		//
+		// Continuing to read appended post-Exit records to an already-terminated
+		// session. In relay mode they land in a cache file whose ExitMessage has
+		// already been written, so the flush replays a session that ends
+		// mid-stream and then keeps going -- delivering a truncated duplicate
+		// upstream, or looping on a replay the upstream will never acknowledge.
+		// One crafted message from an unauthenticated peer was enough to trigger
+		// it. The response above (the final commit_point) has already been sent,
+		// so a well-behaved client loses nothing.
+		//
+		// Conformance: docs/logsrvd-reference/ ARCH-036.
+		if _, isExit := clientMsg.Type.(*pb.ClientMessage_ExitMsg); isExit {
+			slog.Debug("ExitMessage processed; closing connection",
+				"remote_addr", h.conn.RemoteAddr())
+			return
 		}
 	}
 }
@@ -730,6 +752,17 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	case "relay":
 		h.session, err = h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
 		if err != nil {
+			// A fail-closed refusal is a policy outcome, not a server fault, so
+			// tell the client specifically why its command is being denied
+			// instead of collapsing it into "Internal Server Error". sudo relays
+			// this text to the user. Conformance: RELAY-010.
+			if errors.Is(err, relay.ErrUpstreamUnreachable) {
+				slog.Warn("Refusing command: no auditable path to the upstream log server",
+					"remote_addr", h.conn.RemoteAddr())
+				return &pb.ServerMessage{Type: &pb.ServerMessage_Error{
+					Error: "unable to reach upstream log server; command refused (require_upstream is set)",
+				}}, nil
+			}
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
 		h.refreshLogIDFromSession()

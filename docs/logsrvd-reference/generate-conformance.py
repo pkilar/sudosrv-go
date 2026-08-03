@@ -2,7 +2,7 @@
 """Merge verdicts + adversarial challenges into docs/logsrvd-reference/CONFORMANCE.md."""
 import json, glob, os, re, sys, collections
 
-SC = "/tmp/claude-1000/-home-pkilar-Devel-sudosrv-go/268b0901-8e5b-488e-b1df-db26edbad8e4/scratchpad"
+SC = "/tmp/claude-1000/-home-pkilar-Devel-sudosrv-go/9b6d7234-1ccb-4c29-b797-90de270c5e86/scratchpad"
 DOCS = "/home/pkilar/Devel/sudosrv-go/docs/logsrvd-reference"
 
 SUBSYS = [
@@ -19,13 +19,11 @@ SEVRANK = {"breaking": 0, "high": 1, "medium": 2, "low": 3, "informational": 4, 
 
 def load():
     verdicts = {}
-    for f in glob.glob(f"{SC}/verdicts-*.json"):
-        if f.endswith("verdicts-all.json"):
-            continue
+    for f in glob.glob(f"{SC}/rv-*.json"):
         for v in json.load(open(f))["verdicts"]:
             verdicts[v["id"]] = v
     challenges = {}
-    for f in glob.glob(f"{SC}/challenge-*.json"):
+    for f in glob.glob(f"{SC}/ch-*.json"):
         for c in json.load(open(f))["challenges"]:
             challenges[c["id"]] = c
     return verdicts, challenges
@@ -86,11 +84,12 @@ def main():
     A("# Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`")
     A("")
     A("> **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  ")
-    A("> **Subject:** `sudosrv` `main` @ `928da84`  ")
+    A("> **Subject:** `sudosrv` @ `81be2ba`  ")
     A("> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) "
       "was checked against the Go source, then every non-`MATCH` verdict was independently "
       "challenged by a second pass instructed to refute it. Verdict vocabulary is defined in "
       "[README.md](README.md#verdict-vocabulary).")
+
     A("")
 
     # ---- summary by subsystem -------------------------------------------------
