@@ -11,8 +11,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"math/big"
@@ -284,7 +286,7 @@ func strftimeExpand(s string, t time.Time) string {
 // Symlink safety does not depend on O_EXCL: it comes from root, which refuses
 // to traverse a symlink at any component (see openSessionRoot).
 func writeSessionFileAt(root *os.Root, name string, data []byte, perm os.FileMode) (err error) {
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	f, err := openSessionFileAt(root, name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
@@ -295,6 +297,62 @@ func writeSessionFileAt(root *os.Root, name string, data []byte, perm os.FileMod
 	}()
 	_, err = f.Write(data)
 	return err
+}
+
+// openSessionFileAt opens a session file through root, restoring the owner
+// write bit and retrying once if the open is refused with EACCES.
+//
+// This is the Go equivalent of C's iolog_openat (lib/iolog/iolog_openat.c:58-67),
+// through which sudo_logsrvd routes every session file — uuid
+// (logsrvd/iolog_writer.c:717), log and log.json (lib/iolog/iolog_loginfo.c:
+// 106,183), and timing plus every stream via iolog_open
+// (lib/iolog/iolog_open.c:83). On EACCES it stats the file and, if the write
+// bits implied by iolog_filemode are missing, fchmodat()s them back and repeats
+// the open.
+//
+// Without this, dropping O_EXCL (IOLOG-049) only half-fixes directory re-use.
+// finalize() chmods `timing` to 0440 to mark the session complete, exactly as C
+// does (logsrvd/logsrvd_local.c:427-431), so every NORMALLY COMPLETED session
+// leaves a read-only timing file behind. A later session landing on that
+// directory then gets EACCES from the O_TRUNC open instead of the old EEXIST —
+// the same fatal accept, the same "Internal Server Error" to the client, and
+// (ignore_iolog_errors defaulting to false) the same SIGKILL of the user's
+// already-running privileged command. Re-use after a *completed* session is the
+// common case; the aborted-session case that leaves timing writable is the rare
+// one.
+//
+// Only the owner write bit is restored, and only on a file that already exists
+// inside the pinned root. Symlink containment is unaffected: root refuses to
+// traverse a symlink at any component, so both the Stat and the Chmod resolve to
+// the same contained regular file the open just refused. C's second fallback —
+// retrying as iolog_uid/iolog_gid for NFS — has no analogue here and is
+// deliberately not emulated.
+func openSessionFileAt(root *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := root.OpenFile(name, flag, perm)
+	if err == nil || !errors.Is(err, fs.ErrPermission) {
+		return f, err
+	}
+
+	info, statErr := root.Stat(name)
+	if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0200 != 0 {
+		// Not the missing-write-bit case: report the original open error.
+		return nil, err
+	}
+	if chmodErr := root.Chmod(name, info.Mode().Perm()|0200); chmodErr != nil {
+		return nil, err
+	}
+	slog.Debug("Restored write bit on a read-only session file from a previous session",
+		"file", name, "previous_mode", info.Mode().Perm())
+
+	f, retryErr := root.OpenFile(name, flag, perm)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	// Put the intended mode back; the restore above was only to get the fd.
+	if chmodErr := root.Chmod(name, perm); chmodErr != nil {
+		slog.Warn("Failed to reset mode on a re-used session file", "file", name, "error", chmodErr)
+	}
+	return f, nil
 }
 
 // containsDotDot checks whether a path contains a ".." component,
@@ -1071,8 +1129,13 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	// so a re-used session directory is overwritten rather than rejected. With
 	// O_EXCL the second session on a re-used path failed, the client saw
 	// "Internal Server Error" and killed the user's privileged command.
+	//
+	// And openSessionFileAt rather than root.OpenFile, because O_TRUNC alone is
+	// not enough here: finalize() leaves this file 0440 on every completed
+	// session, so the O_TRUNC open of a re-used directory fails EACCES instead.
+	// C restores the write bit and retries (lib/iolog/iolog_openat.c:58-67).
 	// Conformance: docs/logsrvd-reference/ IOLOG-049.
-	s.timingFile, err = s.root.OpenFile(fileTiming, os.O_APPEND|os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	s.timingFile, err = openSessionFileAt(s.root, fileTiming, os.O_APPEND|os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
@@ -1106,8 +1169,11 @@ func (s *Session) ensureStreamFile(streamName string) error {
 	// O_TRUNC, not O_EXCL — same reason as the timing file above: C's iolog_open
 	// mode "w" is O_CREAT|O_TRUNC (lib/iolog/iolog_open.c:61), so a stale stream
 	// left behind in a re-used directory is truncated, not treated as a fatal
-	// error. Conformance: docs/logsrvd-reference/ IOLOG-049.
-	f, err := s.root.OpenFile(streamInfo.filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	// error. openSessionFileAt for the same reason as timing: C routes the
+	// streams through iolog_openat too (iolog_open.c:83), so a stale read-only
+	// stream is made writable and truncated, not treated as fatal.
+	// Conformance: docs/logsrvd-reference/ IOLOG-049.
+	f, err := openSessionFileAt(s.root, streamInfo.filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}

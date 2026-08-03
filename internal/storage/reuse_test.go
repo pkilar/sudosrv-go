@@ -157,3 +157,158 @@ func TestSessionRootRefusesSymlinkedUUID(t *testing.T) {
 		t.Errorf("symlink target was written through: got %q, want %q", got, victimContents)
 	}
 }
+
+// plantCompletedSession creates a session directory in the state a NORMALLY
+// COMPLETED session leaves behind: every file present and `timing` chmod'ed to
+// 0440 by finalize(), which is how both this server and C
+// (logsrvd/logsrvd_local.c:427-431) mark a session complete.
+//
+// This is the common re-use case. plantStaleSession above covers the rare one --
+// an aborted session, whose timing file is still writable.
+func plantCompletedSession(t *testing.T, sessionDir string, names ...string) {
+	t.Helper()
+	plantStaleSession(t, sessionDir, names...)
+	if err := os.Chmod(filepath.Join(sessionDir, "timing"), 0440); err != nil {
+		t.Fatalf("mark timing complete: %v", err)
+	}
+}
+
+// TestSessionReusesDirectoryAfterCompletedSession is the second half of
+// IOLOG-049, and the half that dropping O_EXCL alone does not fix.
+//
+// finalize() clears the write bits on `timing` to mark completion, so a re-used
+// directory almost always holds a READ-ONLY timing file. O_CREAT|O_TRUNC on it
+// fails EACCES rather than the old EEXIST -- a different errno reaching the same
+// fatal end: the accept fails, the client gets "Internal Server Error", and
+// because sudoers defaults ignore_iolog_errors to false the client breaks its
+// event loop and KILLS the user's running privileged command
+// (plugins/sudoers/log_client.c:1650-1656).
+//
+// C does not fail here. Every session file it opens goes through iolog_openat,
+// which on EACCES stats the file, restores the missing write bits with fchmodat
+// and retries the open (lib/iolog/iolog_openat.c:58-67).
+//
+// Conformance: docs/logsrvd-reference/ IOLOG-049.
+func TestSessionReusesDirectoryAfterCompletedSession(t *testing.T) {
+	cfg, sessionDir := fixedPathConfig(t)
+	plantCompletedSession(t, sessionDir, "uuid", "log", "log.json", "timing", "stdout", "stderr", "ttyout", "ttyin")
+
+	sessionUUID := uuid.New()
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession over a completed re-used directory: %v", err)
+	}
+	defer session.Close()
+
+	if _, err := session.HandleClientMessage(acceptClientMsg()); err != nil {
+		t.Fatalf("HandleClientMessage(Accept) over a completed re-used directory: %v", err)
+	}
+	ioMsg := &pb.ClientMessage{Type: &pb.ClientMessage_TtyinBuf{
+		TtyinBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 1000}, Data: []byte("fresh keystrokes")},
+	}}
+	if _, err := session.HandleClientMessage(ioMsg); err != nil {
+		t.Fatalf("HandleClientMessage(ttyin) over a completed re-used directory: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for _, name := range []string{"uuid", "log", "log.json", "timing", "stdout", "stderr", "ttyout", "ttyin"} {
+		got, err := os.ReadFile(filepath.Join(sessionDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if strings.Contains(string(got), "STALE DATA") {
+			t.Errorf("%s still contains data from the previous session: %q", name, got)
+		}
+	}
+}
+
+// TestSessionReusesReadOnlyStreamFile pins the same write-bit restore on the
+// stream files, which ensureStreamFile opens on demand rather than at accept.
+// C applies iolog_openat uniformly (streams reach it via iolog_open,
+// lib/iolog/iolog_open.c:83), so a stale read-only stream -- from a restore, a
+// backup tool, or an operator -- must be made writable and truncated, not
+// treated as fatal.
+func TestSessionReusesReadOnlyStreamFile(t *testing.T) {
+	cfg, sessionDir := fixedPathConfig(t)
+	plantCompletedSession(t, sessionDir, "uuid", "log", "log.json", "timing", "ttyin")
+	if err := os.Chmod(filepath.Join(sessionDir, "ttyin"), 0440); err != nil {
+		t.Fatalf("make ttyin read-only: %v", err)
+	}
+
+	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer session.Close()
+	if _, err := session.HandleClientMessage(acceptClientMsg()); err != nil {
+		t.Fatalf("HandleClientMessage(Accept): %v", err)
+	}
+
+	ioMsg := &pb.ClientMessage{Type: &pb.ClientMessage_TtyinBuf{
+		TtyinBuf: &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 1000}, Data: []byte("fresh keystrokes")},
+	}}
+	if _, err := session.HandleClientMessage(ioMsg); err != nil {
+		t.Fatalf("HandleClientMessage(ttyin) onto a read-only stream: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(sessionDir, "ttyin"))
+	if err != nil {
+		t.Fatalf("read ttyin: %v", err)
+	}
+	if strings.Contains(string(got), "STALE DATA") {
+		t.Errorf("ttyin was not truncated: %q", got)
+	}
+}
+
+// TestSessionRootRefusesReadOnlySymlinkedTiming makes sure the EACCES retry did
+// not open a containment hole. The retry stats and chmods the refused path, so
+// if either could follow a symlink an attacker could pre-plant a read-only
+// symlink to a file they do not own and have the server chmod it writable.
+// os.Root refuses to traverse a symlink at any component, so the open fails with
+// a symlink error rather than EACCES, the retry never runs, and the target keeps
+// both its mode and its contents.
+func TestSessionRootRefusesReadOnlySymlinkedTiming(t *testing.T) {
+	cfg, sessionDir := fixedPathConfig(t)
+
+	victim := filepath.Join(t.TempDir(), "victim")
+	const victimContents = "do not clobber\n"
+	if err := os.WriteFile(victim, []byte(victimContents), 0400); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	if err := os.MkdirAll(sessionDir, 0750); err != nil {
+		t.Fatalf("pre-create session dir: %v", err)
+	}
+	if err := os.Symlink(victim, filepath.Join(sessionDir, "timing")); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer session.Close()
+
+	if _, err := session.HandleClientMessage(acceptClientMsg()); err == nil {
+		t.Fatal("HandleClientMessage(Accept) succeeded through a symlinked timing; want refusal")
+	}
+
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatalf("stat victim: %v", err)
+	}
+	if info.Mode().Perm() != 0400 {
+		t.Errorf("symlink target was chmod'ed through the EACCES retry: mode is now %v, want 0400", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(got) != victimContents {
+		t.Errorf("symlink target was written through: got %q, want %q", got, victimContents)
+	}
+}
