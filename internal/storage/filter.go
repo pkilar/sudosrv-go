@@ -45,18 +45,26 @@ type PasswordFilter struct {
 //     "пароль" (ru), "密码"/"パスワード" (CJK)
 func NewPasswordFilter() *PasswordFilter {
 	filter := &PasswordFilter{}
-	// The "for X" sub-pattern matches the canonical sudo prompt
-	// ("[sudo] password for alice:") and ssh's "Enter passphrase for key X:".
+	// The trailing [\s:：]* MUST stay a zero-or-more quantifier, mirroring C's
+	// sole default PASSPROMPT_REGEX "[Pp]assword[: ]*" (include/sudo_iolog.h:65),
+	// which likewise permits zero terminator characters. Requiring a colon here
+	// would leave colon-less prompts ("Enter your password", "Password > ",
+	// "Password?", localised prompts with the keyword mid-sentence) undetected,
+	// and the secret would then be written verbatim into the session's ttyin /
+	// stdin stream while sudo_logsrvd would have masked it. This is the one
+	// place the filter could be less safe than C, so do not tighten it.
+	// Matching a keyword with no terminator can arm masking spuriously (see
+	// IOLOG-040), but that only ever masks more than C, never less.
 	defaults := []string{
-		`(?i)pass(word|phrase|wd)(\s+for\s+\S+)?\s*[:：]`,
-		`(?i)\bPIN\b\s*[:：]`,
-		`(?i)\bpasswort\b(\s+f[üu]r\s+\S+)?\s*[:：]`,
-		`(?i)contrase[ñn]a\s*[:：]`,
-		`(?i)mot de passe\s*[:：]`,
-		`(?i)\bsenha\b\s*[:：]`,
-		`пароль\s*[:：]`,
-		`密码\s*[:：]`,
-		`パスワード\s*[:：]`,
+		`(?i)pass(word|phrase|wd)[\s:：]*`,
+		`(?i)\bPIN\b[\s:：]*`,
+		`(?i)\bpasswort\b[\s:：]*`,
+		`(?i)contrase[ñn]a[\s:：]*`,
+		`(?i)mot de passe[\s:：]*`,
+		`(?i)\bsenha\b[\s:：]*`,
+		`пароль[\s:：]*`,
+		`密码[\s:：]*`,
+		`パスワード[\s:：]*`,
 	}
 	for _, p := range defaults {
 		_ = filter.AddPattern(p)

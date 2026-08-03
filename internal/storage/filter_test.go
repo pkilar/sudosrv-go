@@ -31,6 +31,43 @@ func TestPasswordFilter_DetectsPrompts(t *testing.T) {
 	}
 }
 
+// TestPasswordFilter_ColonlessPrompts verifies prompts that do not end in a
+// colon still arm masking. C's default passprompt regex is "[Pp]assword[: ]*"
+// (include/sudo_iolog.h:65) whose trailing quantifier permits zero characters,
+// so sudo_logsrvd masks after a bare "Password". Requiring a colon here would
+// write the secret verbatim into ttyin for every colon-less prompt.
+func TestPasswordFilter_ColonlessPrompts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		prompt string
+	}{
+		{"bare word", "Enter your password"},
+		{"angle bracket", "Password > "},
+		{"question mark", "Password? "},
+		{"space only", "Password "},
+		{"passphrase no colon", "Enter passphrase for key '/home/a/.ssh/id_ed25519'"},
+		{"german no colon", "Passwort eingeben"},
+		{"spanish no colon", "Introduzca la contraseña"},
+		{"french no colon", "Entrez le mot de passe"},
+		{"portuguese no colon", "Digite a senha"},
+		{"russian no colon", "Введите пароль"},
+		{"chinese no colon", "请输入密码"},
+		{"japanese no colon", "パスワードを入力"},
+		{"pin no colon", "Enter PIN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := NewPasswordFilter()
+			f.CheckOutput([]byte(tc.prompt))
+			if !f.IsFiltering() {
+				t.Fatalf("colon-less prompt %q did not trigger filtering", tc.prompt)
+			}
+		})
+	}
+}
+
 // TestPasswordFilter_StripsCSI verifies the CSI bypass fix: terminal redraw
 // often interleaves cursor/color codes between "Password" and ":", which
 // previously prevented the regex from matching and let the secret through.
