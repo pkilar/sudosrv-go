@@ -589,96 +589,6 @@ func (*InfoMessage_Strlistval) isInfoMessage_Value() {}
 
 func (*InfoMessage_Numlistval) isInfoMessage_Value() {}
 
-// A list of strings
-type StringList struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Strings       []string               `protobuf:"bytes,1,rep,name=strings,proto3" json:"strings,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StringList) Reset() {
-	*x = StringList{}
-	mi := &file_sudo_logsrv_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StringList) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StringList) ProtoMessage() {}
-
-func (x *StringList) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StringList.ProtoReflect.Descriptor instead.
-func (*StringList) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *StringList) GetStrings() []string {
-	if x != nil {
-		return x.Strings
-	}
-	return nil
-}
-
-// A list of numbers
-type NumberList struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Numbers       []int64                `protobuf:"varint,1,rep,packed,name=numbers,proto3" json:"numbers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *NumberList) Reset() {
-	*x = NumberList{}
-	mi := &file_sudo_logsrv_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *NumberList) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*NumberList) ProtoMessage() {}
-
-func (x *NumberList) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use NumberList.ProtoReflect.Descriptor instead.
-func (*NumberList) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *NumberList) GetNumbers() []int64 {
-	if x != nil {
-		return x.Numbers
-	}
-	return nil
-}
-
 // Initial client handshake.
 type ClientHello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -689,7 +599,7 @@ type ClientHello struct {
 
 func (x *ClientHello) Reset() {
 	*x = ClientHello{}
-	mi := &file_sudo_logsrv_proto_msgTypes[6]
+	mi := &file_sudo_logsrv_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -701,7 +611,7 @@ func (x *ClientHello) String() string {
 func (*ClientHello) ProtoMessage() {}
 
 func (x *ClientHello) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[6]
+	mi := &file_sudo_logsrv_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -714,7 +624,7 @@ func (x *ClientHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientHello.ProtoReflect.Descriptor instead.
 func (*ClientHello) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{6}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ClientHello) GetClientId() string {
@@ -737,7 +647,7 @@ type ServerHello struct {
 
 func (x *ServerHello) Reset() {
 	*x = ServerHello{}
-	mi := &file_sudo_logsrv_proto_msgTypes[7]
+	mi := &file_sudo_logsrv_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -749,7 +659,7 @@ func (x *ServerHello) String() string {
 func (*ServerHello) ProtoMessage() {}
 
 func (x *ServerHello) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[7]
+	mi := &file_sudo_logsrv_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -762,7 +672,7 @@ func (x *ServerHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerHello.ProtoReflect.Descriptor instead.
 func (*ServerHello) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{7}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ServerHello) GetServerId() string {
@@ -805,7 +715,7 @@ type AcceptMessage struct {
 
 func (x *AcceptMessage) Reset() {
 	*x = AcceptMessage{}
-	mi := &file_sudo_logsrv_proto_msgTypes[8]
+	mi := &file_sudo_logsrv_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -817,7 +727,7 @@ func (x *AcceptMessage) String() string {
 func (*AcceptMessage) ProtoMessage() {}
 
 func (x *AcceptMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[8]
+	mi := &file_sudo_logsrv_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -830,7 +740,7 @@ func (x *AcceptMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptMessage.ProtoReflect.Descriptor instead.
 func (*AcceptMessage) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{8}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *AcceptMessage) GetSubmitTime() *TimeSpec {
@@ -866,7 +776,7 @@ type RejectMessage struct {
 
 func (x *RejectMessage) Reset() {
 	*x = RejectMessage{}
-	mi := &file_sudo_logsrv_proto_msgTypes[9]
+	mi := &file_sudo_logsrv_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -878,7 +788,7 @@ func (x *RejectMessage) String() string {
 func (*RejectMessage) ProtoMessage() {}
 
 func (x *RejectMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[9]
+	mi := &file_sudo_logsrv_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -891,7 +801,7 @@ func (x *RejectMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RejectMessage.ProtoReflect.Descriptor instead.
 func (*RejectMessage) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{9}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RejectMessage) GetSubmitTime() *TimeSpec {
@@ -929,7 +839,7 @@ type ExitMessage struct {
 
 func (x *ExitMessage) Reset() {
 	*x = ExitMessage{}
-	mi := &file_sudo_logsrv_proto_msgTypes[10]
+	mi := &file_sudo_logsrv_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -941,7 +851,7 @@ func (x *ExitMessage) String() string {
 func (*ExitMessage) ProtoMessage() {}
 
 func (x *ExitMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[10]
+	mi := &file_sudo_logsrv_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -954,7 +864,7 @@ func (x *ExitMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExitMessage.ProtoReflect.Descriptor instead.
 func (*ExitMessage) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{10}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExitMessage) GetRunTime() *TimeSpec {
@@ -1003,7 +913,7 @@ type RestartMessage struct {
 
 func (x *RestartMessage) Reset() {
 	*x = RestartMessage{}
-	mi := &file_sudo_logsrv_proto_msgTypes[11]
+	mi := &file_sudo_logsrv_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1015,7 +925,7 @@ func (x *RestartMessage) String() string {
 func (*RestartMessage) ProtoMessage() {}
 
 func (x *RestartMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[11]
+	mi := &file_sudo_logsrv_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1028,7 +938,7 @@ func (x *RestartMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestartMessage.ProtoReflect.Descriptor instead.
 func (*RestartMessage) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{11}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RestartMessage) GetLogId() string {
@@ -1057,7 +967,7 @@ type AlertMessage struct {
 
 func (x *AlertMessage) Reset() {
 	*x = AlertMessage{}
-	mi := &file_sudo_logsrv_proto_msgTypes[12]
+	mi := &file_sudo_logsrv_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1069,7 +979,7 @@ func (x *AlertMessage) String() string {
 func (*AlertMessage) ProtoMessage() {}
 
 func (x *AlertMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[12]
+	mi := &file_sudo_logsrv_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1082,7 +992,7 @@ func (x *AlertMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlertMessage.ProtoReflect.Descriptor instead.
 func (*AlertMessage) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{12}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AlertMessage) GetAlertTime() *TimeSpec {
@@ -1117,7 +1027,7 @@ type IoBuffer struct {
 
 func (x *IoBuffer) Reset() {
 	*x = IoBuffer{}
-	mi := &file_sudo_logsrv_proto_msgTypes[13]
+	mi := &file_sudo_logsrv_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1129,7 +1039,7 @@ func (x *IoBuffer) String() string {
 func (*IoBuffer) ProtoMessage() {}
 
 func (x *IoBuffer) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[13]
+	mi := &file_sudo_logsrv_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1142,7 +1052,7 @@ func (x *IoBuffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IoBuffer.ProtoReflect.Descriptor instead.
 func (*IoBuffer) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{13}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *IoBuffer) GetDelay() *TimeSpec {
@@ -1171,7 +1081,7 @@ type ChangeWindowSize struct {
 
 func (x *ChangeWindowSize) Reset() {
 	*x = ChangeWindowSize{}
-	mi := &file_sudo_logsrv_proto_msgTypes[14]
+	mi := &file_sudo_logsrv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1183,7 +1093,7 @@ func (x *ChangeWindowSize) String() string {
 func (*ChangeWindowSize) ProtoMessage() {}
 
 func (x *ChangeWindowSize) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[14]
+	mi := &file_sudo_logsrv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1196,7 +1106,7 @@ func (x *ChangeWindowSize) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangeWindowSize.ProtoReflect.Descriptor instead.
 func (*ChangeWindowSize) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{14}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ChangeWindowSize) GetDelay() *TimeSpec {
@@ -1231,7 +1141,7 @@ type CommandSuspend struct {
 
 func (x *CommandSuspend) Reset() {
 	*x = CommandSuspend{}
-	mi := &file_sudo_logsrv_proto_msgTypes[15]
+	mi := &file_sudo_logsrv_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1243,7 +1153,7 @@ func (x *CommandSuspend) String() string {
 func (*CommandSuspend) ProtoMessage() {}
 
 func (x *CommandSuspend) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[15]
+	mi := &file_sudo_logsrv_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1256,7 +1166,7 @@ func (x *CommandSuspend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandSuspend.ProtoReflect.Descriptor instead.
 func (*CommandSuspend) Descriptor() ([]byte, []int) {
-	return file_sudo_logsrv_proto_rawDescGZIP(), []int{15}
+	return file_sudo_logsrv_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CommandSuspend) GetDelay() *TimeSpec {
@@ -1282,7 +1192,7 @@ type InfoMessage_StringList struct {
 
 func (x *InfoMessage_StringList) Reset() {
 	*x = InfoMessage_StringList{}
-	mi := &file_sudo_logsrv_proto_msgTypes[16]
+	mi := &file_sudo_logsrv_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1294,7 +1204,7 @@ func (x *InfoMessage_StringList) String() string {
 func (*InfoMessage_StringList) ProtoMessage() {}
 
 func (x *InfoMessage_StringList) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[16]
+	mi := &file_sudo_logsrv_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1326,7 +1236,7 @@ type InfoMessage_NumberList struct {
 
 func (x *InfoMessage_NumberList) Reset() {
 	*x = InfoMessage_NumberList{}
-	mi := &file_sudo_logsrv_proto_msgTypes[17]
+	mi := &file_sudo_logsrv_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1338,7 +1248,7 @@ func (x *InfoMessage_NumberList) String() string {
 func (*InfoMessage_NumberList) ProtoMessage() {}
 
 func (x *InfoMessage_NumberList) ProtoReflect() protoreflect.Message {
-	mi := &file_sudo_logsrv_proto_msgTypes[17]
+	mi := &file_sudo_logsrv_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1414,13 +1324,7 @@ const file_sudo_logsrv_proto_rawDesc = "" +
 	"\n" +
 	"NumberList\x12\x18\n" +
 	"\anumbers\x18\x01 \x03(\x03R\anumbersB\a\n" +
-	"\x05value\"&\n" +
-	"\n" +
-	"StringList\x12\x18\n" +
-	"\astrings\x18\x01 \x03(\tR\astrings\"&\n" +
-	"\n" +
-	"NumberList\x12\x18\n" +
-	"\anumbers\x18\x01 \x03(\x03R\anumbers\"*\n" +
+	"\x05value\"*\n" +
 	"\vClientHello\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\"\x82\x01\n" +
 	"\vServerHello\x12\x1b\n" +
@@ -1477,45 +1381,43 @@ func file_sudo_logsrv_proto_rawDescGZIP() []byte {
 	return file_sudo_logsrv_proto_rawDescData
 }
 
-var file_sudo_logsrv_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_sudo_logsrv_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_sudo_logsrv_proto_goTypes = []any{
 	(*ClientMessage)(nil),          // 0: sudosrv_proto.ClientMessage
 	(*ServerMessage)(nil),          // 1: sudosrv_proto.ServerMessage
 	(*TimeSpec)(nil),               // 2: sudosrv_proto.TimeSpec
 	(*InfoMessage)(nil),            // 3: sudosrv_proto.InfoMessage
-	(*StringList)(nil),             // 4: sudosrv_proto.StringList
-	(*NumberList)(nil),             // 5: sudosrv_proto.NumberList
-	(*ClientHello)(nil),            // 6: sudosrv_proto.ClientHello
-	(*ServerHello)(nil),            // 7: sudosrv_proto.ServerHello
-	(*AcceptMessage)(nil),          // 8: sudosrv_proto.AcceptMessage
-	(*RejectMessage)(nil),          // 9: sudosrv_proto.RejectMessage
-	(*ExitMessage)(nil),            // 10: sudosrv_proto.ExitMessage
-	(*RestartMessage)(nil),         // 11: sudosrv_proto.RestartMessage
-	(*AlertMessage)(nil),           // 12: sudosrv_proto.AlertMessage
-	(*IoBuffer)(nil),               // 13: sudosrv_proto.IoBuffer
-	(*ChangeWindowSize)(nil),       // 14: sudosrv_proto.ChangeWindowSize
-	(*CommandSuspend)(nil),         // 15: sudosrv_proto.CommandSuspend
-	(*InfoMessage_StringList)(nil), // 16: sudosrv_proto.InfoMessage.StringList
-	(*InfoMessage_NumberList)(nil), // 17: sudosrv_proto.InfoMessage.NumberList
+	(*ClientHello)(nil),            // 4: sudosrv_proto.ClientHello
+	(*ServerHello)(nil),            // 5: sudosrv_proto.ServerHello
+	(*AcceptMessage)(nil),          // 6: sudosrv_proto.AcceptMessage
+	(*RejectMessage)(nil),          // 7: sudosrv_proto.RejectMessage
+	(*ExitMessage)(nil),            // 8: sudosrv_proto.ExitMessage
+	(*RestartMessage)(nil),         // 9: sudosrv_proto.RestartMessage
+	(*AlertMessage)(nil),           // 10: sudosrv_proto.AlertMessage
+	(*IoBuffer)(nil),               // 11: sudosrv_proto.IoBuffer
+	(*ChangeWindowSize)(nil),       // 12: sudosrv_proto.ChangeWindowSize
+	(*CommandSuspend)(nil),         // 13: sudosrv_proto.CommandSuspend
+	(*InfoMessage_StringList)(nil), // 14: sudosrv_proto.InfoMessage.StringList
+	(*InfoMessage_NumberList)(nil), // 15: sudosrv_proto.InfoMessage.NumberList
 }
 var file_sudo_logsrv_proto_depIdxs = []int32{
-	8,  // 0: sudosrv_proto.ClientMessage.accept_msg:type_name -> sudosrv_proto.AcceptMessage
-	9,  // 1: sudosrv_proto.ClientMessage.reject_msg:type_name -> sudosrv_proto.RejectMessage
-	10, // 2: sudosrv_proto.ClientMessage.exit_msg:type_name -> sudosrv_proto.ExitMessage
-	11, // 3: sudosrv_proto.ClientMessage.restart_msg:type_name -> sudosrv_proto.RestartMessage
-	12, // 4: sudosrv_proto.ClientMessage.alert_msg:type_name -> sudosrv_proto.AlertMessage
-	13, // 5: sudosrv_proto.ClientMessage.ttyin_buf:type_name -> sudosrv_proto.IoBuffer
-	13, // 6: sudosrv_proto.ClientMessage.ttyout_buf:type_name -> sudosrv_proto.IoBuffer
-	13, // 7: sudosrv_proto.ClientMessage.stdin_buf:type_name -> sudosrv_proto.IoBuffer
-	13, // 8: sudosrv_proto.ClientMessage.stdout_buf:type_name -> sudosrv_proto.IoBuffer
-	13, // 9: sudosrv_proto.ClientMessage.stderr_buf:type_name -> sudosrv_proto.IoBuffer
-	14, // 10: sudosrv_proto.ClientMessage.winsize_event:type_name -> sudosrv_proto.ChangeWindowSize
-	15, // 11: sudosrv_proto.ClientMessage.suspend_event:type_name -> sudosrv_proto.CommandSuspend
-	6,  // 12: sudosrv_proto.ClientMessage.hello_msg:type_name -> sudosrv_proto.ClientHello
-	7,  // 13: sudosrv_proto.ServerMessage.hello:type_name -> sudosrv_proto.ServerHello
+	6,  // 0: sudosrv_proto.ClientMessage.accept_msg:type_name -> sudosrv_proto.AcceptMessage
+	7,  // 1: sudosrv_proto.ClientMessage.reject_msg:type_name -> sudosrv_proto.RejectMessage
+	8,  // 2: sudosrv_proto.ClientMessage.exit_msg:type_name -> sudosrv_proto.ExitMessage
+	9,  // 3: sudosrv_proto.ClientMessage.restart_msg:type_name -> sudosrv_proto.RestartMessage
+	10, // 4: sudosrv_proto.ClientMessage.alert_msg:type_name -> sudosrv_proto.AlertMessage
+	11, // 5: sudosrv_proto.ClientMessage.ttyin_buf:type_name -> sudosrv_proto.IoBuffer
+	11, // 6: sudosrv_proto.ClientMessage.ttyout_buf:type_name -> sudosrv_proto.IoBuffer
+	11, // 7: sudosrv_proto.ClientMessage.stdin_buf:type_name -> sudosrv_proto.IoBuffer
+	11, // 8: sudosrv_proto.ClientMessage.stdout_buf:type_name -> sudosrv_proto.IoBuffer
+	11, // 9: sudosrv_proto.ClientMessage.stderr_buf:type_name -> sudosrv_proto.IoBuffer
+	12, // 10: sudosrv_proto.ClientMessage.winsize_event:type_name -> sudosrv_proto.ChangeWindowSize
+	13, // 11: sudosrv_proto.ClientMessage.suspend_event:type_name -> sudosrv_proto.CommandSuspend
+	4,  // 12: sudosrv_proto.ClientMessage.hello_msg:type_name -> sudosrv_proto.ClientHello
+	5,  // 13: sudosrv_proto.ServerMessage.hello:type_name -> sudosrv_proto.ServerHello
 	2,  // 14: sudosrv_proto.ServerMessage.commit_point:type_name -> sudosrv_proto.TimeSpec
-	16, // 15: sudosrv_proto.InfoMessage.strlistval:type_name -> sudosrv_proto.InfoMessage.StringList
-	17, // 16: sudosrv_proto.InfoMessage.numlistval:type_name -> sudosrv_proto.InfoMessage.NumberList
+	14, // 15: sudosrv_proto.InfoMessage.strlistval:type_name -> sudosrv_proto.InfoMessage.StringList
+	15, // 16: sudosrv_proto.InfoMessage.numlistval:type_name -> sudosrv_proto.InfoMessage.NumberList
 	2,  // 17: sudosrv_proto.AcceptMessage.submit_time:type_name -> sudosrv_proto.TimeSpec
 	3,  // 18: sudosrv_proto.AcceptMessage.info_msgs:type_name -> sudosrv_proto.InfoMessage
 	2,  // 19: sudosrv_proto.RejectMessage.submit_time:type_name -> sudosrv_proto.TimeSpec
@@ -1573,7 +1475,7 @@ func file_sudo_logsrv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sudo_logsrv_proto_rawDesc), len(file_sudo_logsrv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

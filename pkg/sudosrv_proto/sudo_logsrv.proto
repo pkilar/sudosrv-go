@@ -61,15 +61,7 @@ message InfoMessage {
     }
 }
 
-// A list of strings
-message StringList {
-    repeated string strings = 1;
-}
 
-// A list of numbers
-message NumberList {
-    repeated int64 numbers = 1;
-}
 
 // Initial client handshake.
 message ClientHello {
