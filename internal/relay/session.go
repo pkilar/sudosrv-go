@@ -67,7 +67,8 @@ type Session struct {
 	// initialAcceptMsg — from later sub-command accepts, which must be cached
 	// and relayed. Pre-set for resumed sessions: their accept belonged to the
 	// original session, so the first accept a restart sees is already a
-	// sub-command. See HandleClientMessage.
+	// sub-command. Also pre-set for event-only sessions, which get no replay
+	// at all. See NewSession and HandleClientMessage.
 	initialAcceptSeen atomic.Bool
 	fromClientChan    chan *pb.ClientMessage
 	// sendMu serializes Close against in-flight HandleClientMessage calls.
@@ -168,6 +169,20 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		cancel:           cancel,
 		onDone:           onDone,
 	}
+	// Only an I/O session's accept is replayed through HandleClientMessage (by
+	// handleAccept, to produce the log_id the client waits for). An event-only
+	// accept — expect_iobufs=false — is dispatched to handleEventOnlyAccept
+	// instead, which returns without that replay because sudo expects no log_id
+	// when I/O logging is off (C: logsrvd/logsrvd_journal.c:571 calls
+	// fmt_log_id_message only when msg->expect_iobufs). So consume the flag here:
+	// otherwise the FIRST sub-command accept of an event-only session would be
+	// mistaken for the session's own, answered with an unsolicited log_id, and
+	// returned before reaching the cache writer — i.e. never journalled. C
+	// journals every accept unconditionally (journal_accept), so a user running
+	// sudo with intercept/log_subcmds and I/O logging disabled would see the
+	// upstream audit trail silently lose the first intercepted command.
+	// Conformance: PROTO-015.
+	s.initialAcceptSeen.Store(!acceptMsg.GetExpectIobufs())
 	s.phase.Store(&phaseWriting)
 
 	s.wg.Go(s.run) // Start the single, durable goroutine for this session.
