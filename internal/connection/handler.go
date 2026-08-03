@@ -898,6 +898,17 @@ func (h *Handler) handleEventOnlyAccept(sessionUUID uuid.UUID, acceptMsg *pb.Acc
 	case "relay":
 		h.session, err = h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
 		if err != nil {
+			// Same fail-closed refusal as the I/O path in handleAccept: an
+			// event-only session is still a privileged command, so tell the
+			// client why it is being denied rather than reporting a server
+			// fault. Conformance: RELAY-010.
+			if errors.Is(err, relay.ErrUpstreamUnreachable) {
+				slog.Warn("Refusing command: no auditable path to the upstream log server",
+					"remote_addr", h.conn.RemoteAddr())
+				return &pb.ServerMessage{Type: &pb.ServerMessage_Error{
+					Error: "unable to reach upstream log server; command refused (require_upstream is set)",
+				}}, nil
+			}
 			return nil, fmt.Errorf("failed to create relay event-only session: %w", err)
 		}
 		h.refreshLogIDFromSession()
