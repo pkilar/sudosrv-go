@@ -413,14 +413,21 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 		return nil, fmt.Errorf("failed to build session path: %w", err)
 	}
 
+	// The directory is created before log_id is derived: an mkdtemp template
+	// makes createSessionDir return a different path than buildSessionPath
+	// produced, and log_id must name the directory that really exists. C does
+	// the same, setting evlog->iolog_path from the buffer iolog_mkpath rewrote
+	// (logsrvd/iolog_writer.c:622-630).
+	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.DirPermissions))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session directory: %w", err)
+	}
+
 	// Compute relative path for log_id generation (matches C sudo_logsrvd behavior).
 	relativePath := deriveLogIDRelativePath(cfg.LogDirectory, sessionDir)
 	logID := generateLogID(sessionUUID, relativePath)
 
 	slog.Debug("Resolved session log path", "log_id", logID, "path", sessionDir)
-	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
-		return nil, fmt.Errorf("failed to create session directory %s: %w", sessionDir, err)
-	}
 	root, err := openSessionRoot(sessionDir)
 	if err != nil {
 		return nil, err
@@ -475,12 +482,15 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	if err != nil {
 		return nil, fmt.Errorf("failed to build event session path: %w", err)
 	}
+	// Create the directory before deriving log_id; see NewSession for why the
+	// order matters when iolog_file is an mkdtemp template.
+	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.DirPermissions))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create event session directory: %w", err)
+	}
 	relativePath := deriveLogIDRelativePath(cfg.LogDirectory, sessionDir)
 	logID := generateLogID(sessionUUID, relativePath)
 
-	if err := os.MkdirAll(sessionDir, os.FileMode(cfg.DirPermissions)); err != nil {
-		return nil, fmt.Errorf("failed to create event session directory %s: %w", sessionDir, err)
-	}
 	root, err := openSessionRoot(sessionDir)
 	if err != nil {
 		return nil, err
@@ -664,6 +674,67 @@ func randomAlphanumericString(n int) (string, error) {
 		b[i] = alphanumericChars[num.Int64()]
 	}
 	return string(b), nil
+}
+
+// mkdtempSuffixLen is the number of trailing 'X' characters that mark an
+// expanded iolog path as an mkdtemp(3) template rather than a literal name.
+const mkdtempSuffixLen = 6
+
+// mkdtempAttempts bounds the retries on a name collision, standing in for the
+// TMP_MAX loop inside libc's mkdtemp().
+const mkdtempAttempts = 64
+
+// createSessionDir creates the session directory and returns the path actually
+// created, which is not necessarily the path passed in.
+//
+// If the last path component ends in six 'X' characters it is an mkdtemp(3)
+// template, and the X's are replaced with random characters to make the
+// directory unique. C sudo_logsrvd applies exactly this rule: every expanded
+// iolog path goes through iolog_mkpath (logsrvd/iolog_writer.c:622), which
+// dispatches to iolog_mkdtemp() instead of iolog_mkdirs() when the path ends in
+// at least six X's (lib/iolog/iolog_mkpath.c:41-50). sudoers(5) documents the
+// template as the way to make iolog_file unique without a shared seq file, so
+// operators do configure it.
+//
+// Without this, the template is taken literally: every session on the server
+// shares one directory named "XXXXXX" and each new session truncates the
+// previous session's uuid, log, log.json, timing and I/O streams — silent loss
+// of the audit trail. Do not replace this with a bare os.MkdirAll.
+//
+// Only the trailing six X's are substituted, matching mkdtemp(3): a template of
+// "run-XXXXXXXX" keeps "run-XX" literally and randomizes the last six.
+func createSessionDir(path string, perm os.FileMode) (string, error) {
+	base := filepath.Base(path)
+	if !strings.HasSuffix(base, strings.Repeat("X", mkdtempSuffixLen)) {
+		if err := os.MkdirAll(path, perm); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+
+	// Intermediate directories are created first, as C's iolog_mkdtemp does via
+	// sudo_open_parent_dir (lib/iolog/iolog_mkdtemp.c).
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, perm); err != nil {
+		return "", err
+	}
+	prefix := base[:len(base)-mkdtempSuffixLen]
+	for range mkdtempAttempts {
+		suffix, err := randomAlphanumericString(mkdtempSuffixLen)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate unique directory suffix: %w", err)
+		}
+		candidate := filepath.Join(parent, prefix+suffix)
+		// Mkdir is exclusive, so a losing racer simply retries with a new name.
+		err = os.Mkdir(candidate, perm)
+		if err == nil {
+			return candidate, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("failed to create unique directory for template %s after %d attempts", path, mkdtempAttempts)
 }
 
 // buildSessionPath constructs the full path to the log directory based on config settings.
