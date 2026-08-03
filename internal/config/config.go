@@ -3,8 +3,11 @@
 package config
 
 import (
+	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -176,9 +179,29 @@ func defaultConfig() *Config {
 	}
 }
 
+// unmarshalConfig decodes the config file STRICTLY: a key that maps to no
+// struct field is a fatal error, never a silent no-op.
+//
+// C behaves the same way. logsrvd_conf_parse() aborts the whole parse on an
+// unrecognized key -- "%s:%d [%s] illegal key: %s" (logsrvd/logsrvd_conf.c:1291)
+// -- and sudo_logsrvd turns that into EXIT_FAILURE at startup
+// (logsrvd/logsrvd.c:2275). Plain yaml.Unmarshal ignores unknown keys, so a
+// single-character typo like "listen_addres:" used to decode with err == nil and
+// leave the daemon bound to the 127.0.0.1:30343 default -- reachable only from
+// localhost -- while the operator's config said 0.0.0.0 and the log said nothing.
+// The same silence hid typos in tls_cert_file, password_filter and auth_token_file,
+// each of which fails open on a security control. Do not relax this back to
+// yaml.Unmarshal. Conformance: docs/logsrvd-reference/ CONF-002.
+// Guarded by TestLoadConfigRejectsUnknownKeys.
 func unmarshalConfig(data []byte, config *Config) error {
-	if err := yaml.Unmarshal(data, config); err != nil {
-		return fmt.Errorf("failed to unmarshal config YAML: %w", err)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(config); err != nil {
+		// An empty or comment-only file yields io.EOF; that is not an error,
+		// it just means "use the defaults".
+		if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("failed to unmarshal config YAML: %w", err)
+		}
 	}
 
 	// Re-apply defaults for zero-valued fields that yaml may have cleared

@@ -855,3 +855,83 @@ func TestIsLoopbackListenAddress(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadConfigRejectsUnknownKeys guards CONF-002: a misspelled key must be
+// fatal, not silently ignored. C's logsrvd_conf_parse() fails the whole load on
+// an unrecognized key ("%s:%d [%s] illegal key: %s", logsrvd_conf.c:1292) and
+// sudo_logsrvd exits EXIT_FAILURE (logsrvd.c:2275). Without this, a typo such as
+// "listen_addres" leaves the daemon quietly bound to the 127.0.0.1:30343
+// default while the operator believes it is listening on the configured address.
+func TestLoadConfigRejectsUnknownKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantIn  string
+	}{
+		{
+			name: "MisspelledKeyInSection",
+			content: `
+server:
+  mode: "local"
+  listen_addres: "0.0.0.0:9999"
+`,
+			wantIn: "listen_addres",
+		},
+		{
+			name: "UnknownTopLevelSection",
+			content: `
+server:
+  mode: "local"
+storage:
+  log_directory: "/tmp/x"
+`,
+			wantIn: "storage",
+		},
+		{
+			name: "UnknownKeyInNestedSection",
+			content: `
+local_storage:
+  log_directory: "/tmp/x"
+  compres: true
+`,
+			wantIn: "compres",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(tmpFile, []byte(tt.content), 0600); err != nil {
+				t.Fatalf("failed to write temp config file: %v", err)
+			}
+			_, err := LoadConfig(tmpFile)
+			if err == nil {
+				t.Fatalf("LoadConfig() accepted an unknown key; want an error mentioning %q", tt.wantIn)
+			}
+			if !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error should name the offending key %q, got: %v", tt.wantIn, err)
+			}
+		})
+	}
+}
+
+// TestShippedConfigsHaveNoUnknownKeys makes sure the strict decoding above does
+// not reject the configs this repo ships and packages install.
+func TestShippedConfigsHaveNoUnknownKeys(t *testing.T) {
+	paths, err := filepath.Glob("../../*.yaml")
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	paths = append(paths, "../../debian/sudosrv/etc/sudosrv/config.yaml")
+	if len(paths) < 2 {
+		t.Fatal("expected to find the shipped example configs")
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if _, err := LoadConfig(p); err != nil {
+			t.Errorf("shipped config %s failed to load: %v", p, err)
+		}
+	}
+}
