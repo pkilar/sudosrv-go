@@ -55,7 +55,11 @@ func TestRequireUpstreamRejectsWhenUnreachable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("default relay must accept the session and spool it, got: %v", err)
 		}
+		// Close only signals the writer; the background goroutine is still
+		// creating and writing {uuid}.log. Wait for it, or t.TempDir cleanup
+		// races the write and fails with "directory not empty".
 		_ = s.Close()
+		s.Wait()
 	})
 
 	t.Run("RequireUpstreamRejects", func(t *testing.T) {
@@ -103,6 +107,8 @@ func TestRequireUpstreamRejectsWhenUnreachable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reachable upstream must be accepted: %v", err)
 		}
+		// See DefaultSpoolsWhenUnreachable: Wait before t.TempDir cleanup.
 		_ = s.Close()
+		s.Wait()
 	})
 }
