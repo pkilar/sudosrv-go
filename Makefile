@@ -89,12 +89,12 @@ test:
 	@echo "Running tests..."
 	$(GOTEST) -race -timeout 60s -v ./...
 
-# Run the linter, pinned to the same version CI uses (.github/workflows/makefile.yml).
+# Run the linter. This is the ONLY place the version is pinned: the CI lint job
+# runs `make lint` rather than the golangci-lint action, so there is no second
+# copy of the version to drift out of step with this one.
 # `go run pkg@version` resolves in an isolated module, so the version is pinned
 # WITHOUT adding golangci-lint's dependency graph to go.mod/go.sum -- a tool
 # directive here would add ~900 lines of go.sum for a binary that never ships.
-# Keep this in step with the version in the workflow; drift between them
-# reintroduces the "passes locally, fails in CI" gap this exists to close.
 GOLANGCI_LINT_VERSION = v2.12.2
 
 lint:

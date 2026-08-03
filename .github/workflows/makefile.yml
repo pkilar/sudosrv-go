@@ -80,10 +80,15 @@ jobs:
         go-version-file: go.mod
         cache: true
 
+    # Runs `make lint`, which pins the version in ONE place: GOLANGCI_LINT_VERSION
+    # in the Makefile. This job previously used the golangci-lint action with its
+    # own `version:`, so the same value lived in two files and could drift
+    # silently -- bump the Makefile and CI would still pass on the old version,
+    # which is exactly the "passes locally, differs in CI" gap the pin exists to
+    # close. Invoking the Makefile target also means CI runs the command a
+    # developer runs, not an equivalent one.
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v7
-      with:
-        version: v2.12.2
+      run: make lint
 
   govulncheck:
     runs-on: ubuntu-latest
