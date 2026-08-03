@@ -270,12 +270,21 @@ func strftimeExpand(s string, t time.Time) string {
 	return b.String()
 }
 
-// writeNewFileAt is a clobber-safe replacement for os.WriteFile used for files
-// that a session creates from scratch. O_EXCL refuses pre-existing files;
-// symlink safety comes from root, which refuses to traverse a symlink at any
-// component (see openSessionRoot).
-func writeNewFileAt(root *os.Root, name string, data []byte, perm os.FileMode) (err error) {
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+// writeSessionFileAt is a replacement for os.WriteFile used for files that a
+// session creates at startup. It truncates a pre-existing file rather than
+// refusing it, matching C sudo_logsrvd, which opens `uuid` with
+// O_CREAT|O_TRUNC|O_WRONLY (logsrvd/iolog_writer.c:717) and `log`/`log.json`
+// the same way (lib/iolog/iolog_loginfo.c:106,183). Do NOT reintroduce O_EXCL:
+// a re-used session directory (iolog_file without a uniquifier, a lost or
+// restored seq file, or seq wrapping at maxseq) would then fail with EEXIST,
+// which reaches the client as "Internal Server Error" and — because sudoers
+// defaults ignore_iolog_errors to false — makes sudo kill the user's running
+// privileged command. Conformance: docs/logsrvd-reference/ IOLOG-049.
+//
+// Symlink safety does not depend on O_EXCL: it comes from root, which refuses
+// to traverse a symlink at any component (see openSessionRoot).
+func writeSessionFileAt(root *os.Root, name string, data []byte, perm os.FileMode) (err error) {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
@@ -443,7 +452,7 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	event.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
-	if err := writeNewFileAt(root, fileUUID, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
+	if err := writeSessionFileAt(root, fileUUID, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
 		return nil, fmt.Errorf("failed to write event uuid file: %w", err)
 	}
 	if err := event.updateLogJSON(); err != nil {
@@ -1029,10 +1038,11 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	}
 
 	// --- Write the UUID file (matches C sudo_logsrvd's iolog_store_uuid) ---
-	// O_EXCL refuses to overwrite a pre-existing file, and s.root refuses to
-	// traverse a symlink at any component — together they defend against a local
-	// attacker pre-planting a symlink inside a predictable sessionDir.
-	if err := writeNewFileAt(s.root, fileUUID, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
+	// A pre-existing file is truncated, not refused (see writeSessionFileAt).
+	// s.root refuses to traverse a symlink at any component, which is what
+	// defends against a local attacker pre-planting a symlink inside a
+	// predictable sessionDir.
+	if err := writeSessionFileAt(s.root, fileUUID, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to write uuid file: %w", err)
 	}
 	slog.Debug("Created UUID file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileUUID))
@@ -1049,14 +1059,20 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 		sanitizeLogSummaryField(infoMap["submitcwd"], false),
 		sanitizeLogSummaryField(infoMap["command"], false),
 	)
-	if err := writeNewFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeSessionFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileLog))
 
 	// --- Create timing and I/O stream files and initialize log.json ---
 	var err error
-	s.timingFile, err = s.root.OpenFile(fileTiming, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	// O_TRUNC, not O_EXCL: C opens timing in mode "w", i.e. O_CREAT|O_TRUNC
+	// (lib/iolog/iolog_open.c:61 via iolog_create, logsrvd/iolog_writer.c:658),
+	// so a re-used session directory is overwritten rather than rejected. With
+	// O_EXCL the second session on a re-used path failed, the client saw
+	// "Internal Server Error" and killed the user's privileged command.
+	// Conformance: docs/logsrvd-reference/ IOLOG-049.
+	s.timingFile, err = s.root.OpenFile(fileTiming, os.O_APPEND|os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
@@ -1087,7 +1103,11 @@ func (s *Session) ensureStreamFile(streamName string) error {
 	if !ok {
 		return fmt.Errorf("unknown stream name: %s", streamName)
 	}
-	f, err := s.root.OpenFile(streamInfo.filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	// O_TRUNC, not O_EXCL — same reason as the timing file above: C's iolog_open
+	// mode "w" is O_CREAT|O_TRUNC (lib/iolog/iolog_open.c:61), so a stale stream
+	// left behind in a re-used directory is truncated, not treated as a fatal
+	// error. Conformance: docs/logsrvd-reference/ IOLOG-049.
+	f, err := s.root.OpenFile(streamInfo.filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
 	if err != nil {
 		return err
 	}
