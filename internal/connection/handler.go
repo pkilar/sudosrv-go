@@ -276,6 +276,27 @@ func (h *Handler) Handle() {
 				return
 			}
 		}
+
+		// The ExitMessage ends the session; stop reading, exactly as C does by
+		// deleting the read event in handle_exit (sudo_ev_del(evbase, read_ev))
+		// and moving to EXITED/FINISHED, where any further message is a state
+		// machine error that closes the connection.
+		//
+		// Continuing to read appended post-Exit records to an already-terminated
+		// session. In relay mode they land in a cache file whose ExitMessage has
+		// already been written, so the flush replays a session that ends
+		// mid-stream and then keeps going -- delivering a truncated duplicate
+		// upstream, or looping on a replay the upstream will never acknowledge.
+		// One crafted message from an unauthenticated peer was enough to trigger
+		// it. The response above (the final commit_point) has already been sent,
+		// so a well-behaved client loses nothing.
+		//
+		// Conformance: docs/logsrvd-reference/ ARCH-036.
+		if _, isExit := clientMsg.Type.(*pb.ClientMessage_ExitMsg); isExit {
+			slog.Debug("ExitMessage processed; closing connection",
+				"remote_addr", h.conn.RemoteAddr())
+			return
+		}
 	}
 }
 

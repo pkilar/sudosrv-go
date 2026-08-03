@@ -1212,6 +1212,84 @@ func (c *deadlineRecorderConn) calls() (int, time.Time) {
 	return c.setCalls, c.lastDeadline
 }
 
+// TestNoMessagesAcceptedAfterExit checks that the server stops reading once the
+// client has sent its ExitMessage.
+//
+// C deletes the read event outright in handle_exit (sudo_ev_del(evbase,
+// read_ev)) and moves to EXITED/FINISHED, so a post-Exit message is never even
+// parsed; anything arriving in those states is a state machine error that kills
+// the connection. Go kept the loop running and handed every later message to the
+// session. In relay mode those extra records land in a cache file whose Exit has
+// already been written, so the flush replays a session that ends mid-stream and
+// then keeps going -- delivering a truncated duplicate upstream, or looping on
+// an unacknowledgeable replay. One crafted message from an unauthenticated peer
+// was enough.
+//
+// Conformance: docs/logsrvd-reference/ ARCH-036.
+func TestNoMessagesAcceptedAfterExit(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{
+		Mode: "local", ServerID: "t", ServerTimeout: 5 * time.Second,
+	}}
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	h := NewHandler(serverConn, cfg)
+	// A mock session keeps this focused on the handler's state machine rather
+	// than on local-storage path expansion.
+	h.sessionFactories.newLocalStorageSession = func(id uuid.UUID, _ *pb.AcceptMessage, _ *config.LocalStorageConfig) (SessionHandler, error) {
+		return &mockSessionHandler{t: t, HandleClientFn: func(m *pb.ClientMessage) (*pb.ServerMessage, error) {
+			if m.GetExitMsg() != nil {
+				return &pb.ServerMessage{Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{TvSec: 1}}}, nil
+			}
+			return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: id.String()}}, nil
+		}}, nil
+	}
+	done := make(chan struct{})
+	go func() { h.Handle(); close(done) }()
+
+	cp := protocol.NewProcessor(clientConn, clientConn)
+	write := func(m *pb.ClientMessage) error { return cp.WriteClientMessage(m) }
+
+	if err := write(&pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "x"}}}); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if _, err := cp.ReadServerMessage(); err != nil {
+		t.Fatalf("read ServerHello: %v", err)
+	}
+	if err := write(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: 1},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "u"}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "h"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}}}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	acceptResp, err := cp.ReadServerMessage()
+	if err != nil {
+		t.Fatalf("read log_id: %v", err)
+	}
+	if acceptResp.GetLogId() == "" {
+		t.Fatalf("accept was not acknowledged with a log_id, got %T (%v)", acceptResp.Type, acceptResp)
+	}
+	if err := write(&pb.ClientMessage{Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{}}}); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+	if _, err := cp.ReadServerMessage(); err != nil {
+		t.Fatalf("read final commit point: %v", err)
+	}
+
+	// The server must be finished with this connection now.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler kept reading after the ExitMessage; post-Exit records would " +
+			"be appended to an already-terminated session")
+	}
+}
+
 // TestWriteTimeoutBoundsUnresponsivePeer checks that a peer which completes the
 // handshake and then stops reading cannot pin a handler goroutine forever.
 //
