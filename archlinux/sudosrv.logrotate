@@ -11,13 +11,15 @@
     endscript
 }
 
-/var/spool/sudosrv-cache/*.log {
-    weekly
-    missingok
-    rotate 4
-    compress
-    delaycompress
-    notifempty
-    create 644 sudosrv sudosrv
-    maxage 30
-}
+# Do NOT add a stanza for the relay cache spool (/var/spool/sudosrv-cache).
+# It is not a log directory: it holds sudo session journals that have not yet
+# reached the upstream server, and the only handle on them is their name.
+# Rotation renames {uuid}.log to {uuid}.log.1, which neither the in-process
+# flush (internal/relay/session.go:155,218) nor startup orphan recovery
+# (ScanOrphans globs *.log and *.log.flushing, internal/relay/session.go:703-724)
+# can ever see again -- and then deletes it. A relay outage spanning one
+# rotation permanently destroys the undelivered audit backlog while the daemon
+# reports nothing wrong. C ships no logrotate config at all, and names its
+# journals with no .log suffix under <relay_dir>/incoming and <relay_dir>/outgoing
+# (logsrvd/logsrvd_journal.c:112-118,491-493). The spool drains itself: a cache
+# file is removed once the session has been acknowledged upstream.
