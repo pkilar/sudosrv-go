@@ -138,7 +138,7 @@ func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.Accept
 		if err != nil {
 			slog.Error("Refusing session: require_upstream is set and the upstream is unreachable",
 				"upstream", cfg.UpstreamHost, "error", err)
-			return nil, fmt.Errorf("%w: %v", ErrUpstreamUnreachable, err)
+			return nil, fmt.Errorf("%w: %w", ErrUpstreamUnreachable, err)
 		}
 		_ = probe.Close()
 	}
