@@ -53,6 +53,29 @@ var (
 
 // Session handles the entire lifecycle of a relay session. It is a durable,
 // background process independent of the client connection that created it.
+//
+// Relay mode is ALWAYS store-and-forward, by design: the session is journalled
+// to {relay_cache_directory}/{uuid}.log as messages arrive (the write phase) and
+// forwarded upstream only once the client's ExitMessage lands (the flush phase).
+// There is no streaming path and no store_first knob to select one, because
+// there is nothing to select between — this is C's store_first mode made
+// unconditional (logsrvd/logsrvd.c:209-212, which swaps in cms_journal and skips
+// connect_relay; the default cms_relay streams each message as it arrives).
+//
+// The two costs of that, accepted knowingly and documented for operators under
+// "A note on relay mode" in README.md:
+//
+//   - The upstream never sees a session in progress, so it cannot offer a live
+//     view of a running command. The management API on this server can.
+//   - A client that dies without sending ExitMessage leaves its journal in the
+//     cache until the daemon next starts and orphan recovery claims it
+//     (see RecoverOrphans). The record arrives late, not never.
+//
+// A third follows in the connection layer: the downstream ServerHello is
+// answered immediately rather than deferred behind an upstream connect. See
+// connection.Handler.handleHello.
+//
+// Conformance: docs/logsrvd-reference/ CONF-043, RELAY-002, RELAY-003.
 type Session struct {
 	logID            string
 	config           *config.RelayConfig
@@ -1029,6 +1052,13 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 		if verErr != nil {
 			return nil, fmt.Errorf("invalid relay tls_min_version: %w", verErr)
 		}
+		// InsecureSkipVerify tracks tls_skip_verify, which defaults to false —
+		// so by default the upstream's chain AND hostname are verified. That is
+		// deliberately stricter than C, whose relay does not verify at all
+		// unless tls_checkpeer is turned on (logsrvd/tls_client.c:251-256, and
+		// the default chain at logsrvd/logsrvd_conf.c:341-346,1688). See the
+		// TLSSkipVerify doc comment in internal/config for the trade-off.
+		// Conformance: docs/logsrvd-reference/ TLS-027.
 		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: minVer}
 		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
 		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)

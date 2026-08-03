@@ -19,9 +19,25 @@ import (
 )
 
 // TLSVersion maps a "1.2"/"1.3" config string to the crypto/tls version
-// constant. An empty string defaults to TLS 1.3 (the secure default), so
-// manually-constructed configs that omit the field still resolve. Any other
-// value is rejected so a typo cannot silently weaken the floor.
+// constant. An empty string defaults to TLS 1.3, so manually-constructed configs
+// that omit the field still resolve. Any other value is rejected so a typo
+// cannot silently weaken the floor.
+//
+// The 1.3 floor is a deliberate divergence. C pins a 1.2 minimum with no maximum
+// on both sides — SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) at
+// plugins/sudoers/log_client.c:214 and logsrvd/tls_init.c:283 — so a stock sudo
+// client negotiates 1.3 with us whenever its OpenSSL supports it, which every
+// OpenSSL from 1.1.1 (2018) onwards does. What the higher floor actually
+// excludes is a client linked against an older OpenSSL: it cannot complete the
+// handshake at all, and because sudo's ignore_iolog_errors defaults to false
+// that client's command is then killed rather than merely unlogged.
+//
+// The escape hatch is one config line, server.tls_min_version: "1.2" (and
+// relay.tls_min_version for the upstream dial), which restores C's floor exactly.
+// Prefer that over lowering the default: sites with no pre-1.1.1 clients should
+// not carry a weaker floor for the ones that do.
+//
+// Conformance: docs/logsrvd-reference/ TLS-004.
 func TLSVersion(s string) (uint16, error) {
 	switch s {
 	case "", "1.3":
@@ -62,8 +78,24 @@ type ServerConfig struct {
 
 // RelayConfig holds settings for relay mode.
 type RelayConfig struct {
-	UpstreamHost   string        `yaml:"upstream_host"`
-	UseTLS         bool          `yaml:"use_tls"`
+	UpstreamHost string `yaml:"upstream_host"`
+	UseTLS       bool   `yaml:"use_tls"`
+	// TLSSkipVerify disables chain and hostname verification of the upstream
+	// certificate. It defaults to FALSE, i.e. the upstream is verified — a
+	// deliberate divergence from C, which does not verify by default: [relay]
+	// tls_checkpeer is tri-state and falls back to [server] tls_checkpeer
+	// (logsrvd/logsrvd_conf.c:341-346), which is initialised to false
+	// (logsrvd/logsrvd_conf.c:1688), and tls_client_setup only installs
+	// SSL_CTX_set_verify when check_peer is set (logsrvd/tls_client.c:251-256).
+	// Stock sudo_logsrvd therefore relays complete transcripts of privileged
+	// sessions to any peer that completes a handshake.
+	//
+	// Being stricter is the point; the cost is that a private-CA or self-signed
+	// upstream that C would have accepted is refused on every dial here. Go uses
+	// the system root store, so a private CA is handled by installing it there or
+	// by setting SSL_CERT_FILE — there is no relay CA-bundle key. Setting this to
+	// true reproduces C's posture and is warned about loudly at startup
+	// (cmd/sudosrv/main.go). Conformance: docs/logsrvd-reference/ TLS-027.
 	TLSSkipVerify  bool          `yaml:"tls_skip_verify"`
 	TLSMinVersion  string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`

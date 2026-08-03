@@ -21,6 +21,10 @@ local_storage:
 # Settings for when server.mode is "relay". server.mode is the only switch that
 # turns relaying on: filling this block in while server.mode is "local" is now a
 # startup error rather than a daemon that quietly stores everything locally.
+#
+# Relay mode is always store-and-forward: a session is journalled to
+# relay_cache_directory and forwarded upstream after the client exits. There is
+# no streaming mode, so the upstream never sees a session in progress.
 #relay:
 #  upstream_host: "127.0.0.1:30344"
 #  require_upstream: false      # false (default): an unreachable upstream is
@@ -29,6 +33,12 @@ local_storage:
 #                               # true: refuse the command when the upstream is
 #                               # unreachable (fail closed on audit).
 #  use_tls: false
+#  tls_skip_verify: false       # false (default): the upstream certificate chain
+#                               # AND hostname are verified on every dial. This is
+#                               # stricter than sudo_logsrvd, which does not verify
+#                               # its relay peer by default. For a private CA,
+#                               # install it in the system trust store (or set
+#                               # SSL_CERT_FILE) rather than setting this to true.
 #  connect_timeout: 15s         # bounds the dial to the upstream only
 #  response_timeout: 30s        # how long an already-connected upstream may take
 #                               # to acknowledge a session. Too small a value

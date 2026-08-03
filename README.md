@@ -143,12 +143,39 @@ Any value `<= 0` (including omitting the key) disables the deadline. Set a
 positive duration only if you accept the above and specifically need idle
 connections reclaimed sooner than TCP keepalive does.
 
+### A note on relay mode: store-and-forward only
+
+Relay mode is **always store-and-forward**, and deliberately so. Every session is
+journalled to `relay_cache_directory` as it happens and forwarded upstream only
+after the client's `ExitMessage`. There is no streaming mode and no knob to
+select one.
+
+`sudo_logsrvd` offers both: its default relay streams each message upstream as it
+arrives, and `store_first = true` switches it to journal-then-forward. This
+server implements C's `store_first` behaviour unconditionally. Two consequences
+follow directly from that and are worth stating plainly:
+
+- **No live upstream view.** The upstream never observes a session in progress,
+  so real-time monitoring of a running command from the central host is not
+  possible. Use the [management API](#management-api) against *this* server for
+  a live view instead.
+- **A client that dies without sending `ExitMessage` leaves its journal in the
+  cache** until the daemon next starts, when orphan recovery picks it up. The
+  record is delivered late, not lost.
+
+A third consequence is the `ServerHello` handshake. Because the upstream is not
+dialled until the session ends, this server answers a client's `ClientHello`
+immediately, from its own configuration. C's *streaming* relay instead defers the
+downstream `ServerHello` until it has connected to the upstream and received the
+upstream's `ServerHello`, so a client there can observe an upstream outage as a
+delayed or absent greeting. Here it cannot — again matching C's `store_first`
+timing, which sends the greeting up front for the same reason.
+
 ### A note on `require_upstream`
 
-Relay mode is **store-and-forward**: a session is cached locally and delivered
-once the upstream is reachable. An upstream outage therefore does not stop people
+Because relay mode is store-and-forward, an upstream outage does not stop people
 using sudo — but it does mean a privileged command can run before any log server
-has seen it, which is fail-open with respect to auditing.
+has seen it, which is fail-open with respect to auditing. This is the default.
 
 `require_upstream: true` inverts that. The upstream must be reachable when the
 session is accepted, or the command is refused and the user is told why. Use it
@@ -158,6 +185,21 @@ accept the consequence: while the upstream is down, sudo is down.
 This mirrors the choice `sudo_logsrvd` makes with `store_first` — its default
 relay streams upstream and refuses the command when the relay list is exhausted;
 its `store_first` mode behaves like this server's default.
+
+### A note on relay TLS verification
+
+When `use_tls` is on, the upstream's certificate chain **and** hostname are
+verified on every dial. `sudo_logsrvd` does not do this: its `[relay]
+tls_checkpeer` falls back to `[server] tls_checkpeer`, which defaults to off, so
+stock C accepts any upstream that completes a handshake.
+
+Being stricter than C is intentional — a relay forwards complete transcripts of
+privileged sessions, and an unverified peer is an unauthenticated one. Go's
+system root store is used, so a private CA is trusted by installing it in the
+system trust store or by pointing `SSL_CERT_FILE` at the bundle. If the upstream
+uses a self-signed certificate that cannot be trusted that way,
+`tls_skip_verify: true` reproduces C's posture; it is the only escape hatch and
+the daemon logs a loud warning at startup when it is set.
 
 ### Supported Escape Sequences
 

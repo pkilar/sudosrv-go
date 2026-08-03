@@ -579,7 +579,25 @@ func (h *Handler) refreshLogIDFromSession() {
 	}
 }
 
-// handleHello responds to a ClientHello.
+// handleHello responds to a ClientHello immediately, from local configuration,
+// in BOTH server modes.
+//
+// This is deliberate, and it is the visible half of relay mode being
+// unconditionally store-and-forward (see RelayConfig in internal/config and
+// "A note on relay mode" in README.md). C's *streaming* relay defers the
+// downstream ServerHello: connect_relay() runs first and start_protocol() —
+// which formats the greeting — is reached only after the upstream's own
+// ServerHello arrives (logsrvd/logsrvd.c:1550-1558,1650-1658 →
+// logsrvd/logsrvd_relay.c:709-711). C's store_first relay does what we do here,
+// greeting the client up front because no upstream connection exists yet
+// (logsrvd/logsrvd.c:209-212 selects cms_journal and skips connect_relay).
+//
+// The consequence to accept: a client cannot infer an upstream outage from a
+// delayed or absent greeting. Its command proceeds and the session is spooled.
+// Sites that need the outage to block the command set require_upstream, which
+// dials the upstream at Accept time instead.
+//
+// Conformance: docs/logsrvd-reference/ RELAY-003, CONF-043.
 func (h *Handler) handleHello() (*pb.ServerMessage, error) {
 	helloResponse := &pb.ServerHello{
 		ServerId:    h.config.Server.ServerID,
