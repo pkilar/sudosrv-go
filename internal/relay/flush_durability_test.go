@@ -231,6 +231,47 @@ func TestFlushTreatsUpstreamErrorAsFailure(t *testing.T) {
 	requireExists(t, path, "the upstream rejected the session")
 }
 
+// TestFlushKeepsCacheWhenUpstreamClosesWithoutCommit covers the upstream dying
+// mid-flush: it read our replay into userspace, answered the Accept, and then
+// went away — SIGKILL, OOM, a restart, or a TCP proxy dropping the backend —
+// without ever persisting the session. A process death sends FIN, not RST, so
+// what we see is a clean EOF, indistinguishable at the socket layer from a
+// polite close.
+//
+// C treats exactly this as "premature EOF from <relay>" and errors out
+// (logsrvd/logsrvd_relay.c:869-888), because it unlinks the journal only at
+// FINISHED (logsrvd/logsrvd.c:296-305) and an I/O session reaches FINISHED only
+// when the upstream's final commit_point arrives (logsrvd/logsrvd.c:1315-1316).
+//
+// Conformance: docs/logsrvd-reference/ RELAY-022.
+func TestFlushKeepsCacheWhenUpstreamClosesWithoutCommit(t *testing.T) {
+	addr := startAckServer(t, func(proc protocol.Processor) {
+		for {
+			msg, err := proc.ReadClientMessage()
+			if err != nil {
+				return
+			}
+			if msg.GetAcceptMsg() != nil {
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_LogId{LogId: "upstream-log-id"},
+				})
+			}
+			if msg.GetExitMsg() != nil {
+				// Died here: bytes consumed, nothing committed, socket closed.
+				return
+			}
+		}
+	})
+	path := writeCacheFile(t, ioAccept(), exitMsg())
+
+	err := flushCache(t, path, durabilityConfig(addr))
+
+	if err == nil {
+		t.Error("a clean upstream EOF with no commit_point was treated as acknowledgement")
+	}
+	requireExists(t, path, "the upstream closed before sending a commit_point")
+}
+
 // TestFlushEventOnlySessionNeedsNoAcknowledgement guards the opposite failure.
 //
 // The protocol defines no acknowledgement for a session with

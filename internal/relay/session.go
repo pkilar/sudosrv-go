@@ -923,9 +923,26 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 // anything else — the upstream may have emitted periodic commit points during
 // the replay that are still queued ahead of the final one.
 //
-// A clean EOF is accepted as acknowledgement: C closes the connection once the
-// final commit point has been written and the closure reaches FINISHED
-// (logsrvd/logsrvd.c:1110-1116), so the close is itself a completion signal.
+// An EOF reached here is a FAILURE, never an acknowledgement. It is true that C
+// closes the connection once the final commit point has been written
+// (logsrvd/logsrvd.c:1110-1116), but that only makes a close meaningful when a
+// commit point preceded it — and this function returns as soon as one arrives,
+// so any EOF observed here arrived without one. C draws the same line: a
+// zero-length read while the closure is not yet FINISHED is "premature EOF from
+// <relay>" and becomes an error (logsrvd/logsrvd_relay.c:869-888, and the
+// SSL_ERROR_ZERO_RETURN twin at 995-1010); the journal is unlinked only at
+// FINISHED (logsrvd/logsrvd.c:296-305), which for an I/O session means after the
+// final commit point (logsrvd/logsrvd.c:1315-1316).
+//
+// Do not reinstate EOF-as-acknowledgement. An upstream killed (SIGKILL, OOM,
+// restart) after draining our replay into userspace but before persisting it
+// sends FIN, not RST — a clean EOF, byte-identical to a polite close. Accepting
+// it retires the cache file, which is the only remaining copy, so the session
+// ends up in no log server anywhere with no retry scheduled: silent audit loss.
+//
+// Event-only sessions are unaffected: they are never acknowledged at all, so
+// flushFile does not call this function for them.
+//
 // An error or abort from the upstream is always a failure.
 func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, waitCommit bool) error {
 	for {
@@ -935,8 +952,8 @@ func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.R
 			srvMsg, readErr = proc.ReadServerMessageContext(opCtx)
 			return readErr
 		})
-		if errors.Is(err, io.EOF) {
-			return nil
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("upstream closed the connection before acknowledging the session: %w", err)
 		}
 		if err != nil {
 			return err
