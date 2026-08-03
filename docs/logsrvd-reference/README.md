@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` @ `e2d67f8` — all 312 requirements freshly re-derived |
+| **Verified against** | `sudosrv` @ `81be2ba` — all 312 requirements re-derived |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -43,15 +43,14 @@ Re-verifying a subsystem means re-deriving its rows, not editing the table in pl
 
 ## Where conformance stands
 
-Every one of the 312 requirements was re-verified against the current tree, then every
-non-`MATCH` verdict was independently challenged: **86 `MATCH`**, 19 `INTENTIONAL`,
-100 `PARTIAL`, 44 `DIVERGENT`, 48 `ABSENT`, 15 `NA`.
+All 312 requirements were re-verified against the current tree and every non-`MATCH`
+verdict independently challenged: **92 `MATCH`**, 19 `INTENTIONAL`, 96 `PARTIAL`,
+42 `DIVERGENT`, 48 `ABSENT`, 15 `NA`.
 
-Nothing is graded `breaking`. **Six requirements are graded `high`** — see
-[Priority findings](CONFORMANCE.md#priority-findings). Three are newly surfaced by this
-pass rather than regressions, and one is a packaging bug the earlier remediation missed:
-the RPM and Arch configs still ship `idle_timeout: 30m`, so a packaged install re-arms
-the read deadline that was removed from the code defaults.
+**Nothing is graded `breaking` or `high`.** The worst remaining grade is `medium` (28
+requirements); the rest are `low` or `informational`. Every finding the audit raised at
+those two severities — 20 in total across the initial pass and the full re-verification —
+has been remediated.
 
 Two structural facts bound everything else:
 
