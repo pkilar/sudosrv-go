@@ -194,11 +194,27 @@ func (h *Handler) Handle() {
 		default:
 		}
 
-		// Arm a per-message idle read deadline. A non-positive IdleTimeout means
-		// "no read timeout", matching the reference C sudo_logsrvd, which adds its
-		// steady-state read event with a NULL timeout so an idle-but-alive client
-		// (e.g. an interactive shell left at a prompt) is never disconnected for
-		// inactivity. Operators opt into that parity with idle_timeout: -1s.
+		// Arm a per-message idle read deadline ONLY if the operator asked for one.
+		// IdleTimeout <= 0 (the default) means no deadline, matching the reference
+		// C sudo_logsrvd, which adds its steady-state read event with a NULL
+		// timeout: "No read timeout, client messages may happen at arbitrary
+		// times" (logsrvd/logsrvd.c:1372).
+		//
+		// Do not "helpfully" arm a fallback deadline when IdleTimeout <= 0, and do
+		// not reintroduce a finite default in internal/config. Disconnecting an
+		// idle client does not merely truncate its log — sudo's
+		// def_ignore_iolog_errors is false by default (plugins/sudoers/defaults.c:610),
+		// so the client answers a dropped log connection by killing the command it
+		// is running (plugins/sudoers/log_client.c:1919 → terminate_command). An
+		// interactive `sudo -s` sitting at a prompt would be SIGKILLed out from
+		// under the user.
+		//
+		// Dead (as opposed to idle) peers are reaped by TCP keepalive, and the
+		// blast radius of a stalled peer is bounded by max_connections.
+		//
+		// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025 (breaking).
+		// Guarded by TestIdleReadDeadlineOptOut (this package) and
+		// TestIdleTimeoutDefaultsToDisabled (internal/config).
 		if h.config.Server.IdleTimeout > 0 {
 			if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
 				slog.Error("Failed to set read deadline", "error", err)

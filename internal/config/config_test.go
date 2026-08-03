@@ -123,7 +123,8 @@ local_storage:
 		got  any
 		want any
 	}{
-		{"IdleTimeout", cfg.Server.IdleTimeout, 10 * time.Minute},
+		// Disabled by design — see TestIdleTimeoutDefaultsToDisabled.
+		{"IdleTimeout", cfg.Server.IdleTimeout, time.Duration(0)},
 		{"DirPermissions", cfg.LocalStorage.DirPermissions, uint32(0750)},
 		{"FilePermissions", cfg.LocalStorage.FilePermissions, uint32(0640)},
 		{"ConnectTimeout", cfg.Relay.ConnectTimeout, 5 * time.Second},
@@ -531,8 +532,11 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		t.Parallel()
 		cfg := &Config{} // all zero
 		applyZeroValueDefaults(cfg)
-		if cfg.Server.IdleTimeout != 10*time.Minute {
-			t.Errorf("IdleTimeout: got %v, want 10m", cfg.Server.IdleTimeout)
+		// IdleTimeout is intentionally NOT re-defaulted: zero means "no idle read
+		// deadline", which is the shipped behavior. See the comment in
+		// applyZeroValueDefaults and TestIdleTimeoutDefaultsToDisabled.
+		if cfg.Server.IdleTimeout != 0 {
+			t.Errorf("IdleTimeout: got %v, want 0 (must stay disabled)", cfg.Server.IdleTimeout)
 		}
 		if cfg.LocalStorage.DirPermissions != 0750 {
 			t.Errorf("DirPermissions: got 0%o, want 0750", cfg.LocalStorage.DirPermissions)
@@ -620,13 +624,32 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 	})
 }
 
-// TestIdleTimeoutNegativeIsPreserved verifies that a negative idle_timeout is
-// preserved (not re-defaulted to 10m). A negative value is the opt-out sentinel
-// for "no read timeout", matching the reference C sudo_logsrvd which never
-// disconnects an idle client. A zero/omitted value still restores the default.
-func TestIdleTimeoutNegativeIsPreserved(t *testing.T) {
-	t.Run("NegativeDisablesAndIsPreserved", func(t *testing.T) {
-		content := "server:\n  mode: \"local\"\n  idle_timeout: -1s\n"
+// TestIdleTimeoutDefaultsToDisabled pins the idle_timeout default to "no read
+// deadline". Do not "restore" a finite default here — it kills user commands.
+//
+// The reference C sudo_logsrvd arms its steady-state read event with an
+// explicit NULL timeout and never disconnects an idle client:
+//
+//	logsrvd/logsrvd.c:1372  /* No read timeout, client messages may happen at
+//	                           arbitrary times. */
+//
+// That is not a stylistic choice we may diverge from, because sudo's client
+// treats a lost log connection as fatal to the *command*, not just to logging:
+//
+//	plugins/sudoers/defaults.c:610    def_ignore_iolog_errors = false (default)
+//	plugins/sudoers/log_client.c:1919 if (!ignore_log_errors) loopbreak()
+//	                                  /* "kill the command" */
+//
+// So any finite idle_timeout eventually SIGKILLs an interactive `sudo -s` or
+// `sudo vim` sitting at a prompt — the server severs the connection and the
+// client tears the user's shell down with it. A "generous" default only moves
+// the goalpost (a root shell left open overnight still dies).
+//
+// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025 (breaking).
+// Operators who want a finite deadline must opt in explicitly.
+func TestIdleTimeoutDefaultsToDisabled(t *testing.T) {
+	load := func(t *testing.T, content string) *Config {
+		t.Helper()
 		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
 			t.Fatalf("write temp config: %v", err)
@@ -635,26 +658,44 @@ func TestIdleTimeoutNegativeIsPreserved(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadConfig() error: %v", err)
 		}
-		if cfg.Server.IdleTimeout != -1*time.Second {
-			t.Errorf("idle_timeout: got %v, want -1s (negative must be preserved, not re-defaulted)", cfg.Server.IdleTimeout)
-		}
+		return cfg
+	}
+
+	// The shipped default: nothing specified at all.
+	t.Run("OmittedMeansNoDeadline", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n")
 		if cfg.Server.IdleTimeout > 0 {
-			t.Errorf("idle_timeout %v should be non-positive so the handler skips the read deadline", cfg.Server.IdleTimeout)
+			t.Errorf("idle_timeout defaulted to %v; must be non-positive so the handler "+
+				"arms no read deadline (C parity: logsrvd.c:1372). A finite default "+
+				"kills idle interactive sessions — see this test's doc comment.",
+				cfg.Server.IdleTimeout)
 		}
 	})
 
-	t.Run("OmittedRestoresDefault", func(t *testing.T) {
-		content := "server:\n  mode: \"local\"\n"
-		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
-		if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
-			t.Fatalf("write temp config: %v", err)
+	// An operator writing "0s" means "off", not "give me your favourite number".
+	t.Run("ExplicitZeroMeansNoDeadline", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n  idle_timeout: 0s\n")
+		if cfg.Server.IdleTimeout > 0 {
+			t.Errorf("explicit idle_timeout: 0s was rewritten to %v; zero must mean "+
+				"disabled, not re-defaulted", cfg.Server.IdleTimeout)
 		}
-		cfg, err := LoadConfig(tmpFile)
-		if err != nil {
-			t.Fatalf("LoadConfig() error: %v", err)
+	})
+
+	// Back-compat: -1s was the documented opt-out before zero meant the same.
+	t.Run("NegativeIsPreserved", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n  idle_timeout: -1s\n")
+		if cfg.Server.IdleTimeout > 0 {
+			t.Errorf("idle_timeout: -1s produced %v; negative must remain non-positive",
+				cfg.Server.IdleTimeout)
 		}
-		if cfg.Server.IdleTimeout != 10*time.Minute {
-			t.Errorf("idle_timeout: got %v, want 10m default when omitted", cfg.Server.IdleTimeout)
+	})
+
+	// Opting in must still work — this is the whole escape hatch.
+	t.Run("PositiveIsPreserved", func(t *testing.T) {
+		cfg := load(t, "server:\n  mode: \"local\"\n  idle_timeout: 30m\n")
+		if cfg.Server.IdleTimeout != 30*time.Minute {
+			t.Errorf("idle_timeout: got %v, want 30m (explicit opt-in must be honoured)",
+				cfg.Server.IdleTimeout)
 		}
 	})
 }

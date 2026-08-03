@@ -1259,4 +1259,46 @@ func TestIdleReadDeadlineOptOut(t *testing.T) {
 			t.Errorf("expected a future read deadline, got %v", last)
 		}
 	})
+
+	// The regression guard that matters: not "the opt-out works" but "the
+	// shipped default IS the opt-out". This drives a config through the real
+	// LoadConfig path rather than hand-building a struct, so re-introducing a
+	// finite default in internal/config fails here too.
+	//
+	// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025.
+	t.Run("ShippedDefaultArmsNoReadDeadline", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(tmpFile, []byte("server:\n  mode: \"local\"\n"), 0600); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		cfg, err := config.LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig() error: %v", err)
+		}
+
+		clientConn, serverConn := net.Pipe()
+		rec := &deadlineRecorderConn{Conn: serverConn}
+		h := NewHandler(rec, cfg)
+		var wg sync.WaitGroup
+		wg.Go(h.Handle)
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+		if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "x"}},
+		}); err != nil {
+			t.Fatalf("client write Hello: %v", err)
+		}
+		if _, err := clientProc.ReadServerMessage(); err != nil {
+			t.Fatalf("client read ServerHello: %v", err)
+		}
+		clientConn.Close()
+		serverConn.Close()
+		wg.Wait()
+
+		if n, _ := rec.calls(); n != 0 {
+			t.Errorf("shipped defaults armed %d read deadline(s); an idle sudo session "+
+				"must never be disconnected by the server, because the client responds "+
+				"by killing the user's command (log_client.c:1919)", n)
+		}
+	})
 }
