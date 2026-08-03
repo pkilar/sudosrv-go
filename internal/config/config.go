@@ -297,6 +297,28 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("relay_cache_directory must be configured in relay mode")
 		}
 	}
+	if cfg.Server.Mode != "relay" && cfg.Relay.UpstreamHost != "" {
+		// C has no mode key: a non-empty relay list is itself the switch that
+		// puts sudo_logsrvd into relay mode, and every relay code path is
+		// guarded by !TAILQ_EMPTY(logsrvd_conf_relay_address())
+		// (logsrvd/logsrvd.c:1546,1652; logsrvd/logsrvd_conf.c:821-825). Here
+		// server.mode is the switch instead, so configuring relay.upstream_host
+		// and forgetting server.mode used to be accepted silently: the daemon
+		// wrote every session to local_storage.log_directory while the operator
+		// believed transcripts were being centralised upstream, and nothing in
+		// the startup log said otherwise. Discovery typically came months later,
+		// when someone went looking for a session on the central host.
+		//
+		// Reject rather than infer relay mode from the populated block: a
+		// package upgrade that adds this check must not silently flip a daemon
+		// that has been storing locally into forwarding privileged session
+		// transcripts to a host the operator never intended.
+		// Conformance: docs/logsrvd-reference/ CONF-038.
+		// Guarded by TestValidate/relay_upstream_host_set_while_mode_is_local_rejects.
+		return fmt.Errorf("relay.upstream_host is set but server.mode is %q: "+
+			"set server.mode to \"relay\" to forward sessions upstream, or remove relay.upstream_host",
+			cfg.Server.Mode)
+	}
 	if cfg.Server.Mode == "local" {
 		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
 			return err

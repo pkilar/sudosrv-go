@@ -102,15 +102,17 @@ local_storage:
   # compress: false
   # password_filter: true
 
-# Settings for when server.mode is "relay"
-relay:
-  upstream_host: "127.0.0.1:30344"
-  use_tls: false
-  connect_timeout: 15s
-  relay_cache_directory: "/var/log/gosudo-relay-cache"
-  reconnect_attempts: -1           # -1 = infinite
-  # require_upstream: false        # true = refuse commands when upstream is down
-  # max_reconnect_interval: 1m
+# Settings for when server.mode is "relay". server.mode is the only switch that
+# enables relaying, so setting upstream_host while mode is "local" is rejected at
+# startup rather than silently storing every session on this host.
+# relay:
+#   upstream_host: "127.0.0.1:30344"
+#   use_tls: false
+#   connect_timeout: 15s
+#   relay_cache_directory: "/var/log/gosudo-relay-cache"
+#   reconnect_attempts: -1         # -1 = infinite
+#   require_upstream: false        # true = refuse commands when upstream is down
+#   max_reconnect_interval: 1m
 
 # Optional read-only management API. Omit the block (or leave listen_address
 # empty) to disable. See "Management API" below for endpoint details.

@@ -300,6 +300,21 @@ func TestValidate(t *testing.T) {
 			wantErr: "relay_cache_directory must be configured",
 		},
 		{
+			name: "relay upstream_host set while mode is local rejects",
+			mutate: func(_ *testing.T, c *Config) {
+				c.Relay.UpstreamHost = "upstream:1234"
+				c.Relay.RelayCacheDirectory = "/tmp/cache"
+			},
+			wantErr: "relay.upstream_host",
+		},
+		{
+			name: "local mode with an empty relay block stays valid",
+			mutate: func(_ *testing.T, c *Config) {
+				c.Relay.RelayCacheDirectory = "/tmp/cache"
+				c.Relay.ConnectTimeout = 5 * time.Second
+			},
+		},
+		{
 			name: "local mode bad permissions delegates to ValidatePermissions",
 			mutate: func(_ *testing.T, c *Config) {
 				c.LocalStorage.DirPermissions = 0777
@@ -930,8 +945,17 @@ func TestShippedConfigsHaveNoUnknownKeys(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
-		if _, err := LoadConfig(p); err != nil {
+		cfg, err := LoadConfig(p)
+		if err != nil {
 			t.Errorf("shipped config %s failed to load: %v", p, err)
+			continue
+		}
+		// Loading is not enough: a shipped config that LoadConfig accepts but
+		// Validate rejects makes the daemon exit 2 on a fresh install. It also
+		// makes the example the worst possible teaching aid, which is how
+		// config.yaml came to advertise a relay upstream under mode: "local".
+		if err := Validate(cfg); err != nil {
+			t.Errorf("shipped config %s failed validation: %v", p, err)
 		}
 	}
 }

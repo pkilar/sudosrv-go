@@ -18,17 +18,20 @@ server:
 local_storage:
   log_directory: "/tmp/gosudo-io"
 
-relay:
-  upstream_host: "127.0.0.1:30344"
-  # require_upstream: false      # false (default): an unreachable upstream is
-  #                              # spooled locally and delivered later, so sudo
-  #                              # keeps working through an outage.
-  #                              # true: refuse the command when the upstream is
-  #                              # unreachable (fail closed on audit).
-  use_tls: false
-  connect_timeout: 15s
-  relay_cache_directory: "/tmp/sudosrv-cache"
-  reconnect_attempts: -1
+# Settings for when server.mode is "relay". server.mode is the only switch that
+# turns relaying on: filling this block in while server.mode is "local" is now a
+# startup error rather than a daemon that quietly stores everything locally.
+#relay:
+#  upstream_host: "127.0.0.1:30344"
+#  require_upstream: false      # false (default): an unreachable upstream is
+#                               # spooled locally and delivered later, so sudo
+#                               # keeps working through an outage.
+#                               # true: refuse the command when the upstream is
+#                               # unreachable (fail closed on audit).
+#  use_tls: false
+#  connect_timeout: 15s
+#  relay_cache_directory: "/tmp/sudosrv-cache"
+#  reconnect_attempts: -1
 
 # Optional read-only management HTTP API.
 # Leave listen_address empty (or omit the entire api: block) to disable it.
