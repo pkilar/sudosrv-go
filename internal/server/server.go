@@ -119,7 +119,13 @@ func (s *Server) Start() error {
 			s.closeListeners()
 			return fmt.Errorf("tls_cert_file and tls_key_file must be configured for TLS listener")
 		}
-		cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		// The key pair is fetched per handshake, not pinned here, so a
+		// certificate renewed in place is picked up without a restart and
+		// without a signal. See keyPairReloader for why. Certificates is left
+		// empty on purpose: with it populated, crypto/tls skips GetCertificate
+		// for clients that send no SNI.
+		// Conformance: docs/logsrvd-reference/ CONF-018.
+		certReloader, err := newKeyPairReloader(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		if err != nil {
 			s.closeListeners()
 			return fmt.Errorf("failed to load TLS key pair: %w", err)
@@ -130,8 +136,8 @@ func (s *Server) Start() error {
 			return fmt.Errorf("invalid server tls_min_version: %w", err)
 		}
 		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   minVer,
+			GetCertificate: certReloader.GetCertificate,
+			MinVersion:     minVer,
 		}
 		tlsBase, err := listenTCP(s.ctx, cfg.Server.ListenAddressTLS)
 		if err != nil {
