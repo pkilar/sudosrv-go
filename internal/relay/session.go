@@ -1059,11 +1059,23 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 	return proc, nil
 }
 
+// operationTimeout bounds a single message exchange with an upstream that is
+// already connected. It is relay.response_timeout (C's [relay] timeout, default
+// 30s, logsrvd/logsrvd_conf.c:827-841,1639), NOT relay.connect_timeout.
+//
+// Do not fold these two back together. connect_timeout defaults to 5s because it
+// bounds a dial; using it here meant an upstream that took longer than 5s to
+// fsync a session and send its final commit_point failed the flush. The cache
+// file is deliberately kept on a failed flush, so the whole session was replayed
+// on the next attempt and the upstream stored the same transcript twice under two
+// different log IDs — duplicate audit records, growing with every retry, on
+// exactly the loaded upstreams that are slowest to acknowledge.
+// Conformance: docs/logsrvd-reference/ CONF-039.
 func operationTimeout(cfg *config.RelayConfig) time.Duration {
-	if cfg.ConnectTimeout > 0 {
-		return cfg.ConnectTimeout
+	if cfg.ResponseTimeout > 0 {
+		return cfg.ResponseTimeout
 	}
-	return 5 * time.Second
+	return 30 * time.Second
 }
 
 func withOperationTimeout(parent context.Context, cfg *config.RelayConfig, fn func(context.Context) error) error {

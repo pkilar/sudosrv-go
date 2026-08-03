@@ -108,7 +108,8 @@ local_storage:
 # relay:
 #   upstream_host: "127.0.0.1:30344"
 #   use_tls: false
-#   connect_timeout: 15s
+#   connect_timeout: 15s           # bounds the dial only
+#   response_timeout: 30s          # how long the upstream may take to answer
 #   relay_cache_directory: "/var/log/gosudo-relay-cache"
 #   reconnect_attempts: -1         # -1 = infinite
 #   require_upstream: false        # true = refuse commands when upstream is down

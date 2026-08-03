@@ -29,7 +29,11 @@ local_storage:
 #                               # true: refuse the command when the upstream is
 #                               # unreachable (fail closed on audit).
 #  use_tls: false
-#  connect_timeout: 15s
+#  connect_timeout: 15s         # bounds the dial to the upstream only
+#  response_timeout: 30s        # how long an already-connected upstream may take
+#                               # to acknowledge a session. Too small a value
+#                               # fails the flush of a slow upstream, and the
+#                               # retry stores the session there a second time.
 #  relay_cache_directory: "/tmp/sudosrv-cache"
 #  reconnect_attempts: -1
 

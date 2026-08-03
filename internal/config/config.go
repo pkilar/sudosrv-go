@@ -62,11 +62,22 @@ type ServerConfig struct {
 
 // RelayConfig holds settings for relay mode.
 type RelayConfig struct {
-	UpstreamHost        string        `yaml:"upstream_host"`
-	UseTLS              bool          `yaml:"use_tls"`
-	TLSSkipVerify       bool          `yaml:"tls_skip_verify"`
-	TLSMinVersion       string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
-	ConnectTimeout      time.Duration `yaml:"connect_timeout"`
+	UpstreamHost   string        `yaml:"upstream_host"`
+	UseTLS         bool          `yaml:"use_tls"`
+	TLSSkipVerify  bool          `yaml:"tls_skip_verify"`
+	TLSMinVersion  string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	// ResponseTimeout bounds each message exchange with the upstream AFTER the
+	// connection is established, mirroring C's [relay] timeout (default 30s,
+	// logsrvd/logsrvd_conf.c:827-841,1639). It is deliberately a separate knob
+	// from ConnectTimeout: the dial budget is a latency figure, while this is
+	// how long a busy upstream may take to fsync a session and answer.
+	//
+	// Reusing the 5s ConnectTimeout here made an upstream that acknowledged a
+	// session in more than 5s fail the flush, so the cache file was kept and the
+	// entire session replayed on the next attempt — the same transcript stored
+	// twice upstream under two log IDs. Conformance: docs/logsrvd-reference/ CONF-039.
+	ResponseTimeout     time.Duration `yaml:"response_timeout"`
 	RelayCacheDirectory string        `yaml:"relay_cache_directory"`
 	ReconnectAttempts   int           `yaml:"reconnect_attempts"`
 	// RequireUpstream makes relay mode fail CLOSED: the upstream must be
@@ -161,6 +172,7 @@ func defaultConfig() *Config {
 		},
 		Relay: RelayConfig{
 			ConnectTimeout:       5 * time.Second,
+			ResponseTimeout:      30 * time.Second, // C's [relay] timeout default; see RelayConfig.ResponseTimeout.
 			RelayCacheDirectory:  "/var/log/gosudo-relay-cache",
 			ReconnectAttempts:    -1, // Default to trying forever
 			MaxReconnectInterval: 1 * time.Minute,
@@ -256,6 +268,9 @@ func applyZeroValueDefaults(cfg *Config) {
 	}
 	if cfg.Relay.ConnectTimeout == 0 {
 		cfg.Relay.ConnectTimeout = 5 * time.Second
+	}
+	if cfg.Relay.ResponseTimeout == 0 {
+		cfg.Relay.ResponseTimeout = 30 * time.Second
 	}
 	if cfg.Relay.MaxReconnectInterval == 0 {
 		cfg.Relay.MaxReconnectInterval = 1 * time.Minute
@@ -487,7 +502,8 @@ relay:
   upstream_host: "127.0.0.1:30343"
   use_tls: false
   tls_skip_verify: false  # Set to true only for testing with self-signed certs
-  connect_timeout: 5s
+  connect_timeout: 5s      # dial budget
+  response_timeout: 30s    # upstream reply budget once connected
   relay_cache_directory: "/var/spool/sudosrv-cache"
   reconnect_attempts: -1  # Number of retries, -1 for infinite
   max_reconnect_interval: "2m" # Maximum time to wait between retries

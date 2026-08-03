@@ -128,6 +128,12 @@ local_storage:
 		{"DirPermissions", cfg.LocalStorage.DirPermissions, uint32(0750)},
 		{"FilePermissions", cfg.LocalStorage.FilePermissions, uint32(0640)},
 		{"ConnectTimeout", cfg.Relay.ConnectTimeout, 5 * time.Second},
+		// C's [relay] timeout default (logsrvd/logsrvd_conf.c:1639). It is a
+		// separate, far larger budget than the dial: reusing ConnectTimeout for
+		// the upstream's reply failed the flush of any session a busy upstream
+		// took more than 5s to acknowledge, and the retry stored that session
+		// upstream a second time. Conformance: docs/logsrvd-reference/ CONF-039.
+		{"ResponseTimeout", cfg.Relay.ResponseTimeout, 30 * time.Second},
 		{"MaxReconnectInterval", cfg.Relay.MaxReconnectInterval, 1 * time.Minute},
 	}
 	for _, c := range checks {
@@ -562,6 +568,9 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		if cfg.Relay.ConnectTimeout != 5*time.Second {
 			t.Errorf("ConnectTimeout: got %v, want 5s", cfg.Relay.ConnectTimeout)
 		}
+		if cfg.Relay.ResponseTimeout != 30*time.Second {
+			t.Errorf("ResponseTimeout: got %v, want 30s", cfg.Relay.ResponseTimeout)
+		}
 		if cfg.Relay.MaxReconnectInterval != 1*time.Minute {
 			t.Errorf("MaxReconnectInterval: got %v, want 1m", cfg.Relay.MaxReconnectInterval)
 		}
@@ -576,6 +585,7 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 			},
 			Relay: RelayConfig{
 				ConnectTimeout:       2 * time.Second,
+				ResponseTimeout:      45 * time.Second,
 				MaxReconnectInterval: 30 * time.Second,
 			},
 			LocalStorage: LocalStorageConfig{
@@ -598,6 +608,9 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		}
 		if cfg.Relay.ConnectTimeout != 2*time.Second {
 			t.Errorf("ConnectTimeout was overwritten: got %v", cfg.Relay.ConnectTimeout)
+		}
+		if cfg.Relay.ResponseTimeout != 45*time.Second {
+			t.Errorf("ResponseTimeout was overwritten: got %v", cfg.Relay.ResponseTimeout)
 		}
 	})
 
