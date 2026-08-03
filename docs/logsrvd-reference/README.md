@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` `main` @ `928da84` |
+| **Verified against** | `sudosrv` @ `0669458` (15 remediated rows); all other rows carried forward from `928da84` |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -41,13 +41,13 @@ stale — it was not refreshed in the last pass. Trust the per-document header.
 `CONFORMANCE.md` is **generated** from the per-requirement verdicts, not hand-written.
 Re-verifying a subsystem means re-deriving its rows, not editing the table in place.
 
-## What the first pass found
+## Where conformance stands
 
-Of 312 requirements: **63 `MATCH`**, 22 `INTENTIONAL`, 97 `PARTIAL`, 63 `DIVERGENT`,
-57 `ABSENT`, 10 `NA`. After adversarial review, **3 are `breaking` and 11 are `high`** —
-see [Priority findings](CONFORMANCE.md#priority-findings).
+Of 312 requirements: **73 `MATCH`**, 23 `INTENTIONAL`, 98 `PARTIAL`, 52 `DIVERGENT`,
+56 `ABSENT`, 10 `NA`. **No requirement is graded `breaking` or `high`** — the 14 that
+were have been remediated (PRs #28 and #29); the worst remaining grade is `medium`.
 
-Two structural facts are worth stating up front, because they bound everything else:
+Two structural facts bound everything else:
 
 - **The protobuf schema is field-for-field identical.** All 16 messages and 55 fields
   match the C `log_server.proto` in name, number, type, label, and `oneof` membership.
@@ -57,14 +57,13 @@ Two structural facts are worth stating up front, because they bound everything e
   prefix, a 2 MiB ceiling (C `logsrv_util.h:36`, Go `processor.go:20`), and
   `IO_EVENT_*` 0–7 including the legacy `TTYOUT_1_8_7 = 6`.
 
-The wire protocol is in good shape — 37 protocol findings were challenged and none
-survived above `medium`. The concentrations of real risk are the **idle-timeout default**
-(one defect reached independently from three subsystems: `ARCH-024`, `ARCH-045`,
-`CONF-025`) and **relay durability** (`RELAY-019/020/034/042/054`).
-
-`PARTIAL` is the largest bucket at 97, and that is expected rather than alarming: most
+`PARTIAL` is the largest bucket at 98, and that is expected rather than alarming: most
 are a supported main path plus an unimplemented option or edge case. Read the severity,
 not the verdict.
+
+**Only the 15 remediated requirements were re-verified against the fixed tree.** Every
+other row in `CONFORMANCE.md` is carried forward from the initial audit at `928da84` and
+describes the code as it was then. The next full pass should re-derive them.
 
 ## Requirement IDs are a contract
 

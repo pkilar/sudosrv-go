@@ -86,11 +86,19 @@ def main():
     A("# Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`")
     A("")
     A("> **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  ")
-    A("> **Subject:** `sudosrv` `main` @ `928da84`  ")
+    A("> **Subject:** `sudosrv` @ `0669458` (post-remediation)  ")
     A("> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) "
       "was checked against the Go source, then every non-`MATCH` verdict was independently "
       "challenged by a second pass instructed to refute it. Verdict vocabulary is defined in "
       "[README.md](README.md#verdict-vocabulary).")
+    A("")
+    A("> **Refresh status.** The 15 requirements addressed by the remediation work "
+      "(PRs #28 and #29) were re-verified against the fixed tree and their rows below "
+      "reflect the current code. Every other row is carried forward unchanged from the "
+      "initial audit and describes the code as it was at `928da84`. Those rows were not "
+      "re-checked, so treat them as the last known state rather than a fresh reading; the "
+      "next full pass should re-derive them per the procedure in "
+      "[README.md](README.md#refreshing-against-a-new-sudo-release).")
     A("")
 
     # ---- summary by subsystem -------------------------------------------------

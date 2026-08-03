@@ -1,42 +1,37 @@
 # Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`
 
 > **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  
-> **Subject:** `sudosrv` `main` @ `928da84`  
+> **Subject:** `sudosrv` @ `0669458` (post-remediation)  
 > **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
+
+> **Refresh status.** The 15 requirements addressed by the remediation work (PRs #28 and #29) were re-verified against the fixed tree and their rows below reflect the current code. Every other row is carried forward unchanged from the initial audit and describes the code as it was at `928da84`. Those rows were not re-checked, so treat them as the last known state rather than a fresh reading; the next full pass should re-derive them per the procedure in [README.md](README.md#refreshing-against-a-new-sudo-release).
 
 ## Summary
 
 | Subsystem | Reqs | MATCH | INTENTIONAL | PARTIAL | DIVERGENT | ABSENT | NA |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 4 | 1 | 21 | 13 | 5 | 1 |
+| [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 7 | 1 | 21 | 10 | 5 | 1 |
 | [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 17 | 1 | 22 | 8 | 2 | 3 |
-| [Configuration Surface & Defaults](03-configuration.md) | 68 | 6 | 8 | 13 | 12 | 24 | 5 |
-| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 13 | 1 | 16 | 17 | 4 | 0 |
-| [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 15 | 9 | 11 | 8 | 11 | 0 |
-| [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 8 | 2 | 14 | 5 | 11 | 1 |
-| **Total** | **312** | **63** | **22** | **97** | **63** | **57** | **10** |
+| [Configuration Surface & Defaults](03-configuration.md) | 68 | 7 | 8 | 13 | 11 | 24 | 5 |
+| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 14 | 1 | 17 | 15 | 4 | 0 |
+| [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 19 | 10 | 11 | 4 | 10 | 0 |
+| [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 9 | 2 | 14 | 4 | 11 | 1 |
+| **Total** | **312** | **73** | **23** | **98** | **52** | **56** | **10** |
 
-Severity of the 239 requirements that are not `MATCH`/`NA`:
+Severity of the 229 requirements that are not `MATCH`/`NA`:
 
 | breaking | high | medium | low | informational |
 |--:|--:|--:|--:|--:|
-| 3 | 11 | 42 | 157 | 26 |
+| 0 | 0 | 42 | 161 | 26 |
 
 ### Effect of the adversarial pass
 
-254 findings were challenged: **166 upheld**, **73 downgraded**, **13 upgraded**, **2 refuted outright**.
+239 findings were challenged: **158 upheld**, **73 downgraded**, **6 upgraded**, **2 refuted outright**.
 
 Findings whose grade moved into or out of the top two severities:
 
 | ID | Was | Now | Why the grade moved |
 |---|---|---|---|
-| `ARCH-024` | INTENTIONAL / medium | DIVERGENT / breaking | The code comment at handler.go:197-207 claims parity with C, but the shipped default does the opposite: config.go:136 sets IdleTimeout=10m and applyZeroValueDefaults (config.go:182-184) restores 10m… |
-| `ARCH-045` | DIVERGENT / medium | DIVERGENT / breaking | This requirement exists solely to warn that 'a reimplementation that enforces an idle read deadline will disconnect long-running interactive sessions that the C server would keep open' (01-architectu… |
-| `CONF-025` | PARTIAL / medium | DIVERGENT / breaking | The previous pass got the citations right and the consequence badly wrong. C side: logsrvd.c:1372-1374 adds the steady-state read event with an explicit NULL timeout and the comment 'No read timeout,… |
-| `ARCH-043` | PARTIAL / medium | PARTIAL / high | The ordering claim is right and its consequence is much sharper than 'a race for the same cache directory'. Listeners bind AND listen in Start() Phase 1 (server.go:78/104), accept loops start in Phas… |
-| `IOLOG-024` | DIVERGENT / medium | DIVERGENT / high | Verified on both sides and the blast radius is universal, not narrow. C writes the 'timestamp' object from evlog->event_time (the client's submit_time) into log.json at accept time, before eventlog_s… |
-| `RELAY-010` | ABSENT / medium | ABSENT / high | The previous pass got the facts right and the severity wrong. Traced end to end through the reference client: with C's default (store_first=false, confirmed by calloc at logsrvd_conf.c:1630) a dead u… |
-| `RELAY-034` | DIVERGENT / medium | DIVERGENT / high | Both claims verified and the severity was understated. C: journal_accept (logsrvd_journal.c:559-563) short-circuits on `closure->journal_path != NULL` by calling journal_write, i.e. the sub-command A… |
 | `CONF-035` | ABSENT / high | ABSENT / medium | Directly parallel to the TLS-015 calibration, and the previous pass's own notes concede the point without applying it. I read logsrvd_conf_alloc: config->server.tls_check_peer = false (logsrvd_conf.c… |
 | `IOLOG-010` | PARTIAL / high | PARTIAL / medium | Encoding and all three divergences confirmed against lib/iolog/iolog_nextid.c:102-139 (id>=maxseq or unparsable -> id=0 -> 1; SESSID_MAX=2176782336 per include/sudo_iolog.h:29) and session.go:767,811… |
 | `RELAY-022` | DIVERGENT / high | DIVERGENT / medium | C claim verified (logsrvd_relay.c:869-888 sends 'relay server closed connection' downstream on EOF while state != FINISHED; logsrvd.c:297-305 unlinks only at FINISHED). But the requirement's own subj… |
@@ -60,120 +55,7 @@ Findings whose grade moved into or out of the top two severities:
 >
 > A user idle for 10 minutes at a `sudo -s` prompt therefore has the connection dropped and **their running command killed**. `idle_timeout: -1s` opts out; note that `idle_timeout: 0` silently restores 10m rather than disabling it.
 
-14 requirements are graded `breaking` or `high` after adversarial review. These are the divergences worth acting on first.
-
-### `ARCH-024` — The client read event has no timeout
-
-**DIVERGENT** · severity **breaking** · spec: [ARCH-024](01-architecture.md) · Go: `internal/connection/handler.go:197-207`
-
-with shipped defaults, an interactive `sudo -s` or `sudo vim` left idle at a prompt for 10 minutes has its connection closed by the server and the user's running command is KILLED. sudo_logsrvd never disconnects an idle client. Only idle_timeout: -1s avoids it; idle_timeout: 0 silently restores 10m.
-
-<sub>Adversarial review (UPGRADED): The code comment at handler.go:197-207 claims parity with C, but the shipped default does the opposite: config.go:136 sets IdleTimeout=10m and applyZeroValueDefaults (config.go:182-184) restores 10m even from an explicit 0, so handler.go:202-206 arms a 10-minute read deadline before every ReadClientMessage. C arms the read event with NULL (logsrvd.c:1372-1374). The previous pass stopped at 'the sudo client sees the socket drop and reports a log-server error'. Traced through the reference client it is far worse: the client keeps its read event armed with no timeout for the whole session (log_client.c:1173-1174), so the server's close is seen immediately as nread==0 → 'lost connection to log server' (log_client.c:1876-1879) → goto bad → log_client.c:1919 loopbreak because def_ignore_iolog_errors defaults to false (defaults.c:610) → src/exec_pty.c:1450-1456 / exec_nopty.c:710-714 terminate_command().</sub>
-
-### `ARCH-045` — Man page vs. code: `timeout` is a write deadline, not an idle deadline
-
-**DIVERGENT** · severity **breaking** · spec: [ARCH-045](01-architecture.md) · Go: `internal/connection/handler.go:197-207, internal/protocol/processor.go:114-150`
-
-same root cause as ARCH-024: with shipped defaults a sudo session idle for 10 minutes has the user's running command killed by the server's read deadline, while a client that stops reading is never timed out at all. Both halves of the reference's warning are realized simultaneously.
-
-<sub>Adversarial review (UPGRADED): This requirement exists solely to warn that 'a reimplementation that enforces an idle read deadline will disconnect long-running interactive sessions that the C server would keep open' (01-architecture.md:1017-1019), and Go does exactly that by default — handler.go:202-206 arms idle_timeout (config.go:136, 10m) as a read deadline while processor.go:114-150 arms no write deadline at all, the precise inversion of C's NULL read timeout plus server.timeout write/handshake deadline (logsrvd.c:1372-1374, 498/1174/1308/1368/1643). Grading the very failure a requirement was written to prevent as 'medium' is too soft once the client chain is traced: log_client.c:1173-1174 (read event armed, no timeout) → :1876-1879 'lost connection to log server' → :1919 loopbreak with def_ignore_iolog_errors=false (defaults.c:610) → src/exec_pty.c:1450-1456 terminate_command.</sub>
-
-### `CONF-025` — `[server] timeout`
-
-**DIVERGENT** · severity **breaking** · spec: [CONF-025](03-configuration.md) · Go: `internal/config/config.go:50,136,176-184; internal/connection/handler.go:197-207; internal/protocol/processor.go:114-150`
-
-With shipped defaults, a real sudo client's interactive root shell is killed after 10 (or 30) minutes of terminal inactivity, and the tail of the I/O log is lost. C never disconnects an idle client. Opt-out exists (idle_timeout: -1s, documented at config.go:176-181) but the default is the breaking one.
-
-<sub>Adversarial review (UPGRADED): The previous pass got the citations right and the consequence badly wrong. C side: logsrvd.c:1372-1374 adds the steady-state read event with an explicit NULL timeout and the comment 'No read timeout, client messages may happen at arbitrary times', and the reference client is symmetric — log_client.c:1170-1174 'Server messages may occur at any time, so no timeout.' Neither end ever times out an idle session. Go side: handler.go:202-207 arms conn.SetReadDeadline(now + IdleTimeout) on every loop iteration, with IdleTimeout defaulting to 10m (config.go:136) and forced back to 10m if zeroed (config.go:182-184); the shipped configs set 30m. Now trace the consequence through the real client: an interactive session (sudo -s / sudo -i) left at a prompt sends no ClientMessage, the deadline fires, the handler returns and the socket closes; log_client.c:1877-1879 reads 0 bytes, warns 'lost connection to log server' and goes to bad; log_client.c:1918-1921 sees ignore_log_errors false (def_ignore_iolog_errors defaults to false, defaults.c:610) and calls read_ev->loopbreak; src/exec_pty.c:1449-1460 observes sudo_ev_got_break and calls terminate_command(ec->cmnd_pid, true), SIGKILLing the user's shell. Separately, part (a) is also confirmed: withWriteContext (processor.go:112-148) only sets a write deadline to force a fast close on ctx cancellation and never applies a time-based bound, so C's `timeout` on write events has no analogue.</sub>
-
-### `ARCH-032` — Write event lifetime and drain-triggered close
-
-**DIVERGENT** · severity **high** · spec: [ARCH-032](01-architecture.md) · Go: `internal/connection/handler.go:239, internal/connection/handler.go:246, internal/protocol/processor.go:114-150`
-
-an unauthenticated peer that completes the handshake and stops reading pins a handler goroutine, its session files and one of the 10000 connection slots until process shutdown. Repeat to wedge the server. C reaps such a peer after 30 s by default.
-
-<sub>Adversarial review (UPHELD): Both sides verified. Go: withWriteContext (processor.go:114-150) installs a deadline watcher only for ctx.Done(); in steady state writeFull (processor.go:152-164) blocks indefinitely. C: server_msg_cb closes on SUDO_EV_TIMEOUT with 'timed out writing to client %s' (logsrvd.c:1042-1045) and the write event is armed with server.timeout, defaulted to DEFAULT_SOCKET_TIMEOUT_SEC (logsrvd_conf.c:1653). I also checked reachability rather than assuming it: an attacker does not need to wait for 10-second commit points, because handler.go:299-304 replies to every unrecognised pre-session message with an error ServerMessage and keeps reading, so at the 100 msg/s rate limit a peer that never reads fills the socket send buffer in under a minute.</sub>
-
-### `ARCH-036` — State admissibility per message type
-
-**PARTIAL** · severity **high** · spec: [ARCH-036](01-architecture.md) · Go: `internal/connection/handler.go:255-305`
-
-one crafted message from an unauthenticated peer makes the relay either (a) hot-loop connect/replay/fail against the upstream forever, re-delivering duplicate partial sessions on every pass, or (b) deliver a truncated session and retire the cache file. A buggy or hostile client can also hold a connection open indefinitely emitting messages C would kill on the first one.
-
-<sub>Adversarial review (UPHELD): All four sub-claims verified against handler.go:255-305, storage/session.go:960-963 (mid-session ClientHello warns and is ignored), :519-520 (event-only session errors), and relay/session.go:507 (everything is pushed into fromClientChan). C's table at logsrvd.c:523-527/593-597/665-669/873-877 confirmed. I then chased the relay consequence to the end rather than asserting it: writeMessagesToCache (relay/session.go:325-332) writes the poisoned ClientHello into the cache verbatim, flushFile (relay/session.go:738-772) replays every cached record to the upstream, and the upstream C daemon rejects a ClientHello in RUNNING with 'state machine error' and closes. Worse, the retry loop in run() (relay/session.go:265-277) applies backoff only on connect failure — a flush failure falls straight through to the next connectToUpstream with no sleep.</sub>
-
-### `ARCH-043` — Outgoing relay queue is scanned once at startup
-
-**PARTIAL** · severity **high** · spec: [ARCH-043](01-architecture.md) · Go: `internal/server/server.go:158-164, internal/relay/session.go:584-660`
-
-a relay restarting with a large recovery backlog can silently truncate and duplicate a live session's audit record upstream and lose the rest, then hot-loop retrying; and an unreadable or wrongly-mounted cache directory lets the daemon come up healthy-looking while permanently abandoning every cached session.
-
-<sub>Adversarial review (UPGRADED): The ordering claim is right and its consequence is much sharper than 'a race for the same cache directory'. Listeners bind AND listen in Start() Phase 1 (server.go:78/104), accept loops start in Phase 2 (server.go:132-136), and RecoverOrphans is only spawned in Phase 3 (server.go:158-164). RecoverOrphans globs `*.log` over the whole cache root (relay/session.go:608) — the same flat namespace in which a live session's writer creates `{sessionUUID}.log` (relay/session.go:287). Any live cache file that exists when that glob runs is renamed to *.log.flushing by FlushOrphanedFile (relay/session.go:668-671), partially read, shipped upstream, and then unlinked by retireCacheFile (relay/session.go:706-709) while the session's writer is still appending to the now-unlinked inode; the session's own flush phase then opens `{uuid}.log`, gets ENOENT, and enters the no-backoff retry loop. The window is normally sub-millisecond, but the two Glob passes over a cache directory holding thousands of orphans after an outage take seconds — exactly the situation in which the directory is full and clients are queued in the listen backlog. The second half also survives, by a different mechanism than claimed: filepath.Glob swallows directory read errors, so an unreadable cache dir yields zero orphans and an INFO line 'No orphaned relay files found' rather than the error server.go:161 is watching for, where C exits EXIT_FAILURE (logsrvd.c:2288-2291).</sub>
-
-### `IOLOG-024` — The `timestamp` object holds the client's submit time in seconds+nanoseconds
-
-**DIVERGENT** · severity **high** · spec: [IOLOG-024](04-local-storage.md) · Go: `internal/storage/session.go:1022-1023,1673-1680`
-
-sudoreplay -l reports every completed Go-written session as starting at the moment the command exited on the server (off by the whole command duration plus clock skew) and every aborted session as 'Dec 31 1969'; date-range searches with fromdate/todate silently return the wrong set. The correct submit time is in the legacy `log` file but is never consulted because log.json exists.
-
-<sub>Adversarial review (UPGRADED): Verified on both sides and the blast radius is universal, not narrow. C writes the 'timestamp' object from evlog->event_time (the client's submit_time) into log.json at accept time, before eventlog_store_json (lib/iolog/iolog_loginfo.c:163-181). Go's initialize (session.go:1018-1023) writes only server_log_id and an RFC3339 string under the unknown key 'submit_time'; 'timestamp' appears only in finalize (session.go:1673-1680) and holds time.Now(). Confirmed the consumer side: parse_json.c:481 maps 'timestamp' -> json_store_timestamp -> evlog->event_time, iolog_parse_loginfo prefers log.json over log (iolog_loginfo.c:58-61), and sudoreplay.c:1448 prints get_timestr(evlog->event_time.tv_sec) for every -l entry while sudoreplay.c:1409-1412 uses event_time for fromdate/todate matching. Unlike the restart findings this needs no unusual client — it is wrong for 100% of sessions.</sub>
-
-### `IOLOG-045` — Uncompressed resume seeks; it does not truncate; the resume point must match exactly
-
-**DIVERGENT** · severity **high** · spec: [IOLOG-045](04-local-storage.md) · Go: `internal/storage/session.go:1405-1490,1567-1609`
-
-A client that holds a log_id for an unfinalized session can reconnect, send RestartMessage{resume_point:[0,0]}, and the server truncates timing, stdin, stdout, stderr, ttyin and ttyout to zero bytes — the entire recorded transcript is destroyed while uuid/log/log.json remain, leaving a session sudoreplay replays as empty. C leaves the bytes on disk. Secondary: on a non-aligned resume point Go warns and falls back to append (session.go:1570-1574), producing a log with the overlap duplicated, where C aborts the restart.
-
-<sub>Adversarial review (UPHELD): Both citations check out but the stated trigger is wrong and the real one is worse. C: logsrv_util.c:133-137 returns true immediately for an unset target, leaving the r+ handles at offset 0 with the file contents intact; iolog_seekto never truncates and aborts on overshoot/EOF (logsrv_util.c:149-152,177-181). Go: computeResumeOffsetsAt (session.go:1407-1409) returns (0, empty map, nil) for target<=0, so useSeek stays true and openForRestartAt (session.go:1481-1487) calls f.Truncate(0) on timing and on every existing stream. The previous pass justified this as 'the normal case when a connection drops' — that is false: plugins/sudoers/log_client.c:1198-1232 puts fmt_restart_message inside '#ifdef notyet' and log_client.h:63 marks SEND_RESTART 'TODO: currently unimplemented', so a real sudo client never restarts. The finding survives anyway on a different chain: handler.go:290 accepts a RestartMessage as a pre-session message on any connection, the only gate is the uuid embedded in the log_id (session.go:1536-1543) which the server itself handed to the client, and the timing-writability gate (1546-1552) is open for any session that has not received an ExitMessage.</sub>
-
-### `RELAY-010` — Exhausting the relay list produces a specific error to the client
-
-**ABSENT** · severity **high** · spec: [RELAY-010](05-relay.md) · Go: `internal/relay/session.go:239-283, internal/connection/handler.go:473-542`
-
-With a permanently unreachable upstream, a C-default relay blocks privileged command execution (fail-closed on audit); the Go relay permits it indefinitely and spools locally, with only a server-side slog warning.
-
-<sub>Adversarial review (UPGRADED): The previous pass got the facts right and the severity wrong. Traced end to end through the reference client: with C's default (store_first=false, confirmed by calloc at logsrvd_conf.c:1630) a dead upstream means the downstream ServerHello is never sent (logsrvd.c:1651-1659) or an `error = "unable to connect to relay host"` arrives (logsrvd_relay.c:487-491); log_client.c:2116-2127 log_server_open then returns NULL; iolog.c:762-773 sudoers_io_open_remote returns -1; and def_ignore_iolog_errors defaults to false (plugins/sudoers/defaults.c:610), so the sudo front end refuses to run the command. Go has no path that can produce that signal — the client is already gone before any upstream attempt (session.go:239-283) — so sudo runs the privileged command and reports successful remote logging. That is a security weakening relative to C's default configuration, which is the rubric's definition of high.</sub>
-
-### `RELAY-019` — `log_id` handling is skipped when there is no downstream client
-
-**DIVERGENT** · severity **high** · spec: [RELAY-019](05-relay.md) · Go: `internal/relay/session.go:764-771, internal/connection/handler.go:679-711`
-
-A relay deployment with event-only sudoers (log_servers without log_input/log_output — a normal configuration) accumulates cache files that can never be retired, one immortal goroutine per session, and a fresh accept event recorded on the terminal server roughly every 5 s per stuck session, forever. The upstream's event log is flooded with duplicates of a single sudo invocation.
-
-<sub>Adversarial review (UPHELD): Both claims verified and the chain holds. C: journal_accept (logsrvd_journal.c:559-592) and store_accept_local (logsrvd_local.c:206-220) send a log_id only inside `if (msg->expect_iobufs)`, so an accept-only session gets no reply at all. Go: handleEventOnlyAccept (handler.go:679-711) still constructs a full relay.Session, whose writeMessagesToCache writes the expect_iobufs=false AcceptMessage (session.go:311-316); the stock client then sends an ExitMessage even for non-I/O sessions (log_client.c:1476-1483 SEND_EXIT with !log_io), so the write phase completes and the flush phase starts. flushFile (session.go:764-771) then blocks on ReadServerMessageContext after *any* AcceptMsg. Additionally verified, and worse than reported: the flush-failure branch at session.go:266-278 has no sleep before `attempt++`, so the retry cadence is bounded only by the 5 s read timeout, not by calculateBackoff. Go-to-Go relaying is affected identically (handler.go:710-711).</sub>
-
-### `RELAY-020` — Upstream `error` messages are relayed and stop relay I/O
-
-**DIVERGENT** · severity **high** · spec: [RELAY-020](05-relay.md) · Go: `internal/relay/session.go:764-771, internal/relay/session.go:738-743, internal/relay/session.go:709-729`
-
-An upstream that rejects the session (disk full, iolog permission failure, quota) has its error read and discarded; for any session small enough that the remaining records fit in the socket buffer before the peer's RST is observed, Go reaches EOF, deletes the cache file and logs INFO 'Cache flush successful'. A recoverable upstream rejection becomes permanent audit-trail loss.
-
-<sub>Adversarial review (UPHELD): Verified. Go: session.go:764-771 reads exactly one ServerMessage after the AcceptMessage and discards it without inspecting the oneof; nothing is read from the upstream thereafter; on local io.EOF session.go:740-743 calls retireCacheFile, which unlinks (session.go:709-729). C: handle_server_error (logsrvd_relay.c:638-661) tears the closure down with state still RUNNING, which is neither FINISHED (logsrvd.c:297-305, no unlink) nor CONNECTING (logsrvd.c:108-111, no re-queue), so the journal survives. Reachability confirmed against the reference upstream: store_accept_local sets closure->errstr on 'error creating I/O log' / 'error logging accept event' (logsrvd_local.c:175-206), i.e. an upstream that is out of disk or has bad iolog permissions answers the very first replayed record with an error.</sub>
-
-### `RELAY-034` — A sub-command Accept during a journalled session reuses the journal
-
-**DIVERGENT** · severity **high** · spec: [RELAY-034](05-relay.md) · Go: `internal/relay/session.go:489-493`
-
-With sudo intercept/log_subcmds enabled against a Go relay, every intercepted sub-command is silently dropped from the relayed audit record — the terminal server's log for that session shows only the original command, with no error anywhere.
-
-<sub>Adversarial review (UPGRADED): Both claims verified and the severity was understated. C: journal_accept (logsrvd_journal.c:559-563) short-circuits on `closure->journal_path != NULL` by calling journal_write, i.e. the sub-command AcceptMessage IS appended and no second log_id is sent. Go: HandleClientMessage (session.go:490-493) short-circuits on *any* AcceptMsg and returns a log_id *before* the channel send, so the sub-command Accept never reaches writeMessagesToCache and therefore never reaches the upstream. Crucially, Go advertises the capability it then discards — handler.go:392-395 sets Subcommands:true in the ServerHello, which is what causes log_client.c:1008 to emit further AcceptMessages in SEND_IO state. The duplicate log_id really is harmless (log_client.c:1638-1641 keeps the first iolog_id and returns true). Silently discarding the exact records an operator enabled intercept/log_subcmds to capture is 'silently wrong logs', which is high.</sub>
-
-### `RELAY-042` — A successful replay unlinks the journal and pumps the queue
-
-**DIVERGENT** · severity **high** · spec: [RELAY-042](05-relay.md) · Go: `internal/relay/session.go:738-753, 709-729`
-
-A successful write(2) into the local TCP send buffer is treated as durable delivery. If the upstream dies or fails to persist after the bytes leave Go's socket, the cache file is already unlinked and the session is gone — no error, no retry, and an INFO line claiming 'Cache flush successful'.
-
-<sub>Adversarial review (UPHELD): Both sides verified against source. C: connection_close (logsrvd.c:296-305) unlinks only under `closure->state == FINISHED`, and FINISHED for an I/O session is only reached via the upstream's final commit_point (handle_exit sets EXITED at logsrvd.c:633-637 and leaves the promotion to schedule_commit_point when relay_closure != NULL). Go: flushFile (session.go:738-743) calls retireCacheFile — os.Remove (session.go:709-712) — the moment the *local* read hits io.EOF; it never reads the upstream after the ExitMessage and never inspects the one reply it does read (session.go:764-771). There is no comment, test or config in the repo acknowledging delete-before-ack, so INTENTIONAL is not available.</sub>
-
-### `RELAY-054` — Store-and-forward is at-least-once; real-time relay is at-most-once
-
-**PARTIAL** · severity **high** · spec: [RELAY-054](05-relay.md) · Go: `internal/relay/session.go:738-753, 239-283`
-
-The net guarantee is 'at-least-once except across the final acknowledgement window, where it degrades to at-most-once': kill the upstream at the wrong moment and the session exists in neither place.
-
-<sub>Adversarial review (UPHELD): Verified end to end. The at-most-once half is genuinely vacuous (Go has no real-time path). The at-least-once half is broken exactly as described: duplicates behave like C (an interrupted replay leaves the file and re-sends the whole session, no idempotency key), but delivery is not guaranteed because retireCacheFile fires on local io.EOF (session.go:738-743) rather than on the upstream's final commit_point, which C requires via state==FINISHED (logsrvd.c:296-305). This is the delivery-guarantee statement of RELAY-042 and it is the guarantee the entire store-and-forward design exists to provide, so it warrants its own high grade rather than being folded away.</sub>
-
+No requirement survived the adversarial pass at `breaking` or `high` severity.
 
 ## Full matrix
 
@@ -208,7 +90,7 @@ Spec: [`01-architecture.md`](01-architecture.md)
 | `ARCH-021` | Signals are handled synchronously from the event loop | MATCH | none | `internal/server/server.go:261-275` | — |
 | `ARCH-022` | No `SIGCHLD` handling | MATCH | none | — | — |
 | `ARCH-023` | Connection closure allocation and handler selection | PARTIAL | low | `internal/connection/handler.go:101-156` | none client-visible; allocation churn only. |
-| `ARCH-024` | The client read event has no timeout | DIVERGENT | breaking | `internal/connection/handler.go:197-207` | with shipped defaults, an interactive `sudo -s` or `sudo vim` left idle at a prompt for 10 minutes has its connection closed by the server and the user's running command is KILLED. sudo_log… |
+| `ARCH-024` | The client read event has no timeout | MATCH | none | `internal/connection/handler.go:210-232` | — |
 | `ARCH-025` | `start_protocol` sends `ServerHello` and arms both events | DIVERGENT | low | `internal/connection/handler.go:262-268, internal/connection…` | none for any client shipped with sudo. Only a hypothetical greet-first client or a bare TCP banner probe observes the difference. |
 | `ARCH-026` | Protocol start is deferred behind TLS handshake and relay c… | PARTIAL | medium | `internal/server/server.go:104, internal/connection/handler.…` | a TLS slowloris pins a connection slot 20x longer than against sudo_logsrvd; 10000 such peers exhaust max_connections and lock out real clients. |
 | `ARCH-027` | TLS handshake event flips direction and is bounded by `serv… | PARTIAL | low | `internal/server/server.go:100-108` | a failing peer learns why the handshake failed instead of seeing a bare reset. Informational-to-low. |
@@ -216,20 +98,20 @@ Spec: [`01-architecture.md`](01-architecture.md)
 | `ARCH-029` | Read buffer sizing | DIVERGENT | informational | `internal/protocol/processor.go:168, internal/protocol/proce…` | none observable; an allocation-vs-retention trade. |
 | `ARCH-030` | EOF handling | PARTIAL | low | `internal/connection/handler.go:209-220` | operators cannot tell a clean session end from a truncated one; diagnostic loss only. |
 | `ARCH-031` | Server messages are queued, never written inline | DIVERGENT | informational | `internal/protocol/processor.go:235-256, internal/connection…` | none by itself; the real failure it enables is ARCH-032. |
-| `ARCH-032` | Write event lifetime and drain-triggered close | DIVERGENT | high | `internal/connection/handler.go:239, internal/connection/han…` | an unauthenticated peer that completes the handshake and stops reading pins a handler goroutine, its session files and one of the 10000 connection slots until process shutdown. Repeat to we… |
+| `ARCH-032` | Write event lifetime and drain-triggered close | PARTIAL | low | `internal/connection/handler.go writeServerMessage` | Writes are now bounded by server_timeout, so an unresponsive peer no longer pins a goroutine. C's drain-then-close write-event lifecycle is still not replicated exactly. |
 | `ARCH-033` | TLS read/write cross-dispatch | NA | none | — | crypto/tls resolves WANT_READ/WANT_WRITE internally inside a single blocking Read or Write on the underlying non-blocking socket via the netpoller. There is no application-level event to re… |
 | `ARCH-034` | Periodic commit timer: 10 s, one-shot, re-armed by I/O | PARTIAL | low | `internal/storage/session.go:38, internal/storage/session.go…` | commit-point timing on the wire differs from C; no functional effect on any shipped client. Relay-mode local commit generation is architecturally required by store-and-forward, not a defect. |
 | `ARCH-035` | `ExitMessage` handling: final commit point, or immediate fi… | PARTIAL | medium | `internal/storage/session.go:952-960, internal/storage/sessi…` | a client can put arbitrary UTF-8 into the audit record's `signal` field where sudo_logsrvd would reject the message; and the socket lingers after Exit until the client closes or idle_timeou… |
-| `ARCH-036` | State admissibility per message type | PARTIAL | high | `internal/connection/handler.go:255-305` | one crafted message from an unauthenticated peer makes the relay either (a) hot-loop connect/replay/fail against the upstream forever, re-delivering duplicate partial sessions on every pass… |
+| `ARCH-036` | State admissibility per message type | PARTIAL | medium | `internal/connection/handler.go:276-300` | Reading stops at the ExitMessage, closing the relay-poisoning vector. A full per-message state-admissibility matrix is still not implemented, so some messages C rejects are still accepted m… |
 | `ARCH-037` | State transitions on Accept/Reject/Restart | PARTIAL | low | `internal/connection/handler.go:617-677, internal/connection…` | after a denied command the socket lingers for up to idle_timeout instead of being closed by the server. Resource-only, and only for non-stock clients. |
 | `ARCH-038` | Error reporting shuts down reads and closes after the error… | PARTIAL | low | `internal/connection/handler.go:232-241` | sudo prints 'Internal Server Error' instead of one of C's sixteen specific errstr values, so client-side diagnosis requires correlating with the server's own logs. Operator-visible only, wh… |
 | `ARCH-039` | Graceful shutdown on `SIGINT`/`SIGTERM` | DIVERGENT | low | `internal/server/server.go:260-322` | an in-flight client loses one final commit_point it has no use for. End-user outcome (command killed on daemon shutdown) is the same as C; on-disk outcome is the same as C. |
 | `ARCH-040` | Shutdown terminates on last-connection-freed or a 10 s fail… | PARTIAL | low | `internal/server/server.go:304-321, cmd/sudosrv/main.go:28` | shutdown can take up to 30 s instead of 10 s, and only when a handler is wedged in a blocking write — i.e. only when ARCH-032 has already fired. |
 | `ARCH-041` | Connection teardown order and resource release | PARTIAL | informational | `internal/connection/handler.go:160-185` | none. |
 | `ARCH-042` | `connection_close` store-and-forward handoff and journal cl… | PARTIAL | low | `internal/relay/session.go:204-284, internal/connection/hand…` | none distinguishable from C; a structural difference in how retries are scheduled. |
-| `ARCH-043` | Outgoing relay queue is scanned once at startup | PARTIAL | high | `internal/server/server.go:158-164, internal/relay/session.g…` | a relay restarting with a large recovery backlog can silently truncate and duplicate a live session's audit record upstream and lose the rest, then hot-loop retrying; and an unreadable or w… |
+| `ARCH-043` | Outgoing relay queue is scanned once at startup | MATCH | none | `internal/server/server.go:130-145, internal/relay/session.g…` | — |
 | `ARCH-044` | Clean exit path after the event loop | PARTIAL | low | `cmd/sudosrv/main.go:252-260` | process can report success while a handler was still wedged; no pidfile or config cleanup to skip. |
-| `ARCH-045` | Man page vs. code: `timeout` is a write deadline, not an id… | DIVERGENT | breaking | `internal/connection/handler.go:197-207, internal/protocol/p…` | same root cause as ARCH-024: with shipped defaults a sudo session idle for 10 minutes has the user's running command killed by the server's read deadline, while a client that stops reading… |
+| `ARCH-045` | Man page vs. code: `timeout` is a write deadline, not an id… | MATCH | none | `internal/config/config.go:51-57` | — |
 
 ### Wire Protocol & Message State Machine
 
@@ -321,7 +203,7 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-022` | `[server] listen_address` syntax | DIVERGENT | low | `internal/config/config.go:44-45; internal/server/server.go:…` | Startup fails loudly on a C-style address string; a name-valued listen_address yields one address family instead of two. |
 | `CONF-023` | Default `listen_address` depends on TLS certificate availab… | DIVERGENT | low | `internal/config/config.go:134 (ListenAddress default '127.0…` | A hand-written minimal config binds loopback only; the address is printed at startup, so the misconfiguration is diagnosable in one log line. |
 | `CONF-024` | Wildcard `*` is accepted for `listen_address` but rejected… | DIVERGENT | low | `internal/server/server.go:78,104; internal/relay/session.go…` | `*:30343` fails at startup instead of binding all interfaces; a wildcard upstream_host surfaces as per-session dial failures rather than a refusal to start. |
-| `CONF-025` | `[server] timeout` | DIVERGENT | breaking | `internal/config/config.go:50,136,176-184; internal/connecti…` | With shipped defaults, a real sudo client's interactive root shell is killed after 10 (or 30) minutes of terminal inactivity, and the tail of the I/O log is lost. C never disconnects an idl… |
+| `CONF-025` | `[server] timeout` | MATCH | none | `internal/config/config.go:51-57` | — |
 | `CONF-026` | `[server] tcp_keepalive` | PARTIAL | low | `internal/server/server.go:78,191 (net.Listen/Accept default…` | An operator cannot reproduce `tcp_keepalive = false`; Go's 15s idle is also far more aggressive than the system default C inherits. |
 | `CONF-027` | `[server] pid_file` | ABSENT | low | `internal/config/config.go:42-53 (no pid_file field)` | No pid file appears; mitigated by the Type=simple unit. |
 | `CONF-028` | `[server] server_log` | ABSENT | low | `cmd/sudosrv/main.go:167-206; internal/config/config.go:52` | Daemon warnings cannot be routed to syslog or a file and are JSON rather than sudo-format text. |
@@ -395,7 +277,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-021` | The legacy `log` file has a fixed three-line colon-delimite… | DIVERGENT | low | `internal/storage/session.go:1035-1046,188-199` | An operator who reads the legacy `log` file by hand sees the command path without its arguments. sudoreplay is unaffected. |
 | `IOLOG-022` | `log.json` is pretty-printed with 4-space indent and wrappe… | DIVERGENT | low | `internal/storage/session.go:1107-1146` | log.json is not byte-comparable with a C-produced file and shows \u0026 for '&' when read raw. sudoreplay parses it correctly. |
 | `IOLOG-023` | `log.json` field set and order are fixed | DIVERGENT | low | `internal/storage/session.go:991-1023,1112` | log.json has different key ordering and carries six Go-only keys that produce debug warnings in sudoreplay. Required-entry satisfaction is delegated to the client, which for real sudo alway… |
-| `IOLOG-024` | The `timestamp` object holds the client's submit time in se… | DIVERGENT | high | `internal/storage/session.go:1022-1023,1673-1680` | sudoreplay -l reports every completed Go-written session as starting at the moment the command exited on the server (off by the whole command duration plus clock skew) and every aborted ses… |
+| `IOLOG-024` | The `timestamp` object holds the client's submit time in se… | MATCH | none | `internal/storage/session.go initialize` | — |
 | `IOLOG-025` | `log.json` is written once at accept time and not updated d… | DIVERGENT | low | `internal/storage/session.go:1301,1325,1350,1649` | Marshal+fsync+rename per alert or sub-command with quadratic total work in a long intercepted session, and log.json's mtime/inode churn during a live session so it cannot be used as a sessi… |
 | `IOLOG-026` | Exit info is appended to `log.json` by overwriting its fina… | DIVERGENT | low | `internal/storage/session.go:1658-1694,1107-1146` | Cosmetic ordering/content differences in log.json plus one behavioural quirk: a log.json the operator deliberately deleted mid-session is recreated from in-memory metadata at exit, where C… |
 | `IOLOG-027` | Completion is marked by clearing the write bits on `timing` | PARTIAL | low | `internal/storage/session.go:1704` | An operator who narrows file_permissions to 0600 still gets a 0440 timing file; it is the one file in the session whose mode ignores the configuration. |
@@ -416,7 +298,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-042` | `log_id` is base64 of the 16-byte UUID concatenated with th… | PARTIAL | low | `internal/storage/session.go:315-340,350-351,1360-1374` | For an iolog_dir outside log_directory the log_id encodes an absolute path and NewRestartSession rejects it at session.go:1500 — visible only to sendlog or a relay chain. The 16-byte/empty-… |
 | `IOLOG-043` | Restart verifies the decoded UUID against the session's `uu… | PARTIAL | low | `internal/storage/session.go:1536-1543` | Go accepts both 36- and 37-byte uuid files; C accepts only 36. The anti-path-guessing property the check exists for is fully preserved on both sides. |
 | `IOLOG-044` | A completed log cannot be restarted | MATCH | none | `internal/storage/session.go:1546-1552` | — |
-| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | DIVERGENT | high | `internal/storage/session.go:1405-1490,1567-1609` | A client that holds a log_id for an unfinalized session can reconnect, send RestartMessage{resume_point:[0,0]}, and the server truncates timing, stdin, stdout, stderr, ttyin and ttyout to z… |
+| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | PARTIAL | low | `internal/storage/session.go openForRestartAt` | Restart seeks without truncating, so a resume_point of 0 no longer destroys the transcript. A misaligned resume_point still appends where C aborts, duplicating the overlap region. |
 | `IOLOG-046` | Compressed logs are resumed by rewriting prefixes through a… | INTENTIONAL | low | `internal/storage/session.go:1554-1557` | With compress: true a sendlog- or relay-originated RestartMessage gets 'Internal Server Error' and a dropped connection instead of a rewritten-and-resumed log. No effect on sudo itself. |
 | `IOLOG-047` | Restart does not rewrite `log`/`log.json`, but does finaliz… | PARTIAL | low | `internal/storage/session.go:1585-1589,1637-1651,1658-1710` | log.json gains an extra top-level key and a new mtime/inode on each resume. Only observable on the restart path, which no sudo client exercises. |
 | `IOLOG-048` | An aborted session leaves its files in place, writable and… | MATCH | none | `internal/storage/session.go:1714-1759; internal/connection/…` | — |
@@ -439,7 +321,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-007` | Upstream sockets are non-blocking, with optional TCP keepal… | MATCH | none | `internal/relay/session.go:776` | — |
 | `RELAY-008` | `relay.connect_timeout` bounds the TCP connect and the TLS… | PARTIAL | low | `internal/relay/session.go:776-791, internal/config/config.g…` | An upstream needing more than 5 s to accept+handshake fails that flush attempt and is deferred to the retry loop; no data loss, and no way to express 'wait indefinitely'. |
 | `RELAY-009` | A failed upstream TLS handshake falls through to the next r… | PARTIAL | low | `internal/relay/session.go:781-795, internal/relay/session.g…` | An untrusted/expired upstream certificate produces an endless retry loop visible only as a server-side warning. |
-| `RELAY-010` | Exhausting the relay list produces a specific error to the… | ABSENT | high | `internal/relay/session.go:239-283, internal/connection/hand…` | With a permanently unreachable upstream, a C-default relay blocks privileged command execution (fail-closed on audit); the Go relay permits it indefinitely and spools locally, with only a s… |
+| `RELAY-010` | Exhausting the relay list produces a specific error to the… | INTENTIONAL | low | `internal/config/config.go RequireUpstream, internal/relay/s…` | Exposed as policy: require_upstream (default false, preserving store-and-forward) makes the relay refuse a command when the upstream is unreachable, returning a specific error the client sh… |
 | `RELAY-011` | Client messages are forwarded byte-for-byte, re-framed only | PARTIAL | low | `internal/relay/session.go:835-848, internal/relay/session.g…` | Byte-different but semantically identical payloads upstream; only a byte-comparing or signature-verifying upstream would notice, and none exists in the reference. |
 | `RELAY-012` | Forwarding order is the receive order | MATCH | none | `internal/relay/session.go:311-343, internal/relay/session.g…` | — |
 | `RELAY-013` | No local logging occurs in relay mode | MATCH | none | `internal/connection/handler.go:656-666, internal/connection…` | — |
@@ -448,8 +330,8 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-016` | A `commit_point` received before `RUNNING` is a protocol er… | ABSENT | informational | `internal/relay/session.go:764-771` | none beyond a missing warning line |
 | `RELAY-017` | The first `commit_point` after `EXITED` finalizes the sessi… | ABSENT | low | `internal/relay/session.go:534-539, internal/relay/session.g…` | Flush completion is declared on write-completion rather than on upstream acknowledgement; see RELAY-042. |
 | `RELAY-018` | Upstream `log_id` is forwarded unmodified | ABSENT | informational | `internal/relay/session.go:126-129, internal/relay/session.g…` | none — the behaviour matches C's store_first log_id contract exactly |
-| `RELAY-019` | `log_id` handling is skipped when there is no downstream cl… | DIVERGENT | high | `internal/relay/session.go:764-771, internal/connection/hand…` | A relay deployment with event-only sudoers (log_servers without log_input/log_output — a normal configuration) accumulates cache files that can never be retired, one immortal goroutine per… |
-| `RELAY-020` | Upstream `error` messages are relayed and stop relay I/O | DIVERGENT | high | `internal/relay/session.go:764-771, internal/relay/session.g…` | An upstream that rejects the session (disk full, iolog permission failure, quota) has its error read and discarded; for any session small enough that the remaining records fit in the socket… |
+| `RELAY-019` | `log_id` handling is skipped when there is no downstream cl… | MATCH | none | `internal/relay/session.go flushFile` | — |
+| `RELAY-020` | Upstream `error` messages are relayed and stop relay I/O | PARTIAL | low | `internal/relay/session.go readUpstreamAck` | Upstream error/abort now fails the flush and keeps the cache file. The error is not forwarded downstream because store-and-forward flushes after the client has gone. |
 | `RELAY-021` | Upstream `abort` messages are relayed but do not stop relay… | ABSENT | low | `internal/relay/session.go:764-771` | Only a non-sudo_logsrvd upstream could trigger it, and the resulting behaviour is the RELAY-020 outcome. |
 | `RELAY-022` | Premature upstream EOF is reported to the client | DIVERGENT | medium | `internal/relay/session.go:738-743, internal/relay/session.g…` | Upstream half-close or death mid-replay is invisible to Go; the concrete loss is counted once, at RELAY-042. |
 | `RELAY-023` | Relay read and write events carry no timeout | DIVERGENT | low | `internal/relay/session.go:816-830, internal/relay/session.g…` | An unresponsive-but-connected upstream is abandoned after 5 s and retried instead of stalling forever; the ceiling is not independently configurable. |
@@ -463,7 +345,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-031` | Journal writes are buffered and never fsynced | INTENTIONAL | informational | `internal/relay/session.go:295-305` | One extra fsync per session; strictly more durable than C at end-of-session. |
 | `RELAY-032` | `store_first` answers the client immediately, without the u… | MATCH | none | `internal/connection/handler.go:391; internal/relay/session.…` | — |
 | `RELAY-033` | `store_first` `log_id` is base64 of the journal UUID with a… | MATCH | none | `internal/relay/session.go:129, internal/relay/session.go:49…` | — |
-| `RELAY-034` | A sub-command Accept during a journalled session reuses the… | DIVERGENT | high | `internal/relay/session.go:489-493` | With sudo intercept/log_subcmds enabled against a Go relay, every intercepted sub-command is silently dropped from the relayed audit record — the terminal server's log for that session show… |
+| `RELAY-034` | A sub-command Accept during a journalled session reuses the… | MATCH | none | `internal/relay/session.go HandleClientMessage` | — |
 | `RELAY-035` | `store_first` generates local commit points on the normal s… | PARTIAL | low | `internal/relay/session.go:516-539` | An idle interactive session gets no periodic ack, so a later RestartMessage carries an older resume_point; plus one harmless extra commit on the first I/O event (lastCommitTime starts at th… |
 | `RELAY-036` | `journal_restart()` resolves the log_id to `incoming/<uuid>… | PARTIAL | low | `internal/relay/session.go:166-202; internal/connection/hand…` | Cosmetic error-text divergence on an unresumable restart; the theoretical gaps are not reachable from a stock sudo client. |
 | `RELAY-037` | Journal seek must land exactly on the resume point | INTENTIONAL | low | `internal/relay/session.go:149-202; internal/relay/session_t…` | A restart whose resume_point falls between records succeeds instead of failing, and the overlap window is duplicated upstream (bounded by the 10 s commit interval). |
@@ -471,7 +353,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-039` | `ExitMessage` finalizes the journal and moves it to `outgoi… | INTENTIONAL | low | `internal/relay/session.go:334-337, 295-305, 231-266; CLAUDE…` | An operator cannot distinguish open from completed sessions by directory; all files share one flat *.log namespace. |
 | `RELAY-040` | A finished `store_first` session relays immediately, not vi… | MATCH | none | `internal/relay/session.go:223-279` | — |
 | `RELAY-041` | Journal replay reads the journal as if it were a client soc… | PARTIAL | informational | `internal/relay/session.go:731-773, 851-869` | A journal whose tail was lost to a crash is relayed partially and retired rather than retried forever. |
-| `RELAY-042` | A successful replay unlinks the journal and pumps the queue | DIVERGENT | high | `internal/relay/session.go:738-753, 709-729` | A successful write(2) into the local TCP send buffer is treated as durable delivery. If the upstream dies or fails to persist after the bytes leave Go's socket, the cache file is already un… |
+| `RELAY-042` | A successful replay unlinks the journal and pumps the queue | MATCH | none | `internal/relay/session.go flushFile` | — |
 | `RELAY-043` | Journals are re-queued only from the `CONNECTING` state | INTENTIONAL | low | `internal/relay/session.go:239-283; CLAUDE.md 'Two-Phase Ope…` | Transient upstream failures are recovered within the running process instead of waiting for a restart. |
 | `RELAY-044` | Retry uses a fixed interval, with no backoff, jitter or att… | PARTIAL | medium | `internal/relay/session.go:366-383, 233-238; internal/config…` | A permanently-rejecting or flapping upstream is hammered with back-to-back connections and replay attempts by every affected session goroutine, where C would retry at a fixed 30 s or not at… |
 | `RELAY-045` | The outgoing queue drains one journal at a time | INTENTIONAL | low | `internal/relay/session.go:619-649; CLAUDE.md 'Orphaned File…` | Up to five simultaneous upstream connections during startup recovery, and recovery completes in one pass. |
@@ -483,7 +365,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-051` | Shutdown does not drain relay connections | MATCH | none | `internal/server/server.go:260-322; internal/relay/session.g…` | — |
 | `RELAY-052` | `SIGHUP` does not disturb in-flight relay connections | MATCH | none | `internal/server/server.go:327-395; internal/connection/hand…` | — |
 | `RELAY-053` | `SIGUSR1` dumps the outgoing queue | ABSENT | low | `internal/server/server.go:262` | An operator cannot ask a running daemon for its relay state; cache files left by previous runs are not exposed anywhere. |
-| `RELAY-054` | Store-and-forward is at-least-once; real-time relay is at-m… | PARTIAL | high | `internal/relay/session.go:738-753, 239-283` | The net guarantee is 'at-least-once except across the final acknowledgement window, where it degrades to at-most-once': kill the upstream at the wrong moment and the session exists in neith… |
+| `RELAY-054` | Store-and-forward is at-least-once; real-time relay is at-m… | MATCH | none | `internal/relay/session.go flushFile` | — |
 
 ### TLS, Authentication & Security Posture
 
@@ -512,7 +394,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-019` | SAN dNSName and CN matching: case-insensitive, single trail… | PARTIAL | low | `internal/relay/session.go:786-788` | Effectively none. The comparator semantics agree; the only residue is that Go rejects a handful of syntactically invalid SAN strings the C comparator would merely not match, and that the se… |
 | `TLS-020` | SAN iPAddress matching is textual, over 4-byte and 16-byte… | PARTIAL | low | `internal/relay/session.go:786-788` | Narrow: an upstream certificate carrying only an IP SAN is accepted by C but not matched by Go when upstream_host is a DNS name, and a certificate with an odd-length IP SAN fails the Go han… |
 | `TLS-021` | Verification failure aborts the TLS handshake; the client g… | MATCH | none | `internal/server/server.go:104, internal/connection/handler.…` | — |
-| `TLS-022` | The TLS handshake is bounded by the `[server] timeout` (def… | DIVERGENT | medium | `internal/connection/handler.go:202-207` | A peer that completes TCP then stalls mid-handshake pins a goroutine, an fd and one of 10000 max_connections slots for 10 minutes (indefinitely with idle_timeout: -1s) versus 30s per round… |
+| `TLS-022` | The TLS handshake is bounded by the `[server] timeout` (def… | MATCH | none | `internal/connection/handler.go handshakeTLS` | — |
 | `TLS-023` | `ServerHello` is queued only after the handshake completes | PARTIAL | medium | `internal/connection/handler.go:188-252, internal/connection…` | An interactive session left at a prompt for longer than idle_timeout (10m default, 30m in the shipped config) has its log connection closed by the server; the tail of the session and its Ex… |
 | `TLS-024` | The relay leg performs its own TLS handshake after TCP conn… | PARTIAL | medium | `internal/relay/session.go:781-791` | Real: because the Go relay is unconditionally store-and-forward, an upstream handshake failure is never reported downstream — the client already has its log_id and commit points and reports… |
 | `TLS-025` | Relay TLS settings inherit from `[server]` on a per-key bas… | ABSENT | medium | `internal/config/config.go:56-65` | An upstream sudo_logsrvd (or sudosrv-go peer) configured with tls_checkpeer = true rejects sudosrv-go's relay connection during the handshake with SSL_VERIFY_FAIL_IF_NO_PEER_CERT, and every… |
