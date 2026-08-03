@@ -32,7 +32,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
+.PHONY: lint all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
@@ -88,6 +88,18 @@ proto:
 test:
 	@echo "Running tests..."
 	$(GOTEST) -race -timeout 60s -v ./...
+
+# Run the linter, pinned to the same version CI uses (.github/workflows/makefile.yml).
+# `go run pkg@version` resolves in an isolated module, so the version is pinned
+# WITHOUT adding golangci-lint's dependency graph to go.mod/go.sum -- a tool
+# directive here would add ~900 lines of go.sum for a binary that never ships.
+# Keep this in step with the version in the workflow; drift between them
+# reintroduces the "passes locally, fails in CI" gap this exists to close.
+GOLANGCI_LINT_VERSION = v2.12.2
+
+lint:
+	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION)..."
+	$(GOCMD) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 # Tidy Go module dependencies
 deps:
@@ -193,6 +205,7 @@ help:
 	@echo "  release-static-all       Build all static release binaries."
 	@echo "  proto                    Generate Go code from the protobuf definition."
 	@echo "  test                     Run all unit tests."
+	@echo "  lint                     Run golangci-lint (version pinned in go.mod)."
 	@echo "  deps                     Ensure all Go module dependencies are correct."
 	@echo "  run                      Build and run the server. Use 'make run CONFIG=path/to/config.yaml' to specify a config file."
 	@echo "  clean                    Remove all compiled binaries and build cache."
