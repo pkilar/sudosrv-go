@@ -4,7 +4,14 @@ server:
 #  listen_address_tls: "0.0.0.0:30344"
 #  tls_cert_file: "server.crt" # Required if listen_address_tls is set
 #  tls_key_file: "server.key"  # Required if listen_address_tls is set
-  idle_timeout: 30m
+  # idle_timeout: disabled by default, matching sudo_logsrvd, which never
+  # disconnects an idle client. Leave it unset unless you truly need a deadline:
+  # sudo treats a lost log connection as fatal to the COMMAND (its
+  # ignore_iolog_errors defaults to false), so when this fires on an interactive
+  # session the user's shell is killed, not just its log truncated.
+  # idle_timeout: 30m
+  # server_timeout: 30s          # bounds writes to the client and the TLS
+  #                              # handshake (NOT an idle deadline). 0 disables.
   server_operational_log_level: "debug"
 
 # Settings for when server.mode is "local"

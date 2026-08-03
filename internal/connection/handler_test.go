@@ -1212,6 +1212,54 @@ func (c *deadlineRecorderConn) calls() (int, time.Time) {
 	return c.setCalls, c.lastDeadline
 }
 
+// TestWriteTimeoutBoundsUnresponsivePeer checks that a peer which completes the
+// handshake and then stops reading cannot pin a handler goroutine forever.
+//
+// This is the other half of the idle_timeout change. Removing the idle read
+// deadline was correct — C never disconnects an idle client — but C is not
+// unbounded: it arms its *write* events with [server] timeout (default 30s,
+// DEFAULT_SOCKET_TIMEOUT_SEC), so a client that stops draining the socket is cut
+// loose. Without an equivalent, one silent peer holds a goroutine, its session
+// files and one of max_connections slots until the process exits, and repeating
+// that wedges the server.
+//
+// net.Pipe is unbuffered, so the server's reply blocks until someone reads it —
+// exactly the condition being tested.
+//
+// Conformance: docs/logsrvd-reference/ ARCH-032, ARCH-045, TLS-022.
+func TestWriteTimeoutBoundsUnresponsivePeer(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{
+		Mode:          "local",
+		ServerID:      "t",
+		ServerTimeout: 200 * time.Millisecond,
+	}}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	h := NewHandler(serverConn, cfg)
+	done := make(chan struct{})
+	go func() {
+		h.Handle()
+		close(done)
+	}()
+
+	// Send a ClientHello and then never read the ServerHello reply.
+	clientProc := protocol.NewProcessor(clientConn, clientConn)
+	if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "silent"}},
+	}); err != nil {
+		t.Fatalf("client write Hello: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler never returned: a peer that stops reading pins the goroutine " +
+			"and its connection slot indefinitely")
+	}
+}
+
 // TestIdleReadDeadlineOptOut verifies that a non-positive idle_timeout disables
 // the per-message read deadline (matching C sudo_logsrvd's NULL read timeout),
 // while a positive value still arms it.
@@ -1257,6 +1305,48 @@ func TestIdleReadDeadlineOptOut(t *testing.T) {
 		}
 		if !last.After(time.Now()) {
 			t.Errorf("expected a future read deadline, got %v", last)
+		}
+	})
+
+	// The regression guard that matters: not "the opt-out works" but "the
+	// shipped default IS the opt-out". This drives a config through the real
+	// LoadConfig path rather than hand-building a struct, so re-introducing a
+	// finite default in internal/config fails here too.
+	//
+	// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025.
+	t.Run("ShippedDefaultArmsNoReadDeadline", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(tmpFile, []byte("server:\n  mode: \"local\"\n"), 0600); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		cfg, err := config.LoadConfig(tmpFile)
+		if err != nil {
+			t.Fatalf("LoadConfig() error: %v", err)
+		}
+
+		clientConn, serverConn := net.Pipe()
+		rec := &deadlineRecorderConn{Conn: serverConn}
+		h := NewHandler(rec, cfg)
+		var wg sync.WaitGroup
+		wg.Go(h.Handle)
+
+		clientProc := protocol.NewProcessor(clientConn, clientConn)
+		if err := clientProc.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "x"}},
+		}); err != nil {
+			t.Fatalf("client write Hello: %v", err)
+		}
+		if _, err := clientProc.ReadServerMessage(); err != nil {
+			t.Fatalf("client read ServerHello: %v", err)
+		}
+		clientConn.Close()
+		serverConn.Close()
+		wg.Wait()
+
+		if n, _ := rec.calls(); n != 0 {
+			t.Errorf("shipped defaults armed %d read deadline(s); an idle sudo session "+
+				"must never be disconnected by the server, because the client responds "+
+				"by killing the user's command (log_client.c:1919)", n)
 		}
 	})
 }

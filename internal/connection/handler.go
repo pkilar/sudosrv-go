@@ -184,6 +184,18 @@ func (h *Handler) Handle() {
 			"active_connections", metrics.Global.GetActiveConnections(), "active_sessions", metrics.Global.GetActiveSessions())
 	}()
 
+	// Force the TLS handshake to complete under server_timeout. crypto/tls
+	// otherwise performs it lazily inside the first Read, where no deadline
+	// applies now that idle_timeout defaults to off — a peer could complete the
+	// TCP connection, send nothing, and hold this goroutine and one of
+	// max_connections slots forever. C bounds the handshake with the same
+	// [server] timeout it uses for writes. Conformance: TLS-022, ARCH-032.
+	if err := h.handshakeTLS(); err != nil {
+		slog.Warn("TLS handshake failed", "error", err, "remote_addr", h.conn.RemoteAddr())
+		metrics.Global.IncrementFailedConnections()
+		return
+	}
+
 	// Main message loop
 	for {
 		// Check if context is cancelled
@@ -194,11 +206,27 @@ func (h *Handler) Handle() {
 		default:
 		}
 
-		// Arm a per-message idle read deadline. A non-positive IdleTimeout means
-		// "no read timeout", matching the reference C sudo_logsrvd, which adds its
-		// steady-state read event with a NULL timeout so an idle-but-alive client
-		// (e.g. an interactive shell left at a prompt) is never disconnected for
-		// inactivity. Operators opt into that parity with idle_timeout: -1s.
+		// Arm a per-message idle read deadline ONLY if the operator asked for one.
+		// IdleTimeout <= 0 (the default) means no deadline, matching the reference
+		// C sudo_logsrvd, which adds its steady-state read event with a NULL
+		// timeout: "No read timeout, client messages may happen at arbitrary
+		// times" (logsrvd/logsrvd.c:1372).
+		//
+		// Do not "helpfully" arm a fallback deadline when IdleTimeout <= 0, and do
+		// not reintroduce a finite default in internal/config. Disconnecting an
+		// idle client does not merely truncate its log — sudo's
+		// def_ignore_iolog_errors is false by default (plugins/sudoers/defaults.c:610),
+		// so the client answers a dropped log connection by killing the command it
+		// is running (plugins/sudoers/log_client.c:1919 → terminate_command). An
+		// interactive `sudo -s` sitting at a prompt would be SIGKILLed out from
+		// under the user.
+		//
+		// Dead (as opposed to idle) peers are reaped by TCP keepalive, and the
+		// blast radius of a stalled peer is bounded by max_connections.
+		//
+		// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025 (breaking).
+		// Guarded by TestIdleReadDeadlineOptOut (this package) and
+		// TestIdleTimeoutDefaultsToDisabled (internal/config).
 		if h.config.Server.IdleTimeout > 0 {
 			if err := h.conn.SetReadDeadline(time.Now().Add(h.config.Server.IdleTimeout)); err != nil {
 				slog.Error("Failed to set read deadline", "error", err)
@@ -236,19 +264,65 @@ func (h *Handler) Handle() {
 				"message_errors", metrics.Global.GetMessageErrors())
 			// Attempt to send a fatal error to the client
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
-			_ = h.processor.WriteServerMessageContext(h.ctx, errMsg)
+			_ = h.writeServerMessage(errMsg)
 			return
 		}
 
 		metrics.Global.IncrementMessagesProcessed()
 
 		if serverMsg != nil {
-			if err := h.processor.WriteServerMessageContext(h.ctx, serverMsg); err != nil {
+			if err := h.writeServerMessage(serverMsg); err != nil {
 				slog.Error("Failed to write server message", "error", err, "remote_addr", h.conn.RemoteAddr())
 				return
 			}
 		}
 	}
+}
+
+// serverTimeoutContext derives a context bounded by server_timeout. A
+// non-positive server_timeout disables the bound, matching C's "A value of 0
+// will disable the timeout". The returned cancel must always be called.
+func (h *Handler) serverTimeoutContext() (context.Context, context.CancelFunc) {
+	if t := h.config.Server.ServerTimeout; t > 0 {
+		return context.WithTimeout(h.ctx, t)
+	}
+	return context.WithCancel(h.ctx)
+}
+
+// writeServerMessage writes one ServerMessage, bounded by server_timeout.
+//
+// Without a bound a client that completes the handshake and then stops reading
+// blocks this goroutine inside write(2) once the socket buffer fills, holding
+// its session and one of max_connections slots until the process exits. C arms
+// its write events with [server] timeout for exactly this reason
+// (logsrvd/logsrvd.c, sudo_ev_add(..., logsrvd_conf_server_timeout(), ...)).
+//
+// Conformance: docs/logsrvd-reference/ ARCH-032, ARCH-045.
+func (h *Handler) writeServerMessage(msg *pb.ServerMessage) error {
+	ctx, cancel := h.serverTimeoutContext()
+	defer cancel()
+	return h.processor.WriteServerMessageContext(ctx, msg)
+}
+
+// handshakeTLS completes the TLS handshake under server_timeout, or returns nil
+// immediately for a plaintext connection.
+//
+// crypto/tls would otherwise run the handshake lazily inside the first Read.
+// With idle_timeout off by default that read has no deadline, so a peer that
+// opens a TCP connection to the TLS port and then says nothing would pin a
+// goroutine indefinitely. Doing it explicitly here also means handshake
+// failures are reported as such instead of surfacing as a confusing protocol
+// read error.
+//
+// Conformance: docs/logsrvd-reference/ TLS-022, ARCH-032.
+func (h *Handler) handshakeTLS() error {
+	tlsConn, ok := h.conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := h.serverTimeoutContext()
+	defer cancel()
+	return tlsConn.HandshakeContext(ctx)
 }
 
 // processMessage contains the main state machine for the protocol.

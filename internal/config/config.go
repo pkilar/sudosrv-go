@@ -40,14 +40,19 @@ type Config struct {
 
 // ServerConfig holds server-specific settings.
 type ServerConfig struct {
-	Mode                      string        `yaml:"mode"` // "local" or "relay"
-	ListenAddress             string        `yaml:"listen_address"`
-	ListenAddressTLS          string        `yaml:"listen_address_tls"`
-	TLSCertFile               string        `yaml:"tls_cert_file"`
-	TLSKeyFile                string        `yaml:"tls_key_file"`
-	TLSMinVersion             string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
-	ServerID                  string        `yaml:"server_id"`
-	IdleTimeout               time.Duration `yaml:"idle_timeout"`
+	Mode             string        `yaml:"mode"` // "local" or "relay"
+	ListenAddress    string        `yaml:"listen_address"`
+	ListenAddressTLS string        `yaml:"listen_address_tls"`
+	TLSCertFile      string        `yaml:"tls_cert_file"`
+	TLSKeyFile       string        `yaml:"tls_key_file"`
+	TLSMinVersion    string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
+	ServerID         string        `yaml:"server_id"`
+	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	// ServerTimeout bounds writes to the client and the TLS handshake, mirroring
+	// C's [server] timeout (default 30s). It is NOT an idle read deadline — see
+	// IdleTimeout, which is a different knob with the opposite default. 0 or
+	// negative disables it, matching C's "A value of 0 will disable the timeout".
+	ServerTimeout             time.Duration `yaml:"server_timeout"`
 	MaxConnections            int           `yaml:"max_connections"`              // 0 disables the cap
 	ServerOperationalLogLevel string        `yaml:"server_operational_log_level"` // e.g., "debug", "info", "warn", "error"
 }
@@ -133,7 +138,8 @@ func defaultConfig() *Config {
 			Mode:                      "local",
 			ListenAddress:             "127.0.0.1:30343",
 			ServerID:                  "GoSudoLogSrv/1.0",
-			IdleTimeout:               10 * time.Minute,
+			IdleTimeout:               0,                // 0 = no idle read deadline. DO NOT give this a finite default; see below.
+			ServerTimeout:             30 * time.Second, // C's DEFAULT_SOCKET_TIMEOUT_SEC; bounds writes + TLS handshake.
 			MaxConnections:            10000,
 			TLSMinVersion:             "1.3",  // Secure default; "1.2" available for legacy clients
 			ServerOperationalLogLevel: "info", // Default log level
@@ -173,15 +179,31 @@ func unmarshalConfig(data []byte, config *Config) error {
 // applyZeroValueDefaults restores default values for fields that yaml.Unmarshal
 // may have zeroed when a section was partially specified.
 func applyZeroValueDefaults(cfg *Config) {
-	// idle_timeout: a zero value (the field omitted, or "0s") is treated as
-	// "use the default" and restored to 10m, guarding a partially specified
-	// server section from accidentally zeroing it. A NEGATIVE value (e.g.
-	// "idle_timeout: -1s") is preserved and means "no read timeout", matching
-	// the reference C sudo_logsrvd, which never disconnects an idle client; the
-	// connection handler skips arming a read deadline when IdleTimeout <= 0.
-	if cfg.Server.IdleTimeout == 0 {
-		cfg.Server.IdleTimeout = 10 * time.Minute
-	}
+	// idle_timeout is deliberately ABSENT from this function. Do not add it.
+	//
+	// Any value <= 0 (omitted, "0s", or the legacy "-1s" opt-out) means "no idle
+	// read deadline", and that is the default. Re-defaulting a zero here to some
+	// finite duration is exactly the bug this comment exists to prevent: it
+	// SIGKILLs the user's command on an idle interactive session. The full chain,
+	// verified in the sudo 1.9.18 sources:
+	//
+	//   1. C sudo_logsrvd arms its steady-state read event with a NULL timeout
+	//      (logsrvd/logsrvd.c:1372, "No read timeout, client messages may happen
+	//      at arbitrary times") — it never disconnects an idle client.
+	//   2. sudo's def_ignore_iolog_errors defaults to false
+	//      (plugins/sudoers/defaults.c:610).
+	//   3. So when the log connection drops, the client calls loopbreak()
+	//      (plugins/sudoers/log_client.c:1919, "Break out of sudo event loop and
+	//      kill the command") and terminate_command() SIGKILLs the user's shell.
+	//
+	// Net effect of a finite default: `sudo -s` left at a prompt past the timeout
+	// has the server hang up and the user's root shell killed under them. A
+	// larger default only delays it. Operators who genuinely want a deadline set
+	// a positive idle_timeout explicitly and accept that consequence.
+	//
+	// Conformance: docs/logsrvd-reference/ ARCH-024, ARCH-045, CONF-025 (breaking).
+	// Guarded by TestIdleTimeoutDefaultsToDisabled (this package) and
+	// TestIdleReadDeadlineOptOut/ShippedDefaultArmsNoReadDeadline (internal/connection).
 	if cfg.Server.MaxConnections < 0 {
 		cfg.Server.MaxConnections = 0
 	}
@@ -399,7 +421,8 @@ server:
   tls_cert_file: "server.crt"
   tls_key_file: "server.key"
   server_id: "GoSudoLogSrv/1.0"
-  idle_timeout: 30m
+  # idle_timeout: off by default (C parity). Setting it kills idle interactive
+  # sessions — see applyZeroValueDefaults above before enabling.
   server_operational_log_level: "debug" # Supported levels: debug, info, warn, error
 
 # Settings for when server.mode is "relay"

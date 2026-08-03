@@ -88,7 +88,8 @@ server:
   # listen_address_tls: "0.0.0.0:30344"
   # tls_cert_file: "server.crt"
   # tls_key_file: "server.key"
-  idle_timeout: 30m
+  # idle_timeout: 30m             # off by default; see note below
+  # server_timeout: 30s           # write + TLS handshake deadline (default 30s)
   server_operational_log_level: "info"
 
 # Settings for when server.mode is "local"
@@ -118,6 +119,25 @@ relay:
 #   # tls_cert_file: "api.crt"
 #   # tls_key_file:  "api.key"
 ```
+
+### A note on `idle_timeout`
+
+**It is off by default, and you should usually leave it off.**
+
+`sudo_logsrvd` never disconnects an idle client — it arms its read event with no
+timeout, because "client messages may happen at arbitrary times". `sudosrv`
+matches that default.
+
+The reason this matters more than a normal timeout knob: sudo's
+`ignore_iolog_errors` defaults to **false**, so a client that loses its log
+connection does not just stop logging — it **kills the command it is running**.
+Set a finite `idle_timeout` and an interactive `sudo -s` left sitting at a prompt
+past the deadline gets its shell SIGKILLed out from under the user. A larger
+value only delays that; a root shell left open overnight still dies.
+
+Any value `<= 0` (including omitting the key) disables the deadline. Set a
+positive duration only if you accept the above and specifically need idle
+connections reclaimed sooner than TCP keepalive does.
 
 ### Supported Escape Sequences
 
