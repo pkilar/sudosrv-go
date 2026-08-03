@@ -263,8 +263,16 @@ func (h *Handler) Handle() {
 			metrics.Global.IncrementMessageErrors()
 			slog.Error("Error processing message", "error", err, "remote_addr", h.conn.RemoteAddr(),
 				"message_errors", metrics.Global.GetMessageErrors())
-			// Attempt to send a fatal error to the client
-			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Internal Server Error"}}
+			// Attempt to send a fatal error to the client. A state-machine
+			// violation carries C's own wire text so the peer is told what it
+			// did wrong instead of being blamed for a server fault; anything
+			// else is an internal failure.
+			errText := "Internal Server Error"
+			var violation *stateMachineViolation
+			if errors.As(err, &violation) {
+				errText = stateMachineErrorText
+			}
+			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: errText}}
 			_ = h.writeServerMessage(errMsg)
 			return
 		}
@@ -392,10 +400,46 @@ func validateIoBuffer(msg *pb.ClientMessage) error {
 	return nil
 }
 
+// stateMachineErrorText is the error string C sudo_logsrvd puts on the wire for
+// every state-guard failure (logsrvd/logsrvd.c:525, :562, :595, :667, :746,
+// :794, :830, :875).
+const stateMachineErrorText = "state machine error"
+
+// stateMachineViolation marks a message that arrived in a state where the
+// protocol does not allow it. It is fatal: Handle sends exactly one error
+// message and closes the connection, mirroring C, where the failing handler
+// sets closure->errstr and client_msg_cb jumps to send_error, which stops
+// reading and closes the connection once the error has been written
+// (logsrvd/logsrvd.c:1274-1280, :473-508).
+//
+// Answering and reading on is not a harmless nicety. In relay mode the
+// offending message is cached and replayed upstream, where a C sudo_logsrvd
+// refuses it for exactly this reason; the flush then fails forever, so one
+// bogus message from any peer that can reach the listener pins that session's
+// cache file and re-delivers the Accept plus all preceding I/O to the upstream
+// on every retry. It also breaks C's one-error-per-connection contract.
+//
+// Conformance: docs/logsrvd-reference/ PROTO-042, PROTO-043.
+// Guarded by TestOutOfOrderMessageIsFatal.
+type stateMachineViolation struct{ detail string }
+
+func (e *stateMachineViolation) Error() string { return e.detail }
+
 // processMessage contains the main state machine for the protocol.
 func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage, error) {
 	// If a session (relay or local) is active, pass the message to it.
 	if h.session != nil {
+		// ClientHello and RestartMessage are valid only in INITIAL, so with a
+		// session already running they are state-machine errors, not payload
+		// for the store (logsrvd/logsrvd.c:665-669, :873-877). Reject them here
+		// so they never reach a session — in relay mode reaching the session
+		// means being cached and replayed upstream forever.
+		switch clientMsg.Type.(type) {
+		case *pb.ClientMessage_HelloMsg, *pb.ClientMessage_RestartMsg:
+			return nil, &stateMachineViolation{
+				detail: fmt.Sprintf("%T received during an active session", clientMsg.Type),
+			}
+		}
 		if err := validateIoBuffer(clientMsg); err != nil {
 			return nil, err
 		}
@@ -441,10 +485,14 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		return nil, nil
 
 	default:
-		// If we have a session handler, it will take care of other message types.
-		// If not, it's a protocol error to receive other messages.
-		slog.Warn("Received unexpected message before session start", "type", fmt.Sprintf("%T", event), "remote_addr", h.conn.RemoteAddr())
-		return &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: "Protocol error: unexpected message"}}, nil
+		// I/O buffers, window-size and suspend events are valid only in
+		// RUNNING, so before any Accept they are state-machine errors. C
+		// answers with one error and closes (logsrvd/logsrvd.c:744-748,
+		// :794-796, :830-832 → :1274-1280); so must we, or an unauthenticated
+		// peer keeps a connection slot and can keep provoking error replies.
+		return nil, &stateMachineViolation{
+			detail: fmt.Sprintf("%T received before session start", event),
+		}
 	}
 }
 

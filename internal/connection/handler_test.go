@@ -1591,3 +1591,141 @@ func TestIoBufferValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestOutOfOrderMessageIsFatal verifies that a message which violates the
+// protocol state machine draws exactly one error and then closes the
+// connection, instead of being answered on a connection that stays open.
+//
+// C sudo_logsrvd sets closure->errstr = "state machine error" in every state
+// guard (logsrvd/logsrvd.c:523-527, :665-669, :744-748, :873-877); the failure
+// propagates to client_msg_cb's send_error path (logsrvd/logsrvd.c:1274-1280),
+// which stops reading, queues one error message and closes the connection once
+// it has been written.
+//
+// Conformance: docs/logsrvd-reference/ PROTO-042.
+func TestOutOfOrderMessageIsFatal(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{
+		Mode: "local", ServerID: "t", ServerTimeout: 5 * time.Second,
+	}}
+
+	newHandler := func(t *testing.T, seen chan<- *pb.ClientMessage) (net.Conn, protocol.Processor, chan struct{}) {
+		t.Helper()
+		clientConn, serverConn := net.Pipe()
+		t.Cleanup(func() { clientConn.Close() })
+		h := NewHandler(serverConn, cfg)
+		h.sessionFactories.newLocalStorageSession = func(id uuid.UUID, _ *pb.AcceptMessage, _ *config.LocalStorageConfig) (SessionHandler, error) {
+			return &mockSessionHandler{t: t, HandleClientFn: func(m *pb.ClientMessage) (*pb.ServerMessage, error) {
+				if m.GetAcceptMsg() != nil {
+					return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: id.String()}}, nil
+				}
+				if seen != nil {
+					seen <- m
+				}
+				return nil, nil
+			}}, nil
+		}
+		done := make(chan struct{})
+		go func() { h.Handle(); close(done) }()
+		cp := protocol.NewProcessor(clientConn, clientConn)
+		return clientConn, cp, done
+	}
+
+	startSession := func(t *testing.T, cp protocol.Processor) {
+		t.Helper()
+		if err := cp.WriteClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+			SubmitTime:   &pb.TimeSpec{TvSec: 1},
+			ExpectIobufs: true,
+			InfoMsgs: []*pb.InfoMessage{
+				{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "u"}},
+				{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "h"}},
+				{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+				{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+			},
+		}}}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		resp, err := cp.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("read log_id: %v", err)
+		}
+		if resp.GetLogId() == "" {
+			t.Fatalf("accept was not acknowledged with a log_id, got %T", resp.Type)
+		}
+	}
+
+	// expectFatalError reads the error reply and then requires the server to
+	// hang up without answering any further message. The read deadline turns
+	// "the server silently swallowed the message" into a failure rather than a
+	// hang, since neither side would otherwise ever speak again.
+	expectFatalError := func(t *testing.T, conn net.Conn, cp protocol.Processor, done chan struct{}) {
+		t.Helper()
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		resp, err := cp.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("read error reply: %v", err)
+		}
+		if resp.GetError() == "" {
+			t.Fatalf("out-of-order message was not refused, got %T (%v)", resp.Type, resp)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handler kept reading after a state machine error; C stops reading " +
+				"and closes the connection (logsrvd/logsrvd.c:1274-1280)")
+		}
+	}
+
+	t.Run("IoBufferBeforeAccept", func(t *testing.T) {
+		conn, cp, done := newHandler(t, nil)
+		if err := cp.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 0},
+				Data:  []byte("premature"),
+			}},
+		}); err != nil {
+			t.Fatalf("write IoBuffer: %v", err)
+		}
+		expectFatalError(t, conn, cp, done)
+	})
+
+	t.Run("ClientHelloDuringSession", func(t *testing.T) {
+		seen := make(chan *pb.ClientMessage, 4)
+		conn, cp, done := newHandler(t, seen)
+		startSession(t, cp)
+		if err := cp.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "late"}},
+		}); err != nil {
+			t.Fatalf("write ClientHello: %v", err)
+		}
+		expectFatalError(t, conn, cp, done)
+		select {
+		case m := <-seen:
+			t.Fatalf("out-of-order %T reached the session store; in relay mode it is "+
+				"cached and replayed upstream forever", m.Type)
+		default:
+		}
+	})
+
+	t.Run("RestartDuringSession", func(t *testing.T) {
+		seen := make(chan *pb.ClientMessage, 4)
+		conn, cp, done := newHandler(t, seen)
+		startSession(t, cp)
+		if err := cp.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_RestartMsg{RestartMsg: &pb.RestartMessage{
+				LogId:       "abc",
+				ResumePoint: &pb.TimeSpec{TvSec: 1},
+			}},
+		}); err != nil {
+			t.Fatalf("write RestartMessage: %v", err)
+		}
+		expectFatalError(t, conn, cp, done)
+		select {
+		case m := <-seen:
+			t.Fatalf("out-of-order %T reached the session store; in relay mode it is "+
+				"cached and replayed upstream forever", m.Type)
+		default:
+		}
+	})
+}
