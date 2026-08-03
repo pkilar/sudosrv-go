@@ -541,14 +541,6 @@ func (s *EventSession) finalize(exitMsg *pb.ExitMessage) {
 			Nanoseconds: runTime.GetTvNsec(),
 		}
 	}
-	now := time.Now()
-	s.logMeta["timestamp"] = struct {
-		Seconds     int64 `json:"seconds"`
-		Nanoseconds int32 `json:"nanoseconds"`
-	}{
-		Seconds:     now.Unix(),
-		Nanoseconds: int32(now.Nanosecond()),
-	}
 	if exitMsg.GetSignal() != "" {
 		s.logMeta["signal"] = exitMsg.GetSignal()
 	}
@@ -1021,6 +1013,20 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	}
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	s.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
+	// `timestamp` is the session's START time and must be recorded HERE, at
+	// accept, from the client's submit_time -- not stamped at exit. sudoreplay -l
+	// displays it as the session start and filters fromdate/todate on it, so a
+	// value taken at exit reports every session as starting when it ended, and a
+	// session that never exits gets none at all and lists as "Dec 31 1969".
+	// C takes it from the client's event_time (lib/eventlog/eventlog.c:943).
+	// Conformance: docs/logsrvd-reference/ IOLOG-024.
+	s.logMeta["timestamp"] = struct {
+		Seconds     int64 `json:"seconds"`
+		Nanoseconds int32 `json:"nanoseconds"`
+	}{
+		Seconds:     acceptMsg.SubmitTime.TvSec,
+		Nanoseconds: acceptMsg.SubmitTime.TvNsec,
+	}
 
 	// --- Write the UUID file (matches C sudo_logsrvd's iolog_store_uuid) ---
 	// O_EXCL refuses to overwrite a pre-existing file, and s.root refuses to
@@ -1478,10 +1484,19 @@ func openForRestartAt(root *os.Root, name string, cfg *config.LocalStorageConfig
 	if err != nil {
 		return nil, err
 	}
-	if err := f.Truncate(off); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("truncate to resume offset %d: %w", off, err)
-	}
+	// Seek WITHOUT truncating. Resumed I/O overwrites from the resume point
+	// forward, which is what prevents duplication; truncating here would instead
+	// let a RestartMessage{resume_point: 0} erase a session's whole transcript
+	// before the client sends a byte, and anyone holding the log_id of an
+	// unfinalized session can send that. C never truncates — there is no
+	// ftruncate in lib/iolog or logsrvd, only iolog_seekto
+	// (logsrvd/logsrvd_local.c:584).
+	//
+	// Any bytes left beyond the resumed data are inert: sudoreplay is driven by
+	// the timing file, which is rewritten from the resume point on, so it never
+	// reads past what the timing records describe.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("seek to resume offset %d: %w", off, err)
@@ -1668,15 +1683,6 @@ func (s *Session) finalize(exitMsg *pb.ExitMessage) {
 			Seconds:     runTime.GetTvSec(),
 			Nanoseconds: runTime.GetTvNsec(),
 		}
-	}
-
-	now := time.Now()
-	s.logMeta["timestamp"] = struct {
-		Seconds     int64 `json:"seconds"`
-		Nanoseconds int32 `json:"nanoseconds"`
-	}{
-		Seconds:     now.Unix(),
-		Nanoseconds: int32(now.Nanosecond()),
 	}
 
 	if exitMsg.GetSignal() != "" {

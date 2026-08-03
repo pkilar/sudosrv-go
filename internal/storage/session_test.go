@@ -1904,6 +1904,165 @@ func TestRestartResumeSeek(t *testing.T) {
 			t.Errorf("ttyout = %q, want %q (misaligned resume must append, preserving prior data)", got, "AAAAABBBBBCCCCC")
 		}
 	})
+
+	// A restart must never DESTROY recorded data. Seeking to the resume point is
+	// correct — subsequent I/O overwrites from there — but truncating at it means
+	// a RestartMessage{resume_point: 0} wipes every stream before the client has
+	// sent a single byte. Anyone holding a log_id for an unfinalized session could
+	// erase its entire transcript on demand, leaving uuid/log/log.json in place so
+	// the session still lists in sudoreplay and replays as empty.
+	//
+	// C seeks and does not truncate: there is no ftruncate anywhere in
+	// lib/iolog or logsrvd, only iolog_seekto (logsrvd/logsrvd_local.c:584).
+	// Trailing bytes past the resume point are harmless because sudoreplay is
+	// driven by the timing file, which is rewritten from the resume point on.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
+	t.Run("ZeroResumePointDoesNotDestroyTranscript", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		logID, sessDir := seed(t, cfg)
+
+		before, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout before restart: %v", err)
+		}
+		if string(before) != "AAAAABBBBB" {
+			t.Fatalf("seed produced ttyout %q, want AAAAABBBBB", before)
+		}
+
+		// Resume at the very beginning and send nothing at all.
+		s2, err := NewRestartSession(&pb.RestartMessage{
+			LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 0, TvNsec: 0},
+		}, cfg)
+		if err != nil {
+			t.Fatalf("NewRestartSession: %v", err)
+		}
+		if err := s2.Close(); err != nil {
+			t.Fatalf("close restart: %v", err)
+		}
+
+		after, err := os.ReadFile(filepath.Join(sessDir, "ttyout"))
+		if err != nil {
+			t.Fatalf("read ttyout after restart: %v", err)
+		}
+		if len(after) == 0 {
+			t.Fatalf("ttyout was truncated to 0 bytes by a resume_point of 0; the recorded "+
+				"transcript was destroyed without the client sending any data (was %q)", before)
+		}
+		if string(after) != string(before) {
+			t.Errorf("ttyout = %q, want %q unchanged: a restart that sends no data must not "+
+				"alter recorded bytes", after, before)
+		}
+	})
+}
+
+// TestLogJSONTimestampIsClientSubmitTime pins log.json's `timestamp` to the
+// client's submit_time, recorded at accept.
+//
+// sudoreplay -l reads `timestamp` as the session's START time and filters
+// fromdate/todate on it. Writing time.Now() at exit instead makes every session
+// appear to have started at the moment it ended — off by the entire command
+// duration — and a session that never sends an ExitMessage gets no timestamp at
+// all, listing as "Dec 31 1969". C takes it from the client's event_time
+// (lib/eventlog/eventlog.c:943).
+//
+// Conformance: docs/logsrvd-reference/ IOLOG-024.
+func TestLogJSONTimestampIsClientSubmitTime(t *testing.T) {
+	const submitSec = int64(1600000000) // 2020-09-13, unmistakably not "now"
+	const submitNsec = int32(123456789)
+
+	newCfg := func(dir string) *config.LocalStorageConfig {
+		return &config.LocalStorageConfig{
+			LogDirectory:    dir,
+			IologDir:        filepath.Join("%{LIVEDIR}", "%{user}"),
+			IologFile:       "%{seq}",
+			DirPermissions:  0o755,
+			FilePermissions: 0o644,
+			PasswordFilter:  false,
+		}
+	}
+	acceptAt := func() *pb.AcceptMessage {
+		m := createTestAcceptMessage()
+		m.SubmitTime = &pb.TimeSpec{TvSec: submitSec, TvNsec: submitNsec}
+		return m
+	}
+	readTimestamp := func(t *testing.T, dir string) (int64, int32, bool) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "log.json"))
+		if err != nil {
+			t.Fatalf("read log.json: %v", err)
+		}
+		var doc struct {
+			Timestamp *struct {
+				Seconds     int64 `json:"seconds"`
+				Nanoseconds int32 `json:"nanoseconds"`
+			} `json:"timestamp"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("parse log.json: %v", err)
+		}
+		if doc.Timestamp == nil {
+			return 0, 0, false
+		}
+		return doc.Timestamp.Seconds, doc.Timestamp.Nanoseconds, true
+	}
+
+	// The connection handler replays the AcceptMessage into the session to obtain
+	// the log_id, so a session is not usable until it has seen one.
+	start := func(t *testing.T, cfg *config.LocalStorageConfig) *Session {
+		t.Helper()
+		s, err := NewSession(uuid.New(), acceptAt(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: acceptAt()},
+		}); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		return s
+	}
+
+	t.Run("CompletedSession", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		s := start(t, cfg)
+		if _, err := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{ExitValue: 0}},
+		}); err != nil {
+			t.Fatalf("exit: %v", err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		sec, nsec, ok := readTimestamp(t, s.sessionDir)
+		if !ok {
+			t.Fatal("log.json has no timestamp")
+		}
+		if sec != submitSec || nsec != submitNsec {
+			t.Errorf("timestamp = {%d, %d}, want the client's submit_time {%d, %d}; "+
+				"sudoreplay -l would report this session as starting when it ended",
+				sec, nsec, submitSec, submitNsec)
+		}
+	})
+
+	// A session that never exits (client crash, network drop) must still carry a
+	// start time, or sudoreplay lists it at the epoch.
+	t.Run("AbortedSession", func(t *testing.T) {
+		cfg := newCfg(t.TempDir())
+		s := start(t, cfg)
+		if err := s.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		sec, _, ok := readTimestamp(t, s.sessionDir)
+		if !ok {
+			t.Fatal("aborted session has no timestamp in log.json; sudoreplay -l would list it as Dec 31 1969")
+		}
+		if sec != submitSec {
+			t.Errorf("timestamp.seconds = %d, want %d", sec, submitSec)
+		}
+	})
 }
 
 func TestSanitizeLogSummaryField(t *testing.T) {
