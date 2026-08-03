@@ -607,14 +607,37 @@ func (s *Session) Wait() {
 //
 // The supplied context governs goroutine lifetime; cancelling it aborts pending
 // flushes (the underlying cache file stays on disk for a future recovery pass).
-func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
+// ScanOrphans takes a point-in-time snapshot of the cache files left behind by
+// a previous run, restoring any mid-flush files to *.log on the way.
+//
+// It is deliberately separate from flushing them. The scan must happen BEFORE
+// the server starts accepting connections: a session accepted while a live glob
+// is running would have its own {uuid}.log picked up mid-write, renamed to
+// .flushing, replayed upstream in whatever partial state it was in, and
+// unlinked, truncating and duplicating a live session's audit record. Working
+// from a snapshot means any file created later is, by construction, someone
+// else's and is never touched.
+//
+// A cache directory that cannot be read is an error rather than an empty
+// result: filepath.Glob reports only ErrBadPattern and returns (nil, nil) for a
+// missing or unreadable directory, which would let a wrong mount or a bad chown
+// silently abandon the entire backlog while the daemon looked healthy.
+//
+// Conformance: docs/logsrvd-reference/ ARCH-043.
+func ScanOrphans(cfg *config.RelayConfig) ([]string, error) {
 	slog.Info("Scanning for orphaned relay cache files", "directory", cfg.RelayCacheDirectory)
+
+	// Probe the directory explicitly; Glob will not tell us it is unusable.
+	if _, err := os.ReadDir(cfg.RelayCacheDirectory); err != nil {
+		return nil, fmt.Errorf("relay cache directory %s is not readable: %w",
+			cfg.RelayCacheDirectory, err)
+	}
 
 	// Restore any mid-flush files from a prior crash by renaming them back to *.log.
 	flushingPattern := filepath.Join(cfg.RelayCacheDirectory, "*.log"+FlushingSuffix)
 	flushingFiles, err := filepath.Glob(flushingPattern)
 	if err != nil {
-		return fmt.Errorf("failed to scan for in-flight relay files: %w", err)
+		return nil, fmt.Errorf("failed to scan for in-flight relay files: %w", err)
 	}
 	for _, f := range flushingFiles {
 		restored := f[:len(f)-len(FlushingSuffix)]
@@ -634,8 +657,25 @@ func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
 	pattern := filepath.Join(cfg.RelayCacheDirectory, "*.log")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
-		return fmt.Errorf("failed to scan relay cache directory: %w", err)
+		return nil, fmt.Errorf("failed to scan relay cache directory: %w", err)
 	}
+	return files, nil
+}
+
+// RecoverOrphans scans and then flushes in one step. Callers that must not race
+// live sessions should use ScanOrphans before opening listeners and pass the
+// snapshot to FlushOrphans; internal/server does exactly that.
+func RecoverOrphans(ctx context.Context, cfg *config.RelayConfig) error {
+	files, err := ScanOrphans(cfg)
+	if err != nil {
+		return err
+	}
+	return FlushOrphans(ctx, cfg, files)
+}
+
+// FlushOrphans replays the given cache files upstream, at most
+// maxConcurrentFlushes at a time.
+func FlushOrphans(ctx context.Context, cfg *config.RelayConfig, files []string) error {
 	if len(files) == 0 {
 		slog.Info("No orphaned relay files found")
 		return nil

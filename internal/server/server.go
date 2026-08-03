@@ -126,6 +126,22 @@ func (s *Server) Start() error {
 		s.apiServer = apiSrv
 	}
 
+	// Phase 1.5: snapshot the relay cache BEFORE serving. Taking the list here
+	// rather than from a goroutine started after the accept loops means a session
+	// accepted moments later cannot have its own cache file globbed mid-write,
+	// replayed upstream half-finished and unlinked. An unusable cache directory
+	// fails startup instead of silently abandoning the backlog.
+	// Conformance: docs/logsrvd-reference/ ARCH-043.
+	var orphans []string
+	if cfg.Server.Mode == "relay" {
+		var scanErr error
+		orphans, scanErr = relay.ScanOrphans(&cfg.Relay)
+		if scanErr != nil {
+			s.closeListeners()
+			return fmt.Errorf("relay cache directory unusable: %w", scanErr)
+		}
+	}
+
 	// Phase 2: every listener is bound — start serving.
 	plaintextAddr := cfg.Server.ListenAddress
 	tlsAddr := cfg.Server.ListenAddressTLS
@@ -157,7 +173,9 @@ func (s *Server) Start() error {
 
 	if cfg.Server.Mode == "relay" {
 		s.waitGroup.Go(func() {
-			if err := relay.RecoverOrphans(s.ctx, &cfg.Relay); err != nil {
+			// Flush the Phase 1.5 snapshot. Files created after that scan belong
+			// to live sessions and are deliberately not in this list.
+			if err := relay.FlushOrphans(s.ctx, &cfg.Relay, orphans); err != nil {
 				slog.Error("Orphan relay recovery reported errors", "error", err)
 			}
 		})
