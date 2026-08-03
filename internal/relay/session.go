@@ -60,8 +60,16 @@ type Session struct {
 	// resume is true for a session created via NewRestartSession: it appends the
 	// resumed I/O to an existing cache file (which already begins with the
 	// original AcceptMessage) instead of writing a fresh AcceptMessage opener.
-	resume         bool
-	fromClientChan chan *pb.ClientMessage
+	resume bool
+	// initialAcceptSeen distinguishes the session's own AcceptMessage — which
+	// handleAccept replays through HandleClientMessage purely to obtain the
+	// log_id response, and which the write phase already caches from
+	// initialAcceptMsg — from later sub-command accepts, which must be cached
+	// and relayed. Pre-set for resumed sessions: their accept belonged to the
+	// original session, so the first accept a restart sees is already a
+	// sub-command. See HandleClientMessage.
+	initialAcceptSeen atomic.Bool
+	fromClientChan    chan *pb.ClientMessage
 	// sendMu serializes Close against in-flight HandleClientMessage calls.
 	// HandleClientMessage holds RLock for its entire critical section
 	// (closed check + channel send); Close takes the exclusive Lock so it
@@ -189,6 +197,10 @@ func NewRestartSession(ctx context.Context, restartMsg *pb.RestartMessage, cfg *
 		cancel:         cancel,
 		onDone:         onDone,
 	}
+	// A resumed session's own accept was consumed by the ORIGINAL session, and
+	// handleRestart does not replay one. Any accept this session sees is
+	// therefore already a sub-command and must be cached.
+	s.initialAcceptSeen.Store(true)
 	// Restore the single elapsed clock from resume_point so the synthesized
 	// commit points continue from where the interrupted session left off.
 	if rp := restartMsg.GetResumePoint(); rp != nil {
@@ -486,10 +498,24 @@ func (s *Session) HandleClientMessage(msg *pb.ClientMessage) (*pb.ServerMessage,
 	now := time.Now()
 	s.lastActivity.Store(&now)
 
-	// Don't process the initial AcceptMsg again, it was handled in NewSession.
 	if _, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
-		// For relay mode, we return a log ID immediately to satisfy the client
-		return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
+		if s.initialAcceptSeen.CompareAndSwap(false, true) {
+			// The session's own accept, replayed here by handleAccept solely to
+			// produce the log_id the client is waiting on. The write phase caches
+			// it from initialAcceptMsg, so it must NOT be cached again.
+			return &pb.ServerMessage{Type: &pb.ServerMessage_LogId{LogId: s.logID}}, nil
+		}
+		// Every later accept is a SUB-COMMAND accept and falls through to be
+		// cached and relayed like any other message. The server advertises
+		// Subcommands: true, so a client using sudo's intercept/log_subcmds
+		// support sends one per intercepted command; dropping them left the
+		// upstream audit trail claiming a single command was run.
+		//
+		// It is answered with nothing, matching C: a log_id is returned only for
+		// a NEW I/O session (logsrvd/logsrvd_local.c:209, gated on
+		// new_session && log_io).
+		//
+		// Conformance: docs/logsrvd-reference/ RELAY-034.
 	}
 
 	// Use a timeout to prevent indefinite blocking. time.NewTimer+Stop
