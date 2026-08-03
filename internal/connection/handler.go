@@ -347,10 +347,58 @@ func (h *Handler) handshakeTLS() error {
 	return tlsConn.HandshakeContext(ctx)
 }
 
+// validTimeSpec reports whether ts is a delay the protocol permits: present,
+// non-negative and with nanoseconds normalised into [0, 1e9).
+//
+// Mirrors C's valid_timespec() macro (logsrvd/logsrvd.h:49-50).
+func validTimeSpec(ts *pb.TimeSpec) bool {
+	return ts != nil && ts.GetTvSec() >= 0 && ts.GetTvNsec() >= 0 && ts.GetTvNsec() < 1000000000
+}
+
+// validateIoBuffer rejects an IoBuffer whose delay is not a normalised
+// non-negative timespec or whose data is empty. Non-IoBuffer messages pass
+// through untouched.
+//
+// C sudo_logsrvd does this in handle_iobuf before handing the buffer to either
+// the local or the relay store, and drops the connection with "invalid IoBuffer"
+// (logsrvd/logsrvd.c:756-760). Without the check the delay reaches the timing
+// file verbatim: a negative tv_nsec is formatted as "0.-00000005", which
+// iolog_parse_delay cannot parse (lib/iolog/iolog_timing.c:216-232 scans digits
+// only), so sudoreplay reports "invalid timing file line" and stops there —
+// every record written afterwards is on disk but permanently unreplayable. In
+// relay mode the poisoned record is cached and then rejected by the upstream
+// server on every flush attempt, so the cache file is retried forever.
+//
+// Conformance: docs/logsrvd-reference/ PROTO-027.
+func validateIoBuffer(msg *pb.ClientMessage) error {
+	var buf *pb.IoBuffer
+	switch event := msg.Type.(type) {
+	case *pb.ClientMessage_TtyinBuf:
+		buf = event.TtyinBuf
+	case *pb.ClientMessage_TtyoutBuf:
+		buf = event.TtyoutBuf
+	case *pb.ClientMessage_StdinBuf:
+		buf = event.StdinBuf
+	case *pb.ClientMessage_StdoutBuf:
+		buf = event.StdoutBuf
+	case *pb.ClientMessage_StderrBuf:
+		buf = event.StderrBuf
+	default:
+		return nil
+	}
+	if buf == nil || len(buf.GetData()) == 0 || !validTimeSpec(buf.GetDelay()) {
+		return fmt.Errorf("invalid IoBuffer")
+	}
+	return nil
+}
+
 // processMessage contains the main state machine for the protocol.
 func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage, error) {
 	// If a session (relay or local) is active, pass the message to it.
 	if h.session != nil {
+		if err := validateIoBuffer(clientMsg); err != nil {
+			return nil, err
+		}
 		return h.session.HandleClientMessage(clientMsg)
 	}
 

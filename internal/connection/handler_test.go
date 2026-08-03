@@ -1428,3 +1428,166 @@ func TestIdleReadDeadlineOptOut(t *testing.T) {
 		}
 	})
 }
+
+// startIoBufferSession brings a local-mode handler up to the RUNNING state and
+// returns the client-side processor, the log directory and a channel closed when
+// the handler goroutine exits.
+func startIoBufferSession(t *testing.T) (protocol.Processor, string, <-chan struct{}) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{Mode: "local", ServerID: "t", ServerTimeout: 5 * time.Second},
+		LocalStorage: config.LocalStorageConfig{
+			LogDirectory:    tmpDir,
+			DirPermissions:  0755,
+			FilePermissions: 0644,
+		},
+	}
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close() })
+
+	h := NewHandler(serverConn, cfg)
+	done := make(chan struct{})
+	go func() { h.Handle(); close(done) }()
+
+	cp := protocol.NewProcessor(clientConn, clientConn)
+	if err := cp.WriteClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{
+		HelloMsg: &pb.ClientHello{ClientId: "x"},
+	}}); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if _, err := cp.ReadServerMessage(); err != nil {
+		t.Fatalf("read ServerHello: %v", err)
+	}
+	if err := cp.WriteClientMessage(&pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: 1},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "u"}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "h"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}}}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	resp, err := cp.ReadServerMessage()
+	if err != nil {
+		t.Fatalf("read log_id: %v", err)
+	}
+	if resp.GetLogId() == "" {
+		t.Fatalf("accept was not acknowledged with a log_id, got %T", resp.Type)
+	}
+	return cp, tmpDir, done
+}
+
+// readTimingFile returns the contents of the single session timing file below
+// logDir, or "" when the session never wrote one.
+func readTimingFile(t *testing.T, logDir string) string {
+	t.Helper()
+	var content string
+	err := filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && info.Name() == "timing" {
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			content = string(b)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", logDir, err)
+	}
+	return content
+}
+
+// TestIoBufferValidation checks that an IoBuffer whose delay is not a normalised
+// non-negative timespec, or whose data is empty, is rejected instead of being
+// written to the timing file.
+//
+// C sudo_logsrvd applies valid_timespec() plus a data.len != 0 check in
+// handle_iobuf (logsrvd/logsrvd.c:756-760) and drops the connection with
+// "invalid IoBuffer". Without it a negative tv_nsec renders as "0.-00000005",
+// which sudoreplay cannot parse: it stops at that line, so every record written
+// after it is on disk but unreplayable.
+//
+// Conformance: docs/logsrvd-reference/ PROTO-027.
+func TestIoBufferValidation(t *testing.T) {
+	invalid := []struct {
+		name string
+		buf  *pb.IoBuffer
+	}{
+		{"NegativeNanoseconds", &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 0, TvNsec: -5}, Data: []byte("hello")}},
+		{"NanosecondsNotNormalised", &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 1000000000}, Data: []byte("hello")}},
+		{"NegativeSeconds", &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: -1, TvNsec: 0}, Data: []byte("hello")}},
+		{"MissingDelay", &pb.IoBuffer{Data: []byte("hello")}},
+		{"EmptyData", &pb.IoBuffer{Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 1000}}},
+	}
+
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			cp, logDir, done := startIoBufferSession(t)
+
+			if err := cp.WriteClientMessage(&pb.ClientMessage{
+				Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: tc.buf},
+			}); err != nil {
+				t.Fatalf("write IoBuffer: %v", err)
+			}
+
+			resp, err := cp.ReadServerMessage()
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			if resp.GetError() == "" {
+				t.Fatalf("invalid IoBuffer was accepted; got %T (%v)", resp.Type, resp)
+			}
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("handler kept the connection open after an invalid IoBuffer")
+			}
+
+			if timing := readTimingFile(t, logDir); timing != "" {
+				t.Fatalf("invalid IoBuffer was recorded in the timing file: %q", timing)
+			}
+		})
+	}
+
+	t.Run("ValidBufferAccepted", func(t *testing.T) {
+		cp, logDir, done := startIoBufferSession(t)
+
+		if err := cp.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+				Delay: &pb.TimeSpec{TvSec: 1, TvNsec: 999999999},
+				Data:  []byte("hello"),
+			}},
+		}); err != nil {
+			t.Fatalf("write IoBuffer: %v", err)
+		}
+		resp, err := cp.ReadServerMessage()
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if resp.GetError() != "" {
+			t.Fatalf("valid IoBuffer was rejected: %v", resp.GetError())
+		}
+		if err := cp.WriteClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{}},
+		}); err != nil {
+			t.Fatalf("exit: %v", err)
+		}
+		if _, err := cp.ReadServerMessage(); err != nil {
+			t.Fatalf("read final commit point: %v", err)
+		}
+		<-done
+
+		if timing := readTimingFile(t, logDir); timing != "4 1.999999999 5\n" {
+			t.Fatalf("unexpected timing record %q", timing)
+		}
+	})
+}
