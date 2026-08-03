@@ -35,10 +35,22 @@ jobs:
     # different version (1.32.0) from the protobuf runtime this module builds
     # against (v1.36.11). It was previously installing protobuf-compiler as a
     # transitive dependency, which is why that is now requested directly.
+    # protoc is pinned to the version the committed .pb.go was generated with
+    # (its header records `protoc v6.33.1`, i.e. protobuf release 33.1). The apt
+    # package is 3.21.12, so `make proto` used to regenerate that file with a
+    # different compiler than it was committed with -- a silent source of diff
+    # noise and, in principle, of generated-code drift. Keep this in step with
+    # the stamp in pkg/sudosrv_proto/sudo_logsrv.pb.go.
     - name: Install protoc
+      env:
+        PROTOC_VERSION: "33.1"
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends protobuf-compiler
+        set -euo pipefail
+        curl -fsSL -o /tmp/protoc.zip \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+        sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+        sudo chmod +x /usr/local/bin/protoc
+        protoc --version
 
     - name: Resolve module dependencies
       run: make deps
