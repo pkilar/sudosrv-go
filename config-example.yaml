@@ -20,6 +20,11 @@ local_storage:
 
 relay:
   upstream_host: "127.0.0.1:30344"
+  # require_upstream: false      # false (default): an unreachable upstream is
+  #                              # spooled locally and delivered later, so sudo
+  #                              # keeps working through an outage.
+  #                              # true: refuse the command when the upstream is
+  #                              # unreachable (fail closed on audit).
   use_tls: false
   connect_timeout: 15s
   relay_cache_directory: "/tmp/sudosrv-cache"

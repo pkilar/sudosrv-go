@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -751,6 +752,17 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	case "relay":
 		h.session, err = h.sessionFactories.newRelaySession(sessionUUID, acceptMsg, &h.config.Relay)
 		if err != nil {
+			// A fail-closed refusal is a policy outcome, not a server fault, so
+			// tell the client specifically why its command is being denied
+			// instead of collapsing it into "Internal Server Error". sudo relays
+			// this text to the user. Conformance: RELAY-010.
+			if errors.Is(err, relay.ErrUpstreamUnreachable) {
+				slog.Warn("Refusing command: no auditable path to the upstream log server",
+					"remote_addr", h.conn.RemoteAddr())
+				return &pb.ServerMessage{Type: &pb.ServerMessage_Error{
+					Error: "unable to reach upstream log server; command refused (require_upstream is set)",
+				}}, nil
+			}
 			return nil, fmt.Errorf("failed to create relay session: %w", err)
 		}
 		h.refreshLogIDFromSession()

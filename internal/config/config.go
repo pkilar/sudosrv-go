@@ -59,13 +59,25 @@ type ServerConfig struct {
 
 // RelayConfig holds settings for relay mode.
 type RelayConfig struct {
-	UpstreamHost         string        `yaml:"upstream_host"`
-	UseTLS               bool          `yaml:"use_tls"`
-	TLSSkipVerify        bool          `yaml:"tls_skip_verify"`
-	TLSMinVersion        string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
-	ConnectTimeout       time.Duration `yaml:"connect_timeout"`
-	RelayCacheDirectory  string        `yaml:"relay_cache_directory"`
-	ReconnectAttempts    int           `yaml:"reconnect_attempts"`
+	UpstreamHost        string        `yaml:"upstream_host"`
+	UseTLS              bool          `yaml:"use_tls"`
+	TLSSkipVerify       bool          `yaml:"tls_skip_verify"`
+	TLSMinVersion       string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
+	ConnectTimeout      time.Duration `yaml:"connect_timeout"`
+	RelayCacheDirectory string        `yaml:"relay_cache_directory"`
+	ReconnectAttempts   int           `yaml:"reconnect_attempts"`
+	// RequireUpstream makes relay mode fail CLOSED: the upstream must be
+	// reachable at accept time or the session is refused, which makes sudo
+	// decline to run the command. Default false, i.e. fail open -- an
+	// unreachable upstream spools to the local cache and delivers later, which
+	// keeps privileged work running through an outage.
+	//
+	// C's default relay streams to the upstream and refuses the command when the
+	// relay list is exhausted; its store_first mode behaves like this server's
+	// default. Sites that require an auditable path to exist before privileged
+	// execution set this to true and accept that an upstream outage blocks sudo.
+	// Conformance: docs/logsrvd-reference/ RELAY-010.
+	RequireUpstream      bool          `yaml:"require_upstream"`
 	MaxReconnectInterval time.Duration `yaml:"max_reconnect_interval"`
 }
 

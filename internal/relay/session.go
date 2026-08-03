@@ -121,7 +121,28 @@ func (s *Session) IsDone() bool { return s.done.Load() }
 // resources whose lifecycle exceeds the client connection (e.g. management
 // API registry entries) to the actual end of the session rather than the end
 // of the connection.
+// ErrUpstreamUnreachable is returned by NewSession when require_upstream is set
+// and the upstream cannot be reached. Callers should surface a specific error to
+// the client rather than a generic failure, so the operator can tell a refused
+// command from a server fault.
+var ErrUpstreamUnreachable = errors.New("relay upstream is unreachable and require_upstream is set")
+
 func NewSession(ctx context.Context, sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.RelayConfig, onDone func()) (*Session, error) {
+	// Fail-closed check, before anything is created on disk: if the operator
+	// requires an auditable path to exist, prove one does before letting the
+	// command run. Full connect (including TLS) rather than a bare TCP dial, so
+	// a broken certificate or a wrong port is caught here too.
+	// Conformance: docs/logsrvd-reference/ RELAY-010.
+	if cfg.RequireUpstream {
+		probe, err := connectToUpstream(ctx, cfg)
+		if err != nil {
+			slog.Error("Refusing session: require_upstream is set and the upstream is unreachable",
+				"upstream", cfg.UpstreamHost, "error", err)
+			return nil, fmt.Errorf("%w: %v", ErrUpstreamUnreachable, err)
+		}
+		_ = probe.Close()
+	}
+
 	// 0700: cache files and the directory carry raw sudo I/O (keystrokes,
 	// command output, sometimes passwords — the storage password filter
 	// does not apply to the relay cache writer). Group/other must not read.
