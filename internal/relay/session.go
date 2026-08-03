@@ -280,17 +280,10 @@ func (s *Session) run() {
 		proc, err := connectToUpstream(s.ctx, s.config)
 		if err != nil {
 			slog.Warn("Upstream connection attempt failed", "log_id", s.logID, "error", err)
-			backoff := s.calculateBackoff(attempt)
-			slog.Info("Waiting before next reconnect attempt", "log_id", s.logID, "duration", backoff)
-
-			// Respect context cancellation during backoff
-			select {
-			case <-s.ctx.Done():
-				slog.Info("Relay session cancelled during backoff", "log_id", s.logID)
+			if !s.waitBeforeRetry(attempt) {
 				return
-			case <-time.After(backoff):
-				continue
 			}
+			continue
 		}
 
 		// Connection successful, now flush the file. Protocol operations use
@@ -305,10 +298,27 @@ func (s *Session) run() {
 				return
 			}
 			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
-		} else {
-			slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
-			return
+			// Back off here too, not only on the connect branch. A flush that
+			// fails after the connect succeeded — upstream error or abort, a
+			// mid-replay EOF, an operation timeout, or the cache file failing to
+			// open — is just as permanent as a refused connect, and with the
+			// default reconnect_attempts of -1 this loop never ends. Falling
+			// straight through re-connected and re-sent the entire session as
+			// fast as the round trip allowed: hundreds of upstream connections
+			// and full replays per second, one slog.Error each, until the local
+			// disk filled. C never does this. A post-connect failure there is
+			// not even re-queued in the running process (logsrvd/logsrvd.c:
+			// 108-111 re-queues only from CONNECTING), and anything that is
+			// re-queued waits relay.retry_interval — 30s by default
+			// (logsrvd/logsrvd_queue.c:194-196, logsrvd/logsrvd_conf.c:1642).
+			// Conformance: docs/logsrvd-reference/ RELAY-044, RELAY-049.
+			if !s.waitBeforeRetry(attempt) {
+				return
+			}
+			continue
 		}
+		slog.Info("Cache flush successful. Relay session finished.", "log_id", s.logID)
+		return
 	}
 
 	if s.config.ReconnectAttempts != -1 {
@@ -393,6 +403,26 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// waitBeforeRetry sleeps for the backoff belonging to the attempt that just
+// failed, and reports whether the caller should try again. It returns false only
+// when the session context was cancelled during the wait (server shutdown), in
+// which case the caller must stop — the cache file stays on disk for startup
+// orphan recovery.
+//
+// Every failed flush attempt goes through here, whatever it failed at, so no
+// error path can re-loop without a delay. See the RELAY-044 note in run().
+func (s *Session) waitBeforeRetry(attempt int) bool {
+	backoff := s.calculateBackoff(attempt)
+	slog.Info("Waiting before next upstream attempt", "log_id", s.logID, "duration", backoff)
+	select {
+	case <-s.ctx.Done():
+		slog.Info("Relay session cancelled during backoff", "log_id", s.logID)
+		return false
+	case <-time.After(backoff):
+		return true
 	}
 }
 
