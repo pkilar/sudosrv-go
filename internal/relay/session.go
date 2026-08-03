@@ -728,6 +728,33 @@ func retireCacheFile(filePath string) {
 	)
 }
 
+// flushFile replays a cache file upstream and retires it only once the upstream
+// has taken responsibility for the session.
+//
+// The rule that matters: a successful write(2) is NOT delivery. Bytes accepted
+// into the local send buffer are lost if the upstream dies before persisting
+// them, and the cache file is the only other copy — so unlinking it on "we
+// finished reading our own file" converts an upstream crash into silent audit
+// loss. C unlinks the journal only once the closure reaches FINISHED, i.e. after
+// the upstream's final commit point (logsrvd/logsrvd.c:296-305).
+//
+// What counts as acknowledgement depends on the session type, and the protocol
+// is asymmetric here:
+//
+//   - I/O session (first Accept has expect_iobufs=true): the upstream returns a
+//     log_id for the accept (logsrvd/logsrvd_local.c:209-223, gated on
+//     new_session && log_io) and a final commit_point once the ExitMessage is
+//     stored (logsrvd/logsrvd.c handle_exit → state EXITED → commit_ev). The
+//     commit point is the durability signal, and we wait for it.
+//   - Event-only session (expect_iobufs=false) and sub-command accepts: the
+//     upstream sends NOTHING — handle_exit goes straight to FINISHED with the
+//     comment "No commit point to send to client, we are finished." Waiting for
+//     an acknowledgement here would fail every flush and re-deliver the accept
+//     event on each retry, forever. Matching C, the write is the completion.
+//
+// Any error/abort ServerMessage aborts the flush with the cache file intact, so
+// an upstream that rejects the session (disk full, iolog permission failure)
+// causes a retry rather than a silent discard.
 func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cfg *config.RelayConfig) error {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -735,24 +762,29 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 	}
 	defer f.Close()
 
+	var (
+		sawAccept  bool // first AcceptMessage seen; later ones are sub-commands
+		expectAck  bool // this session is an I/O session, so it will be acknowledged
+		sentExit   bool // an ExitMessage was replayed, so a final commit is due
+		incomplete bool // cache file was truncated; no Exit will ever be sent
+	)
+
 	for {
-		msg, err := readProtoMessage(f)
-		if errors.Is(err, io.EOF) {
-			// All messages sent successfully — retire the cache file.
-			retireCacheFile(filePath)
-			return nil
+		msg, readErr := readProtoMessage(f)
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			// Truncated tail (e.g., crash mid-write). Treat as end-of-stream for
-			// flush purposes so the file can be retired and recovery doesn't loop
-			// forever on corrupt trailing bytes.
+		if errors.Is(readErr, io.ErrUnexpectedEOF) {
+			// Truncated tail (e.g. crash mid-write). Everything we could parse has
+			// been sent; there is no Exit and therefore no commit point coming.
+			// Stop here rather than looping forever on corrupt trailing bytes.
 			slog.Warn("Cache file has truncated trailing record; flushing what was read",
-				"path", filePath, "error", err)
-			retireCacheFile(filePath)
-			return nil
+				"path", filePath, "error", readErr)
+			incomplete = true
+			break
 		}
-		if err != nil {
-			return fmt.Errorf("error reading message from cache during flush: %w", err)
+		if readErr != nil {
+			return fmt.Errorf("error reading message from cache during flush: %w", readErr)
 		}
 
 		if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
@@ -761,13 +793,78 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 			return fmt.Errorf("failed to send flushed message to upstream: %w", err)
 		}
 
-		if msg.GetAcceptMsg() != nil {
-			if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
-				_, err := proc.ReadServerMessageContext(opCtx)
-				return err
-			}); err != nil {
-				return fmt.Errorf("did not get log_id response from upstream: %w", err)
+		if accept := msg.GetAcceptMsg(); accept != nil {
+			if !sawAccept {
+				sawAccept = true
+				expectAck = accept.GetExpectIobufs()
+				if expectAck {
+					// Only a new I/O session gets a log_id back. Reading
+					// unconditionally here is what used to hang event-only and
+					// sub-command accepts.
+					if err := readUpstreamAck(ctx, proc, cfg, false); err != nil {
+						return fmt.Errorf("did not get log_id response from upstream: %w", err)
+					}
+				}
 			}
+			continue
+		}
+		if msg.GetExitMsg() != nil {
+			sentExit = true
+		}
+	}
+
+	if expectAck && sentExit {
+		// The durability barrier. Read past any periodic commit points the
+		// upstream emitted during the replay until the session is acknowledged.
+		if err := readUpstreamAck(ctx, proc, cfg, true); err != nil {
+			return fmt.Errorf("upstream did not acknowledge the session; keeping cache file: %w", err)
+		}
+	} else if incomplete {
+		slog.Warn("Retiring a truncated cache file without upstream acknowledgement; "+
+			"the partial session was sent but cannot be confirmed",
+			"path", filePath)
+	}
+
+	retireCacheFile(filePath)
+	return nil
+}
+
+// readUpstreamAck reads ServerMessages until the upstream acknowledges.
+//
+// When waitCommit is false it consumes exactly one message (the log_id reply to
+// an accept). When true it keeps reading until a commit_point arrives, skipping
+// anything else — the upstream may have emitted periodic commit points during
+// the replay that are still queued ahead of the final one.
+//
+// A clean EOF is accepted as acknowledgement: C closes the connection once the
+// final commit point has been written and the closure reaches FINISHED
+// (logsrvd/logsrvd.c:1110-1116), so the close is itself a completion signal.
+// An error or abort from the upstream is always a failure.
+func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, waitCommit bool) error {
+	for {
+		var srvMsg *pb.ServerMessage
+		err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
+			var readErr error
+			srvMsg, readErr = proc.ReadServerMessageContext(opCtx)
+			return readErr
+		})
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		switch m := srvMsg.Type.(type) {
+		case *pb.ServerMessage_Error:
+			return fmt.Errorf("upstream rejected the session: %s", m.Error)
+		case *pb.ServerMessage_Abort:
+			return fmt.Errorf("upstream aborted the session: %s", m.Abort)
+		case *pb.ServerMessage_CommitPoint:
+			return nil
+		}
+		if !waitCommit {
+			return nil
 		}
 	}
 }
