@@ -6,15 +6,15 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# No job touches the GitHub API -- no gh pr, no github-script, no GITHUB_TOKEN --
+# so read access to the repo contents is all any of them needs.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   build:
     permissions:
       contents: read
-      pull-requests: write
 
     runs-on: ubuntu-latest
 
