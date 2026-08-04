@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"fmt"
 	"regexp"
 	"sync"
 )
@@ -35,41 +36,69 @@ type PasswordFilter struct {
 	isFiltering bool
 }
 
-// NewPasswordFilter creates a password filter seeded with a set of common
-// password / passphrase / PIN prompts spanning several locales and prompt
-// styles. Additional patterns can be added via AddPattern.
+// DefaultPromptPatterns is the built-in prompt set: common password /
+// passphrase / PIN prompts spanning several locales and prompt styles. It is
+// used whenever the operator configures no passprompt_regex of their own.
 //
 // The patterns are case-insensitive and match common sudo, ssh, and su prompts:
 //   - "password"/"passwd" (en), "passphrase", "PIN"
 //   - "passwort" (de), "contraseña" (es), "mot de passe" (fr), "senha" (pt),
 //     "пароль" (ru), "密码"/"パスワード" (CJK)
+//
+// The trailing [\s:：]* MUST stay a zero-or-more quantifier, mirroring C's sole
+// default PASSPROMPT_REGEX "[Pp]assword[: ]*" (include/sudo_iolog.h:65), which
+// likewise permits zero terminator characters. Requiring a colon here would
+// leave colon-less prompts ("Enter your password", "Password > ", "Password?",
+// localised prompts with the keyword mid-sentence) undetected, and the secret
+// would then be written verbatim into the session's ttyin stream while
+// sudo_logsrvd would have masked it. This is the one place the filter could be
+// less safe than C, so do not tighten it. Matching a keyword with no terminator
+// can arm masking spuriously (see IOLOG-040), but that only ever masks more
+// than C, never less.
+var DefaultPromptPatterns = []string{
+	`(?i)pass(word|phrase|wd)[\s:：]*`,
+	`(?i)\bPIN\b[\s:：]*`,
+	`(?i)\bpasswort\b[\s:：]*`,
+	`(?i)contrase[ñn]a[\s:：]*`,
+	`(?i)mot de passe[\s:：]*`,
+	`(?i)\bsenha\b[\s:：]*`,
+	`пароль[\s:：]*`,
+	`密码[\s:：]*`,
+	`パスワード[\s:：]*`,
+}
+
+// NewPasswordFilter creates a password filter seeded with DefaultPromptPatterns.
 func NewPasswordFilter() *PasswordFilter {
-	filter := &PasswordFilter{}
-	// The trailing [\s:：]* MUST stay a zero-or-more quantifier, mirroring C's
-	// sole default PASSPROMPT_REGEX "[Pp]assword[: ]*" (include/sudo_iolog.h:65),
-	// which likewise permits zero terminator characters. Requiring a colon here
-	// would leave colon-less prompts ("Enter your password", "Password > ",
-	// "Password?", localised prompts with the keyword mid-sentence) undetected,
-	// and the secret would then be written verbatim into the session's ttyin /
-	// stdin stream while sudo_logsrvd would have masked it. This is the one
-	// place the filter could be less safe than C, so do not tighten it.
-	// Matching a keyword with no terminator can arm masking spuriously (see
-	// IOLOG-040), but that only ever masks more than C, never less.
-	defaults := []string{
-		`(?i)pass(word|phrase|wd)[\s:：]*`,
-		`(?i)\bPIN\b[\s:：]*`,
-		`(?i)\bpasswort\b[\s:：]*`,
-		`(?i)contrase[ñn]a[\s:：]*`,
-		`(?i)mot de passe[\s:：]*`,
-		`(?i)\bsenha\b[\s:：]*`,
-		`пароль[\s:：]*`,
-		`密码[\s:：]*`,
-		`パスワード[\s:：]*`,
-	}
-	for _, p := range defaults {
-		_ = filter.AddPattern(p)
+	filter, err := NewPasswordFilterWithPatterns(nil)
+	if err != nil {
+		// Unreachable: DefaultPromptPatterns are compile-time constants covered
+		// by TestDefaultPromptPatternsCompile.
+		panic("storage: built-in password prompt patterns failed to compile: " + err.Error())
 	}
 	return filter
+}
+
+// NewPasswordFilterWithPatterns creates a filter using the supplied prompt
+// patterns. An empty list selects DefaultPromptPatterns; a non-empty list
+// REPLACES the built-ins entirely rather than adding to them, matching C, where
+// the first passprompt_regex line discards the default and subsequent lines
+// append (logsrvd/logsrvd_conf.c:507-519).
+//
+// Callers reach here only after config.ValidatePassPromptRegex has already
+// rejected an uncompilable or over-long pattern at load time, so an error
+// return means a caller bypassed validation.
+// Conformance: docs/logsrvd-reference/ CONF-057.
+func NewPasswordFilterWithPatterns(patterns []string) (*PasswordFilter, error) {
+	if len(patterns) == 0 {
+		patterns = DefaultPromptPatterns
+	}
+	filter := &PasswordFilter{}
+	for _, p := range patterns {
+		if err := filter.AddPattern(p); err != nil {
+			return nil, fmt.Errorf("password prompt pattern %q: %w", p, err)
+		}
+	}
+	return filter, nil
 }
 
 // AddPattern compiles and appends a prompt-detection regex.

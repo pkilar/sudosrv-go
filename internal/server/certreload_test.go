@@ -142,7 +142,7 @@ func TestTLSListener_PicksUpRenewedCertificate(t *testing.T) {
 	}
 	defer shutdown(srv)
 
-	addr := srv.listeners[0].Addr().String()
+	addr := srv.listeners[0].ln.Addr().String()
 	if got := servedSerial(t, addr); got.Cmp(first) != 0 {
 		t.Fatalf("initial handshake: served serial %v, want %v", got, first)
 	}
@@ -186,7 +186,7 @@ func TestTLSListener_KeepsLastGoodCertificateOnBadRenewal(t *testing.T) {
 	}
 	defer shutdown(srv)
 
-	addr := srv.listeners[0].Addr().String()
+	addr := srv.listeners[0].ln.Addr().String()
 	if got := servedSerial(t, addr); got.Cmp(good) != 0 {
 		t.Fatalf("initial handshake: served serial %v, want %v", got, good)
 	}

@@ -125,8 +125,14 @@ local_storage:
 	}{
 		// Disabled by design — see TestIdleTimeoutDefaultsToDisabled.
 		{"IdleTimeout", cfg.Server.IdleTimeout, time.Duration(0)},
-		{"DirPermissions", cfg.LocalStorage.DirPermissions, uint32(0750)},
-		{"FilePermissions", cfg.LocalStorage.FilePermissions, uint32(0640)},
+		// The deprecated overrides stay UNSET so the modes derive from
+		// iolog_mode; a non-zero value here would mean an override was applied.
+		// Conformance: docs/logsrvd-reference/ CONF-055.
+		{"DirPermissions", cfg.LocalStorage.DirPermissions, uint32(0)},
+		{"FilePermissions", cfg.LocalStorage.FilePermissions, uint32(0)},
+		{"IologMode", cfg.LocalStorage.IologMode, uint32(0600)},
+		{"EffectiveDirMode", cfg.LocalStorage.EffectiveDirMode(), uint32(0700)},
+		{"EffectiveFileMode", cfg.LocalStorage.EffectiveFileMode(), uint32(0600)},
 		{"ConnectTimeout", cfg.Relay.ConnectTimeout, 5 * time.Second},
 		// C's [relay] timeout default (logsrvd/logsrvd_conf.c:1639). It is a
 		// separate, far larger budget than the dial: reusing ConnectTimeout for
@@ -460,10 +466,10 @@ func TestValidatePermissions(t *testing.T) {
 	}{
 		{"defaults are valid", 0750, 0640, ""},
 		{"strict are valid", 0700, 0600, ""},
-		{"world-writable dir", 0752, 0640, "dir_permissions"},
-		{"world-writable file", 0750, 0642, "file_permissions"},
+		{"world-writable dir", 0752, 0640, "directory mode"},
+		{"world-writable file", 0750, 0642, "file mode"},
 		{"world-readable file", 0750, 0644, "world-readable"},
-		{"both bits bad on dir checked first", 0777, 0777, "dir_permissions"},
+		{"both bits bad on dir checked first", 0777, 0777, "directory mode"},
 		{"dir without owner-exec rejected", 0640, 0640, "owner-exec"},
 	}
 	for _, tt := range tests {
@@ -559,11 +565,21 @@ func TestApplyZeroValueDefaults(t *testing.T) {
 		if cfg.Server.IdleTimeout != 0 {
 			t.Errorf("IdleTimeout: got %v, want 0 (must stay disabled)", cfg.Server.IdleTimeout)
 		}
-		if cfg.LocalStorage.DirPermissions != 0750 {
-			t.Errorf("DirPermissions: got 0%o, want 0750", cfg.LocalStorage.DirPermissions)
+		// dir_permissions/file_permissions are NOT re-defaulted: zero means
+		// "derive from iolog_mode", and a zero iolog_mode derives owner-only
+		// 0600/0700 because DeriveIologModes forces owner read+write on.
+		// Conformance: docs/logsrvd-reference/ CONF-055.
+		if cfg.LocalStorage.DirPermissions != 0 {
+			t.Errorf("DirPermissions: got 0%o, want 0 (unset)", cfg.LocalStorage.DirPermissions)
 		}
-		if cfg.LocalStorage.FilePermissions != 0640 {
-			t.Errorf("FilePermissions: got 0%o, want 0640", cfg.LocalStorage.FilePermissions)
+		if cfg.LocalStorage.FilePermissions != 0 {
+			t.Errorf("FilePermissions: got 0%o, want 0 (unset)", cfg.LocalStorage.FilePermissions)
+		}
+		if got := cfg.LocalStorage.EffectiveDirMode(); got != 0700 {
+			t.Errorf("EffectiveDirMode: got 0%o, want 0700", got)
+		}
+		if got := cfg.LocalStorage.EffectiveFileMode(); got != 0600 {
+			t.Errorf("EffectiveFileMode: got 0%o, want 0600", got)
 		}
 		if cfg.Relay.ConnectTimeout != 5*time.Second {
 			t.Errorf("ConnectTimeout: got %v, want 5s", cfg.Relay.ConnectTimeout)

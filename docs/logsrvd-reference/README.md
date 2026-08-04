@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` @ `8728a6b` — all 312 requirements re-derived |
+| **Verified against** | `sudosrv` — all 312 requirements re-derived; see `git log docs/logsrvd-reference/` |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -37,20 +37,33 @@ stale — it was not refreshed in the last pass. Trust the per-document header.
 | [`05-relay.md`](05-relay.md) | `RELAY-` | 54 | Relay mode, journalling, queue, retry policy |
 | [`06-tls-and-security.md`](06-tls-and-security.md) | `TLS-` | 41 | TLS setup, peer verification, privilege posture |
 | [`CONFORMANCE.md`](CONFORMANCE.md) | — | 312 | The matrix: requirement → Go location → verdict |
+| [`conformance-data.json`](conformance-data.json) | — | 312 | The verdicts the matrix is rendered from |
+| [`generate-conformance.py`](generate-conformance.py) | — | — | Renders `CONFORMANCE.md` from that data |
 
-`CONFORMANCE.md` is **generated** from the per-requirement verdicts, not hand-written.
-Re-verifying a subsystem means re-deriving its rows, not editing the table in place.
+`CONFORMANCE.md` is **generated**, not hand-written. To re-grade a requirement, edit its
+entry in `conformance-data.json` and re-run:
+
+```bash
+python3 docs/logsrvd-reference/generate-conformance.py
+```
+
+> **One-time data loss, recorded so nobody hunts for it.** The verdict data originally
+> lived in a session scratchpad rather than in the repository, so once that session expired
+> the matrix could no longer be regenerated. `conformance-data.json` was reconstructed from
+> the last rendered table, which means **185 of the 312 notes survive only in their clipped
+> form** (they end in `…`). The verdicts, severities and Go locations are intact; only the
+> tail of some prose is gone. Rows re-graded since then carry full text again.
 
 ## Where conformance stands
 
 All 312 requirements were re-verified against the current tree and every non-`MATCH`
-verdict independently challenged: **106 `MATCH`**, 19 `INTENTIONAL`, 92 `PARTIAL`,
-39 `DIVERGENT`, 41 `ABSENT`, 15 `NA`.
+verdict independently challenged: **114 `MATCH`**, 27 `INTENTIONAL`, 87 `PARTIAL`,
+36 `DIVERGENT`, 33 `ABSENT`, 15 `NA`.
 
-**Nothing is graded `breaking` or `high`.** Ten requirements are graded `medium`; the rest
-are `low` or `informational`. Those ten are features needing a product decision — a syslog
-eventlog stream, listener reconciliation on reload, a configurable password-prompt
-pattern, cipher-suite selection — not defects.
+**Nothing is graded `medium`, `high` or `breaking`.** Every requirement that named a defect
+has been closed. What remains is `low` (154) or `informational` (29), and the largest
+single movement has been from `PARTIAL`/`ABSENT` into `INTENTIONAL` — divergences that are
+now deliberate and have their reasons recorded in the code they describe.
 
 Two structural facts bound everything else:
 
@@ -61,7 +74,7 @@ Two structural facts bound everything else:
   prefix, a 2 MiB ceiling (C `logsrv_util.h:36`, Go `processor.go:20`), and
   `IO_EVENT_*` 0–7 including the legacy `TTYOUT_1_8_7 = 6`.
 
-`PARTIAL` at 90 is the largest non-`MATCH` bucket, and that is expected rather than
+`PARTIAL` at 87 is the largest non-`MATCH` bucket, and that is expected rather than
 alarming: most are a supported main path plus an unimplemented option or edge case. Read
 the severity, not the verdict.
 

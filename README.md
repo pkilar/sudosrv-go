@@ -99,10 +99,21 @@ local_storage:
   log_directory: "/var/log/gosudo-io"
   # iolog_dir: "%{LIVEDIR}/%{user}"
   # iolog_file: "%{seq}"
-  # dir_permissions: 0750
-  # file_permissions: 0640
+  # iolog_mode: 0600             # one knob; file and directory modes derive from it
+  #                              # (0600 -> file 0600, dir 0700; 0640 -> 0640/0750)
+  # dir_permissions / file_permissions are deprecated overrides, kept so existing
+  # configs keep loading. Setting either warns at startup.
   # compress: false
   # password_filter: true
+  # passprompt_regex:            # REPLACES the built-in prompt set when present
+  #   - "[Pp]assword[: ]*"
+
+# sudo's event log: one audit line per command. Defaults to syslog/authpriv,
+# as sudo_logsrvd does. Set log_type: "none" to turn it off.
+#eventlog:
+#  log_type: "syslog"            # none | syslog | logfile
+#  log_format: "sudo"            # sudo | json
+#  log_exit: false
 
 # Settings for when server.mode is "relay". server.mode is the only switch that
 # enables relaying, so setting upstream_host while mode is "local" is rejected at

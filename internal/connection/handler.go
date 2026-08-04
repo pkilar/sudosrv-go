@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sudosrv/internal/config"
+	"sudosrv/internal/eventlog"
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/relay"
@@ -34,9 +35,14 @@ type Handler struct {
 	logID     string
 	sessionID string // registry key; matches sessionUUID.String() for new sessions
 	session   SessionHandler
-	registry  *sessions.Registry // optional; nil when the management API is disabled
-	startedAt time.Time          // server-side connection start time
-	isTLS     bool
+	// acceptInfo is the accepted command's info_msgs, kept so the ExitMessage --
+	// which carries only a run time and an exit value -- can be logged against
+	// the command it belongs to. Written once at accept, read on exit, both from
+	// this connection's single goroutine.
+	acceptInfo map[string]string
+	registry   *sessions.Registry // optional; nil when the management API is disabled
+	startedAt  time.Time          // server-side connection start time
+	isTLS      bool
 	// Rate limiting: token bucket refilled at rateRefillPerSec up to rateBurst.
 	rateTokens     float64
 	rateLastRefill time.Time
@@ -443,6 +449,9 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		if err := validateIoBuffer(clientMsg); err != nil {
 			return nil, err
 		}
+		if exit, ok := clientMsg.Type.(*pb.ClientMessage_ExitMsg); ok {
+			h.emitExitEvent(exit.ExitMsg)
+		}
 		return h.session.HandleClientMessage(clientMsg)
 	}
 
@@ -469,6 +478,8 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		for _, info := range event.AlertMsg.GetInfoMsgs() {
 			slog.Info("Alert info", "key", info.GetKey(), "value", info.GetStrval())
 		}
+		h.emitEvent(eventlog.Alert, infoStrings(protocol.InfoMsgsToMap(event.AlertMsg.GetInfoMsgs())),
+			event.AlertMsg.GetReason())
 		return nil, nil // No response needed for alerts
 
 	case *pb.ClientMessage_RejectMsg:
@@ -494,6 +505,45 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 			detail: fmt.Sprintf("%T received before session start", event),
 		}
 	}
+}
+
+// infoStrings narrows an info_msgs map to its string-valued entries. The
+// protocol carries ints and string lists too, but every field the event log
+// names (submituser, command, ttyname, ...) is a plain string.
+func infoStrings(info map[string]any) map[string]string {
+	out := make(map[string]string, len(info))
+	for k, v := range info {
+		if sv, ok := v.(string); ok {
+			out[k] = sv
+		}
+	}
+	return out
+}
+
+// emitEvent writes one record to the process-wide event log. It is a no-op when
+// no sink is configured, so call sites need no guard.
+//
+// This is sudo's EVENT log -- the audit line naming who ran what -- and not the
+// daemon's operational slog output. Conformance: docs/logsrvd-reference/ CONF-058.
+func (h *Handler) emitEvent(t eventlog.EventType, info map[string]string, reason string) {
+	e := eventlog.FromInfoMap(t, info)
+	e.Reason = reason
+	e.TSID = h.logID
+	eventlog.Global.Log(e)
+}
+
+// emitExitEvent records a command's completion. The ExitMessage identifies
+// nothing by itself, so the command is recovered from the accept that opened
+// this connection; without one there is nothing meaningful to log.
+func (h *Handler) emitExitEvent(exitMsg *pb.ExitMessage) {
+	if h.acceptInfo == nil {
+		return
+	}
+	e := eventlog.FromInfoMap(eventlog.Exit, h.acceptInfo)
+	e.TSID = h.logID
+	e.ExitValue = fmt.Sprintf("%d", exitMsg.GetExitValue())
+	e.Signal = exitMsg.GetSignal()
+	eventlog.Global.Log(e)
 }
 
 // registerSession adds the just-created session to the registry, if one is
@@ -726,6 +776,10 @@ func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value
 // has already been denied, so a server-side persistence failure should not
 // escalate into a protocol error.
 func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
+	// Emitted before the mode check: a refused command is an audit event in
+	// every mode, and only local mode writes the metadata-only log.json below.
+	h.emitEvent(eventlog.Reject, infoStrings(protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs())), rejectMsg.GetReason())
+
 	if h.config.Server.Mode != "local" {
 		slog.Info("Reject event in non-local mode, logging only", "reason", rejectMsg.GetReason())
 		return nil, nil
@@ -737,7 +791,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	sessID := uuidStr[:6]
 	rejectDir := filepath.Join(h.config.LocalStorage.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6])
 
-	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.DirPermissions)); err != nil {
+	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.EffectiveDirMode())); err != nil {
 		slog.Error("Failed to create reject event directory", "error", err, "path", rejectDir)
 		metrics.Global.IncrementMessageErrors()
 		return nil, nil
@@ -770,7 +824,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	}
 
 	logJSONPath := filepath.Join(rejectDir, "log.json")
-	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.FilePermissions)); err != nil {
+	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.EffectiveFileMode())); err != nil {
 		slog.Error("Failed to write reject event log", "error", err, "path", logJSONPath)
 		metrics.Global.IncrementMessageErrors()
 		return nil, nil
@@ -843,10 +897,17 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 
 	sessionUUID := uuid.New()
 	h.logID = sessionUUID.String() // Store UUID string for logging
+	// Retained so the ExitMessage, which carries no identifying fields of its
+	// own, can be logged against the command it belongs to.
+	h.acceptInfo = infoMap
 	var err error
 
 	if !acceptMsg.ExpectIobufs {
-		return h.handleEventOnlyAccept(sessionUUID, acceptMsg)
+		resp, evErr := h.handleEventOnlyAccept(sessionUUID, acceptMsg)
+		if evErr == nil {
+			h.emitEvent(eventlog.Accept, infoMap, "")
+		}
+		return resp, evErr
 	}
 
 	// Initialize the correct session handler based on server mode
@@ -889,6 +950,10 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 	default:
 		return nil, fmt.Errorf("unknown server mode: %s", h.config.Server.Mode)
 	}
+
+	// Emitted here rather than at the top of handleAccept so TSID carries the
+	// session's real log ID, which is what ties an audit line to its transcript.
+	h.emitEvent(eventlog.Accept, infoMap, "")
 
 	// The first message to the session handler is the AcceptMessage itself
 	// to allow it to initialize and send back the initial log_id. The log_id

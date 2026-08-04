@@ -4,6 +4,8 @@ package relay
 
 import (
 	"context"
+	"path/filepath"
+	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
@@ -222,5 +224,84 @@ func TestRelayEventOnlyAcceptCachesSubCommandAccepts(t *testing.T) {
 	}
 	if accepts[1] != "/usr/bin/id" {
 		t.Errorf("second accept was %q, want /usr/bin/id", accepts[1])
+	}
+}
+
+// TestSubCommandAcceptReusesOneJournalAndOneLogID asserts RELAY-034 in the
+// terms the requirement is written in, rather than only in terms of what the
+// upstream receives: an Accept arriving while a journal already exists must
+// append to it, and must create neither a second journal file nor a second
+// log_id (logsrvd/logsrvd_journal.c:560-563).
+//
+// The second half is what the connection layer guarantees -- processMessage
+// routes any message to the already-active session instead of calling
+// handleAccept again, which would mint a fresh UUID and a fresh cache file.
+// This test covers the session's own half of the contract.
+func TestSubCommandAcceptReusesOneJournalAndOneLogID(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.RelayConfig{
+		UpstreamHost:        "127.0.0.1:1", // never dialled; the write phase is what we inspect
+		ConnectTimeout:      50 * time.Millisecond,
+		RelayCacheDirectory: dir,
+		ReconnectAttempts:   1,
+	}
+
+	sessionUUID := uuid.New()
+	s, err := NewSession(context.Background(), sessionUUID, ioAcceptMsg("/bin/ls"), cfg, nil)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// The session's own accept, replayed by handleAccept for the log_id.
+	first, err := s.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: ioAcceptMsg("/bin/ls")},
+	})
+	if err != nil {
+		t.Fatalf("initial accept: %v", err)
+	}
+	firstLogID := first.GetLogId()
+	if firstLogID == "" {
+		t.Fatal("the session's own accept must be answered with a log_id")
+	}
+
+	// Two intercepted sub-commands.
+	for _, cmd := range []string{"/usr/bin/id", "/bin/cat"} {
+		resp, subErr := s.HandleClientMessage(&pb.ClientMessage{
+			Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: ioAcceptMsg(cmd)},
+		})
+		if subErr != nil {
+			t.Fatalf("sub-command accept %s: %v", cmd, subErr)
+		}
+		if got := resp.GetLogId(); got != "" {
+			t.Errorf("sub-command accept for %s was answered with log_id %q; only a NEW I/O session gets one", cmd, got)
+		}
+	}
+	if s.LogID() != firstLogID {
+		t.Errorf("session log_id changed from %q to %q across sub-command accepts", firstLogID, s.LogID())
+	}
+	_ = s.Close()
+	// Close only shuts the channel; the cache writer drains it on its own
+	// goroutine. Without waiting, the glob below races the last write and finds
+	// nothing under load.
+	s.Wait()
+
+	// Exactly one journal file for the whole session.
+	journals, err := filepath.Glob(filepath.Join(dir, "*.log"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(journals) != 1 {
+		t.Fatalf("found %d journal files %v, want exactly 1: a sub-command accept must reuse the session's journal", len(journals), journals)
+	}
+}
+
+// ioAcceptMsg builds an I/O-logging AcceptMessage for the named command.
+func ioAcceptMsg(command string) *pb.AcceptMessage {
+	return &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: 1},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{{
+			Key: "command", Value: &pb.InfoMessage_Strval{Strval: command},
+		}},
 	}
 }

@@ -1,0 +1,7 @@
+{
+  "command": "/bin/sh",
+  "event_type": "reject",
+  "reason": "user NOT in sudoers",
+  "submit_time": "1970-01-01T00:00:01Z",
+  "submituser": "eve"
+}

@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"sudosrv/internal/api"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
+	"sudosrv/internal/eventlog"
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/relay"
 	"sudosrv/internal/sessions"
@@ -30,9 +30,15 @@ type Server struct {
 	configPath string
 	logLevel   *slog.LevelVar
 	waitGroup  sync.WaitGroup
-	listeners  []net.Listener
-	ctx        context.Context
-	cancel     context.CancelFunc
+	// listeners is owned by Start and by reload. Both run before or inside
+	// Wait's signal loop, never concurrently, and accept loops hold their own
+	// net.Listener rather than reading this slice.
+	listeners []*boundListener
+	// tlsProvider holds the TLS listener's configuration and lets reload swap
+	// it without rebinding the socket. nil when no TLS listener is configured.
+	tlsProvider *tlsConfigProvider
+	ctx         context.Context
+	cancel      context.CancelFunc
 	// connSem is a counting semaphore that caps the number of concurrent client
 	// connections. nil when unbounded (MaxConnections <= 0).
 	connSem chan struct{}
@@ -52,7 +58,7 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 	s := &Server{
 		configPath: configPath,
 		logLevel:   logLevel,
-		listeners:  make([]net.Listener, 0),
+		listeners:  make([]*boundListener, 0),
 		ctx:        ctx,
 		cancel:     cancel,
 		registry:   sessions.NewRegistry(),
@@ -105,69 +111,34 @@ func listenTCP(ctx context.Context, address string) (net.Listener, error) {
 func (s *Server) Start() error {
 	cfg := s.config.Load()
 
-	// Phase 1: bind every required listener.
-	if cfg.Server.ListenAddress != "" {
-		plainListener, err := listenTCP(s.ctx, cfg.Server.ListenAddress)
-		if err != nil {
-			return fmt.Errorf("failed to start plaintext listener on %s: %w", cfg.Server.ListenAddress, err)
-		}
-		s.listeners = append(s.listeners, plainListener)
+	// The event log is installed before any listener, so no session can be
+	// accepted before its audit record has somewhere to go. A destination that
+	// cannot be opened fails startup, matching C, where a failed event-log open
+	// aborts the apply (logsrvd/logsrvd_conf.c:1834-1850).
+	// Conformance: docs/logsrvd-reference/ CONF-058.
+	if err := eventlog.Global.Configure(eventlog.SettingsFrom(cfg)); err != nil {
+		return fmt.Errorf("event log: %w", err)
 	}
 
+	// Phase 1: bind every required listener.
 	if cfg.Server.ListenAddressTLS != "" {
 		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
-			s.closeListeners()
 			return fmt.Errorf("tls_cert_file and tls_key_file must be configured for TLS listener")
 		}
-		// The key pair is fetched per handshake, not pinned here, so a
-		// certificate renewed in place is picked up without a restart and
-		// without a signal. See keyPairReloader for why. Certificates is left
-		// empty on purpose: with it populated, crypto/tls skips GetCertificate
-		// for clients that send no SNI.
-		// Conformance: docs/logsrvd-reference/ CONF-018.
-		certReloader, err := newKeyPairReloader(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		provider, err := newTLSConfigProvider(cfg)
+		if err != nil {
+			return err
+		}
+		s.tlsProvider = provider
+	}
+
+	for _, w := range listenerSet(cfg) {
+		bl, err := s.bindListener(w.addr, w.isTLS)
 		if err != nil {
 			s.closeListeners()
-			return fmt.Errorf("failed to load TLS key pair: %w", err)
+			return err
 		}
-		minVer, err := config.TLSVersion(cfg.Server.TLSMinVersion)
-		if err != nil {
-			s.closeListeners()
-			return fmt.Errorf("invalid server tls_min_version: %w", err)
-		}
-		tlsConfig := &tls.Config{
-			GetCertificate: certReloader.GetCertificate,
-			MinVersion:     minVer,
-		}
-		// Mutual TLS. RequireAndVerifyClientCert is the pair of OpenSSL bits C
-		// sets when tls_checkpeer is on -- SSL_VERIFY_PEER together with
-		// SSL_VERIFY_FAIL_IF_NO_PEER_CERT (logsrvd/logsrvd.c:1451-1462) -- so a
-		// client presenting NO certificate is rejected during the handshake
-		// rather than merely left unverified. Anything weaker (VerifyClientCertIfGiven)
-		// would let a peer opt out of authentication by simply staying silent,
-		// which is the whole failure this setting exists to prevent.
-		//
-		// A nil ClientCAs means the platform trust store, matching C's fallback
-		// to SSL_CTX_set_default_verify_paths when no bundle is named.
-		//
-		// Conformance: docs/logsrvd-reference/ TLS-015, TLS-007, CONF-035.
-		if cfg.Server.TLSCheckPeer {
-			pool, err := loadCAPool(cfg.Server.TLSCACertFile)
-			if err != nil {
-				s.closeListeners()
-				return fmt.Errorf("server.tls_cacert_file: %w", err)
-			}
-			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			tlsConfig.ClientCAs = pool
-			slog.Info("Client certificate authentication enabled",
-				"ca_bundle", cmpOrSystem(cfg.Server.TLSCACertFile))
-		}
-		tlsBase, err := listenTCP(s.ctx, cfg.Server.ListenAddressTLS)
-		if err != nil {
-			s.closeListeners()
-			return fmt.Errorf("failed to start TLS listener on %s: %w", cfg.Server.ListenAddressTLS, err)
-		}
-		s.listeners = append(s.listeners, tls.NewListener(tlsBase, tlsConfig))
+		s.listeners = append(s.listeners, bl)
 	}
 
 	if len(s.listeners) == 0 {
@@ -209,7 +180,7 @@ func (s *Server) Start() error {
 	for _, l := range s.listeners {
 		// waitGroup.Go (Go 1.25+) atomically pairs Add with the goroutine
 		// launch, eliminating the rare Add/Wait race the old pattern had.
-		s.waitGroup.Go(func() { s.acceptLoop(l) })
+		s.waitGroup.Go(func() { s.acceptLoop(l.ln) })
 	}
 	if plaintextAddr != "" {
 		slog.Info("Started plaintext listener", "address", plaintextAddr)
@@ -249,8 +220,8 @@ func (s *Server) Start() error {
 // cleanup if a later listener bind fails.
 func (s *Server) closeListeners() {
 	for _, l := range s.listeners {
-		if err := l.Close(); err != nil {
-			slog.Error("Failed to close listener during cleanup", "address", l.Addr(), "error", err)
+		if err := l.ln.Close(); err != nil {
+			slog.Error("Failed to close listener during cleanup", "address", l.addr, "error", err)
 		}
 	}
 	s.listeners = s.listeners[:0]
@@ -375,9 +346,15 @@ func (s *Server) Wait(shutdownTimeout time.Duration) {
 
 	// Close all listeners to unblock acceptLoop
 	for _, l := range s.listeners {
-		if err := l.Close(); err != nil {
-			slog.Error("Failed to close listener", "address", l.Addr(), "error", err)
+		if err := l.ln.Close(); err != nil {
+			slog.Error("Failed to close listener", "address", l.addr, "error", err)
 		}
+	}
+
+	// Release the event log after the listeners so a session still tearing down
+	// can still record its exit.
+	if err := eventlog.Global.Close(); err != nil {
+		slog.Error("Event log close error", "error", err)
 	}
 
 	// Wait for all goroutines to finish, bounded by shutdownTimeout.
@@ -438,24 +415,69 @@ func (s *Server) reload() {
 		}
 	}
 
+	// Swap the TLS parameters BEFORE touching listeners, so a newly bound TLS
+	// listener is created against the new configuration rather than the old one.
+	// A failure here leaves the previous TLS configuration serving and abandons
+	// the reload, matching C: a failed apply leaves the running configuration in
+	// place (logsrvd/logsrvd.c:1879-1890).
+	switch {
+	case s.tlsProvider != nil:
+		changed, err := s.tlsProvider.update(newCfg)
+		if err != nil {
+			slog.Error("Config reload rejected: new TLS parameters could not be applied; keeping previous config",
+				"path", s.configPath, "error", err)
+			return
+		}
+		if changed {
+			slog.Info("Config reload: TLS parameters updated; the next handshake uses them",
+				"min_version", newCfg.Server.TLSMinVersion,
+				"check_peer", newCfg.Server.TLSCheckPeer)
+		}
+	case newCfg.Server.ListenAddressTLS != "":
+		// A TLS listener is being turned on for the first time, so there is no
+		// provider yet to update.
+		provider, err := newTLSConfigProvider(newCfg)
+		if err != nil {
+			slog.Error("Config reload rejected: TLS listener could not be configured; keeping previous config",
+				"path", s.configPath, "error", err)
+			return
+		}
+		s.tlsProvider = provider
+	}
+
+	if err := eventlog.Global.Configure(eventlog.SettingsFrom(newCfg)); err != nil {
+		slog.Error("Config reload rejected: event log could not be reconfigured; keeping previous config",
+			"path", s.configPath, "error", err)
+		return
+	}
+
+	// Rebuild the listener set. Established connections are untouched: closing a
+	// listener stops accepts and nothing more.
+	// Conformance: docs/logsrvd-reference/ ARCH-019, CONF-019.
+	if err := s.reconcileListeners(newCfg); err != nil {
+		slog.Error("Config reload rejected: listeners could not be rebuilt; keeping previous listeners",
+			"path", s.configPath, "error", err)
+		return
+	}
+
 	// Update config pointer — new connections will use the new config
 	s.config.Store(newCfg)
 
 	slog.Info("Config reload complete", "path", s.configPath)
 }
 
+// restartRequiredReloadChange names the first setting whose new value cannot be
+// applied to a running server, or "" when the reload can proceed.
+//
+// The listen addresses and the TLS material used to be listed here. They are
+// not any more: reconcileListeners rebinds the address set and tlsConfigProvider
+// swaps the handshake parameters, both without disturbing established
+// connections, which is what C does on SIGHUP (logsrvd/logsrvd.c:1809-1874).
+// Conformance: docs/logsrvd-reference/ ARCH-019, CONF-019.
 func restartRequiredReloadChange(oldCfg, newCfg *config.Config) string {
 	switch {
 	case oldCfg.Server.Mode != newCfg.Server.Mode:
 		return fmt.Sprintf("server.mode changed from %q to %q", oldCfg.Server.Mode, newCfg.Server.Mode)
-	case oldCfg.Server.ListenAddress != newCfg.Server.ListenAddress:
-		return fmt.Sprintf("server.listen_address changed from %q to %q", oldCfg.Server.ListenAddress, newCfg.Server.ListenAddress)
-	case oldCfg.Server.ListenAddressTLS != newCfg.Server.ListenAddressTLS:
-		return fmt.Sprintf("server.listen_address_tls changed from %q to %q", oldCfg.Server.ListenAddressTLS, newCfg.Server.ListenAddressTLS)
-	case oldCfg.Server.TLSCertFile != newCfg.Server.TLSCertFile:
-		return "server.tls_cert_file changed"
-	case oldCfg.Server.TLSKeyFile != newCfg.Server.TLSKeyFile:
-		return "server.tls_key_file changed"
 	case oldCfg.Server.MaxConnections != newCfg.Server.MaxConnections:
 		return fmt.Sprintf("server.max_connections changed from %d to %d", oldCfg.Server.MaxConnections, newCfg.Server.MaxConnections)
 	case oldCfg.API.ListenAddress != newCfg.API.ListenAddress:

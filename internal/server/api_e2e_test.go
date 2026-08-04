@@ -56,7 +56,7 @@ func TestAPI_EndToEnd(t *testing.T) {
 	}
 
 	// Open a protocol-level connection and drive a full AcceptMessage through.
-	protoAddr := srv.listeners[0].Addr().String()
+	protoAddr := srv.listeners[0].ln.Addr().String()
 	conn, err := net.Dial("tcp", protoAddr)
 	if err != nil {
 		t.Fatalf("Dial protocol: %v", err)
@@ -204,7 +204,7 @@ func TestAPI_RelayVisibleDuringFlush(t *testing.T) {
 	}
 
 	// Drive a full relay session: ClientHello, AcceptMessage, ExitMessage.
-	conn, err := net.Dial("tcp", srv.listeners[0].Addr().String())
+	conn, err := net.Dial("tcp", srv.listeners[0].ln.Addr().String())
 	if err != nil {
 		t.Fatalf("Dial protocol: %v", err)
 	}

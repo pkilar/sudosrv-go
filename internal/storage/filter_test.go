@@ -156,3 +156,63 @@ func TestPasswordFilter_Reset(t *testing.T) {
 		t.Error("Reset should clear isFiltering")
 	}
 }
+
+// TestDefaultPromptPatternsCompile guards the panic in NewPasswordFilter, which
+// is only safe while every built-in pattern is known-good.
+func TestDefaultPromptPatternsCompile(t *testing.T) {
+	t.Parallel()
+	if _, err := NewPasswordFilterWithPatterns(nil); err != nil {
+		t.Fatalf("built-in prompt patterns must compile: %v", err)
+	}
+}
+
+// TestConfiguredPatternsReplaceDefaults pins CONF-057's replace-don't-append
+// rule: once an operator configures any pattern, the built-in set is gone. A
+// site that narrows detection to its own PAM prompt must not keep silently
+// matching "password" everywhere, which is what appending would do.
+func TestConfiguredPatternsReplaceDefaults(t *testing.T) {
+	t.Parallel()
+
+	f, err := NewPasswordFilterWithPatterns([]string{`Enter unlock code`})
+	if err != nil {
+		t.Fatalf("NewPasswordFilterWithPatterns: %v", err)
+	}
+
+	// The built-in "password" pattern must no longer be active.
+	f.CheckOutput([]byte("Password: "))
+	if f.IsFiltering() {
+		t.Error("a configured pattern set must REPLACE the built-ins, but the built-in password prompt still armed masking")
+	}
+
+	// The configured pattern must be.
+	f.CheckOutput([]byte("Enter unlock code: "))
+	if !f.IsFiltering() {
+		t.Error("the configured pattern did not arm masking")
+	}
+	if got := string(f.FilterInput([]byte("hunter2\n"))); got != "*******\n" {
+		t.Errorf("FilterInput() = %q, want %q", got, "*******\n")
+	}
+}
+
+// TestEmptyPatternListKeepsDefaults is the other half: an operator who
+// configures nothing keeps the built-in multi-locale set.
+func TestEmptyPatternListKeepsDefaults(t *testing.T) {
+	t.Parallel()
+	f, err := NewPasswordFilterWithPatterns(nil)
+	if err != nil {
+		t.Fatalf("NewPasswordFilterWithPatterns: %v", err)
+	}
+	f.CheckOutput([]byte("Passwort: "))
+	if !f.IsFiltering() {
+		t.Error("built-in locale patterns should still be active when none are configured")
+	}
+}
+
+// TestBadConfiguredPatternErrors keeps the constructor from silently shipping a
+// filter with fewer patterns than the operator asked for.
+func TestBadConfiguredPatternErrors(t *testing.T) {
+	t.Parallel()
+	if _, err := NewPasswordFilterWithPatterns([]string{`[unterminated`}); err == nil {
+		t.Fatal("NewPasswordFilterWithPatterns() accepted an uncompilable pattern")
+	}
+}

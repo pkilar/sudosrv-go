@@ -12,6 +12,16 @@ server:
   # idle_timeout: 30m
   # tls_check_peer: false       # true = require and verify a client certificate
   # tls_cacert_file: "ca.pem"   # CA bundle for client certs; empty = system trust store
+  # tls_ciphers_v12:            # TLS 1.2 suites by IANA name; unset = Go's default
+  #   - "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+  #   - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+  # NOTE: not an OpenSSL cipher string -- "HIGH:!aNULL" is not accepted. There is
+  # no tls_ciphers_v13: Go does not allow TLS 1.3 suite selection.
+  #
+  # SIGHUP applies changes to the listen addresses and to every tls_* setting
+  # above without dropping established connections. Certificates renewed IN PLACE
+  # (certbot, cert-manager) need no signal at all -- the key pair is re-read per
+  # handshake.
   # server_timeout: 30s          # bounds writes to the client and the TLS
   #                              # handshake (NOT an idle deadline). 0 disables.
   server_operational_log_level: "debug"
@@ -19,6 +29,24 @@ server:
 # Settings for when server.mode is "local"
 local_storage:
   log_directory: "/tmp/gosudo-io"
+  # iolog_mode: 0600            # single knob, as in sudo_logsrvd. The file mode
+  #                             # and directory mode are DERIVED from it: owner
+  #                             # read+write are always forced on, only the
+  #                             # group/other read and write bits are honored,
+  #                             # and directory execute bits are re-derived.
+  #                             # 0600 -> file 0600, dir 0700 (the default);
+  #                             # 0640 -> file 0640, dir 0750.
+  # dir_permissions / file_permissions are DEPRECATED overrides kept so existing
+  # configs keep loading. Setting either pins that one mode and warns at startup.
+  #
+  # passprompt_regex REPLACES the built-in multi-locale prompt set rather than
+  # adding to it, matching sudo_logsrvd. Leave it unset to keep the built-ins.
+  # A pattern that does not compile, or is longer than 1024 bytes, fails startup.
+  # Only the ttyin/ttyout streams are filtered -- stdin/stdout/stderr are logged
+  # verbatim, as in sudo_logsrvd.
+  # passprompt_regex:
+  #   - "[Pp]assword[: ]*"
+  #   - "(?i)enter unlock code"
 
 # Settings for when server.mode is "relay". server.mode is the only switch that
 # turns relaying on: filling this block in while server.mode is "local" is now a
@@ -48,6 +76,24 @@ local_storage:
 #                               # retry stores the session there a second time.
 #  relay_cache_directory: "/tmp/sudosrv-cache"
 #  reconnect_attempts: -1
+
+# sudo's EVENT log: one audit line per command, separate from this daemon's own
+# operational log and from the I/O session transcripts. Defaults to syslog, as
+# sudo_logsrvd does, so SIEM rules written against that stream keep working.
+# Set log_type to "none" to turn it off entirely.
+#eventlog:
+#  log_type: "syslog"       # none | syslog | logfile
+#  log_format: "sudo"       # sudo (KEY=value line) | json (one compact object per line)
+#  log_exit: false          # add a record when the command exits
+#syslog:
+#  facility: "authpriv"     # authpriv | auth | daemon | user | local0-7
+#  accept_priority: "notice"  # "none" disables that class entirely
+#  reject_priority: "alert"
+#  alert_priority: "alert"
+#  maxlen: 960              # sudo-format lines longer than this are split
+#logfile:
+#  path: "/var/log/sudo.log"
+#  time_format: "Jan _2 15:04:05"   # Go layout, NOT strftime ("%h %e %T" in sudo)
 
 # Optional read-only management HTTP API.
 # Leave listen_address empty (or omit the entire api: block) to disable it.

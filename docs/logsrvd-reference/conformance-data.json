@@ -1,0 +1,2188 @@
+{
+ "verdicts": [
+  {
+   "id": "ARCH-001",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/server/server.go:151, internal/server/server.go:255",
+   "notes": "none"
+  },
+  {
+   "id": "ARCH-002",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:76-100, cmd/sudosrv/main.go:54-67",
+   "notes": "Packaging/operator only: a sudo_logsrvd-shaped invocation (-f conf) fails with 'flag provided but not defined' and exit 2 instead of 1. No wire effect; no reference client path touches argv."
+  },
+  {
+   "id": "ARCH-003",
+   "status": "ABSENT",
+   "severity": "informational",
+   "go_source": "—",
+   "notes": "none — a debug-only aid for exercising client restart logic; no production client path."
+  },
+  {
+   "id": "ARCH-004",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:54-73, cmd/sudosrv/main.go:103-142, cmd…",
+   "notes": "A supervisor keying on exit status 1 for 'startup failed' misclassifies config and listener failures; a SIGTERM racing startup takes the default disposition. No client-visible effect."
+  },
+  {
+   "id": "ARCH-005",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "—",
+   "notes": "Narrow: no site is wider than the configured mode, so nothing is loosened. Under the shipped unit (no UMask=, i.e. 0022) the 0750/0640 defaults land exactly. Only an operator configuring gr…"
+  },
+  {
+   "id": "ARCH-006",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "—",
+   "notes": "Started outside systemd the daemon refuses connections at the inherited fd limit rather than the configured cap. Masked for package installs: the shipped units set LimitNOFILE=65536."
+  },
+  {
+   "id": "ARCH-007",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "—",
+   "notes": "Operator-visible only: no self-backgrounding for sysvinit-style deployments; 'sudosrv &' keeps the controlling terminal and cwd."
+  },
+  {
+   "id": "ARCH-008",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "—",
+   "notes": "Non-systemd operators must locate the PID themselves; the shipped unit's ExecReload=/bin/kill -HUP $MAINPID covers the packaged case."
+  },
+  {
+   "id": "ARCH-009",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:198, cmd/sudosrv/main.go:167-206",
+   "notes": "Diagnostics land on stdout rather than a configured destination, and the destination silently changes mid-startup. Feeds ARCH-010."
+  },
+  {
+   "id": "ARCH-010",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/protocol/processor.go:152-164, cmd/sudosrv/main.go…",
+   "notes": "Running the daemon with stdout on a pipe whose reader exits ('sudosrv \\| tee', a restarting container log shim) kills it on the next log line. Not reachable under the shipped unit, where st…"
+  },
+  {
+   "id": "ARCH-011",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "—",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-012",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:77-110, internal/config/config.go…",
+   "notes": "A multi-address hostname in listen_address binds only one of them; clients reaching the others get ECONNREFUSED and, with ignore_iolog_errors=false, have their commands refused. The loopbac…"
+  },
+  {
+   "id": "ARCH-013",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/server/server.go:78, internal/server/server.go:104",
+   "notes": "none observable — identical reachability for every peer; a sockopt difference with no wire, on-disk or client-visible effect."
+  },
+  {
+   "id": "ARCH-014",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:73-127",
+   "notes": "A permanently occupied TLS port leaves the daemon flapping with zero service, where sudo_logsrvd would have kept serving plaintext. Both postures deny some clients; Go's is total-but-visibl…"
+  },
+  {
+   "id": "ARCH-015",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:200-268, internal/config/config.g…",
+   "notes": "Only past 10000 concurrent connections: a client is closed before it can send AcceptMessage and, with ignore_iolog_errors=false, its command is killed. The 100ms accept backoff merely delay…"
+  },
+  {
+   "id": "ARCH-016",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-017",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:167-190, internal/protocol/p…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-018",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:418, internal/server/server.…",
+   "notes": "SIEM rules or allowlists written against a bare-IP field must strip the ':port' suffix. Diagnostic/format only."
+  },
+  {
+   "id": "ARCH-019",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:406-500 (reload), internal/server/listeners.go:96-148, internal/server/tlsparams.go",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-020",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:280",
+   "notes": "No on-demand snapshot of listeners/connections for diagnosing a wedged connection. Partly covered by the read-only management API (GET /api/v1/sessions), which is off by default and reports…"
+  },
+  {
+   "id": "ARCH-021",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:278-293",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-022",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "—",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-023",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:102-157, internal/server/ser…",
+   "notes": "none client-visible; structural only. It is the reason SIGUSR1 has nothing to dump (ARCH-020) and shutdown cannot walk connections (ARCH-039)."
+  },
+  {
+   "id": "ARCH-024",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:231-236, internal/config/con…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-025",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:359-364, internal/connection…",
+   "notes": "Only a non-stock peer that connects and waits for an unsolicited banner stalls until its own timeout. No shipped client is affected."
+  },
+  {
+   "id": "ARCH-026",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:194-198, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-027",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:340-348, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-028",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/protocol/processor.go:167-190, internal/connection…",
+   "notes": "A client tripping the 2 MiB cap sees an unexplained close instead of a named reason — unreachable from the reference client, which caps its own messages. Zero-length records are absorbed ra…"
+  },
+  {
+   "id": "ARCH-029",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:168, internal/protocol/proce…",
+   "notes": "Go allocates a 4-byte length buffer and an exact-size payload buffer per message instead of retaining a per-connection 64 KiB buffer that grows by pow2 and never shrinks. Purely an allocati…"
+  },
+  {
+   "id": "ARCH-030",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:238-249",
+   "notes": "Operator diagnostics only: a truncated session is visible as a closed connection but is not flagged as truncated without enabling debug logging."
+  },
+  {
+   "id": "ARCH-031",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:235-256, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-032",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:314-327, internal/connection…",
+   "notes": "Nothing distinguishes the two for a client in a normal session. The SHUTDOWN gap is graded under ARCH-039."
+  },
+  {
+   "id": "ARCH-033",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "—",
+   "notes": "crypto/tls resolves WANT_READ/WANT_WRITE inversion inside a single blocking Read or Write over the netpoller; there is no application-visible half-handshake to re-dispatch, no temporary_wri…"
+  },
+  {
+   "id": "ARCH-034",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1219-1224, internal/storage/ses…",
+   "notes": "Restart accuracy only: after an abrupt disconnect during a quiet period the client resumes from a slightly older commit point and re-sends a little more I/O. No shipped client blocks on int…"
+  },
+  {
+   "id": "ARCH-035",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:941-953, internal/connection/ha…",
+   "notes": "A non-stock client can place arbitrary UTF-8 in the audit record's signal field where sudo_logsrvd would have replied 'invalid ExitMessage' and closed. JSON-encoded, so no structural corrup…"
+  },
+  {
+   "id": "ARCH-036",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:351-401, internal/storage/se…",
+   "notes": "No effect on any conforming client and no data-integrity impact; an out-of-order ClientHello/Restart mid-session is dropped rather than answered with an error and a close."
+  },
+  {
+   "id": "ARCH-037",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:713-784, internal/connection…",
+   "notes": "After a denied command the socket lingers until the client closes it — which the stock client does. Only a non-stock peer leaks a slot, and now that idle_timeout defaults to off it leaks in…"
+  },
+  {
+   "id": "ARCH-038",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:261-270, internal/connection…",
+   "notes": "sudo shows the user 'Internal Server Error' for every server-side failure, so client-side diagnosis requires correlating with the server's own log."
+  },
+  {
+   "id": "ARCH-039",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:278-340, internal/connection/hand…",
+   "notes": "On SIGTERM with an open idle session: no final commit_point (so a reconnecting client resends more I/O than after sudo_logsrvd's shutdown), shutdown always burns the full 30s failsafe, and…"
+  },
+  {
+   "id": "ARCH-040",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:322-339, cmd/sudosrv/main.go:28",
+   "notes": "An idle connected client makes the 30s failsafe the only exit path, tripling C's worst-case stop time. Relevant to TimeoutStopSec=30s in the shipped unit, which it exactly meets."
+  },
+  {
+   "id": "ARCH-041",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:161-186, internal/storage/se…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-042",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:236-300, internal/relay/session.g…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-043",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:129-143, internal/relay/session.g…",
+   "notes": ""
+  },
+  {
+   "id": "ARCH-044",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:252-260, internal/server/server.go:332-…",
+   "notes": "The process reports exit 0 even when a handler was still wedged at the 30s failsafe, where C only reaches its exit path after the loop actually breaks. A supervisor cannot distinguish a cle…"
+  },
+  {
+   "id": "ARCH-045",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go:49-57, internal/config/config.go:…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-001",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:34-112,179-189; README.md:20",
+   "notes": "An existing /etc/sudo_logsrvd.conf must be hand-translated; nothing a client can observe."
+  },
+  {
+   "id": "CONF-002",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go",
+   "notes": ""
+  },
+  {
+   "id": "CONF-003",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/config/config.go:179-189 (yaml.v3 scanner)",
+   "notes": "None."
+  },
+  {
+   "id": "CONF-004",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/config/config.go:179-189; config-example.yaml (use…",
+   "notes": "None beyond a loud parse error if INI comment syntax is pasted in."
+  },
+  {
+   "id": "CONF-005",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/config/config.go:179-189 (yaml.v3 scanner)",
+   "notes": "A continued INI line must be rewritten during migration. Nothing observable at runtime."
+  },
+  {
+   "id": "CONF-006",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:63-64,110-111 (bool fields); yaml…",
+   "notes": "Migration friction only; a rejected value aborts the load loudly rather than being silently misread."
+  },
+  {
+   "id": "CONF-007",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:50-57,66-81,219-239; yaml.v3 deco…",
+   "notes": "Operator-visible only: a nonsense max_connections silently becomes unlimited instead of being rejected. No client-facing effect."
+  },
+  {
+   "id": "CONF-008",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:108-109,228-245,384-407",
+   "notes": "An operator who follows the daemon's own advice produces a config that will not load and exits 2. Loud, but self-inflicted by the diagnostic."
+  },
+  {
+   "id": "CONF-009",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:118-131; internal/server/server.g…",
+   "notes": "After a SIGHUP with a typo'd log level, the running config is a hybrid: the new file's values with the old log level, and only an ERROR line marks it."
+  },
+  {
+   "id": "CONF-010",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go:118-131,147-177; internal/server/…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-011",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:193-246; yaml.v3 decode.go:581-58…",
+   "notes": "An operator who blanks a value expecting to disable a feature silently gets the compiled default instead, with no diagnostic."
+  },
+  {
+   "id": "CONF-012",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:44-45,62,179-189; yaml.v3 decode.…",
+   "notes": "A config C accepts fails to load here — loud. Multi-listener and ordered-standby-relay deployments need a second process or a load balancer."
+  },
+  {
+   "id": "CONF-013",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:78; internal/config/config.go:118-124",
+   "notes": "Running the binary outside its source tree without -config exits 2. Migration/ops friction only."
+  },
+  {
+   "id": "CONF-014",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:114-131",
+   "notes": "The daemon can never start on pure defaults; a config.yaml must always be shipped, and all three packages do."
+  },
+  {
+   "id": "CONF-015",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:54-100",
+   "notes": "An init script or unit written for sudo_logsrvd dies immediately with 'flag provided but not defined: -f'. Loud in every case."
+  },
+  {
+   "id": "CONF-016",
+   "status": "ABSENT",
+   "severity": "informational",
+   "go_source": "cmd/sudosrv/main.go:76-100 (no equivalent flag or config ke…",
+   "notes": "None."
+  },
+  {
+   "id": "CONF-017",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:54-73,240-261; archlinux/sudosrv.servic…",
+   "notes": "No way to self-background for a sysvinit script; under systemd the behavior equals C's -n mode, which is what C recommends for supervised operation."
+  },
+  {
+   "id": "CONF-018",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go",
+   "notes": ""
+  },
+  {
+   "id": "CONF-019",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/server/listeners.go:96-148",
+   "notes": "Reconciliation now matches on the verbatim address string as C does, including the DNS consequence: an unchanged string whose resolution moved does not rebind. Deliberately different in ordering -- every NEW address is bound BEFORE any removed one is closed, where C frees first and can end with zero listeners and sudo_fatalx. A reload that cannot bind therefore changes nothing here instead of exiting the daemon; the cost is that swapping two listeners' ports needs two reloads. Guarded by TestReload_RebindsListeners and TestReload_UnbindableAddressKeepsPreviousListeners."
+  },
+  {
+   "id": "CONF-020",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:198 (slog JSON handler on os.Stdout)",
+   "notes": "Rotation is whatever journald or the container runtime provides. Operator-visible only."
+  },
+  {
+   "id": "CONF-021",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:54-100 (no pid-file code path anywhere…",
+   "notes": "Tooling expecting /run/sudo/sudo_logsrvd.pid finds nothing."
+  },
+  {
+   "id": "CONF-022",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:44-45; internal/server/server.go:…",
+   "notes": "A named host that resolves to both A and AAAA yields a single listener; a client reaching the server over the other family gets ECONNREFUSED. Every C-style address string fails loudly at st…"
+  },
+  {
+   "id": "CONF-023",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:151 (ListenAddress default '127.0…",
+   "notes": "A hand-written minimal config accepts only local clients and remote clients get ECONNREFUSED — diagnosable in one startup line, and every shipped config sets the address explicitly. Droppin…"
+  },
+  {
+   "id": "CONF-024",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:78,104; internal/config/config.go…",
+   "notes": "Both failures are visible; neither is silent data loss."
+  },
+  {
+   "id": "CONF-025",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go, archlinux/sudosrv.conf, rpm/SOUR…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-026",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:78,104,209 (net.Listen/tls.Listen…",
+   "notes": "None at C's defaults; probes are more aggressive than a typical system default. Missing option, not a divergence."
+  },
+  {
+   "id": "CONF-027",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:42-58 (no pid_file field)",
+   "notes": "No pid file is written; the systemd units make it unnecessary."
+  },
+  {
+   "id": "CONF-028",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "cmd/sudosrv/main.go:167-206; internal/config/config.go:57",
+   "notes": "Sites collecting logsrvd diagnostics via syslog must instead collect the process's stdout via journald."
+  },
+  {
+   "id": "CONF-029",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:47,147-177; internal/server/serve…",
+   "notes": "Only the implicit default path is missing; the failure is loud and immediate rather than deferred."
+  },
+  {
+   "id": "CONF-030",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:46,147-177 (no access(R_OK) probe…",
+   "notes": "TLS requires three explicit keys and refuses to start otherwise with a clear message. Missing option, safer posture."
+  },
+  {
+   "id": "CONF-031",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go",
+   "notes": "tls_cacert_file exists with an empty default meaning the system trust store; C's access(R_OK) probe of a default path is not reproduced."
+  },
+  {
+   "id": "CONF-032",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": "Go's crypto/tls implements no finite-field Diffie-Hellman (DHE) suites — key exchange is ECDHE, or RSA under TLS 1.2 — and exposes no API to supply DH parameters. A tls_dhparams setting cou…"
+  },
+  {
+   "id": "CONF-033",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go (CipherSuites), internal/server/tlsparams.go:127-133",
+   "notes": "tls_ciphers_v12 selects TLS 1.2 suites by IANA name, not as an OpenSSL cipher string -- nothing in Go can parse 'HIGH:!aNULL', so a config written for C fails to load rather than being guessed at. Only the forward-secret AEAD suites in tls.CipherSuites() are selectable; tls.InsecureCipherSuites() is never consulted, so no config can negotiate CBC or 3DES. An unknown name fails the load where C warns and silently reverts to its defaults, which would leave a typo'd hardening change appearing to be in effect. No tls_ciphers_v13 counterpart: Go ignores CipherSuites for TLS 1.3 entirely. C's v13 default (TLS_AES_256_GCM_SHA384) is among the three Go offers, so the default path negotiates the same suite."
+  },
+  {
+   "id": "CONF-034",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:90-94 (tls.LoadX509KeyPair only)",
+   "notes": "Diagnostics only, and it cuts both ways: a broken chain surfaces at every client handshake instead of once at startup, while a self-signed server certificate needs no opt-out here."
+  },
+  {
+   "id": "CONF-035",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go TLSCheckPeer",
+   "notes": ""
+  },
+  {
+   "id": "CONF-036",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": "None at C's defaults; subsumed by CONF-035."
+  },
+  {
+   "id": "CONF-037",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/server/server.go:85-108",
+   "notes": "crypto/tls is unconditionally part of the Go standard library; there is no build variant without it, so the 'TLS not supported' rejection path and the conditional tls_* key table have no an…"
+  },
+  {
+   "id": "CONF-038",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go",
+   "notes": ""
+  },
+  {
+   "id": "CONF-039",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go",
+   "notes": ""
+  },
+  {
+   "id": "CONF-040",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:160,234-236; internal/relay/sessi…",
+   "notes": "On a high-latency path the dial is abandoned after 5s and retried with backoff; delivery is delayed, not lost, unless a finite reconnect_attempts is also configured."
+  },
+  {
+   "id": "CONF-041",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:396-414 (calculateBackoff), 266-2…",
+   "notes": "Different retry cadence; no delivery-correctness difference."
+  },
+  {
+   "id": "CONF-042",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "packaging logrotate config",
+   "notes": ""
+  },
+  {
+   "id": "CONF-043",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:54-78; README.md:146-172; config-…",
+   "notes": "Deliberate: relay is C's store_first made unconditional, so the upstream never sees a live session and a client that dies without ExitMessage waits for the next restart to be delivered. Rat…"
+  },
+  {
+   "id": "CONF-044",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:960,969-974",
+   "notes": ""
+  },
+  {
+   "id": "CONF-045",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go resolveRelayTLSInheritance",
+   "notes": ""
+  },
+  {
+   "id": "CONF-046",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:966-972; internal/config/config.g…",
+   "notes": "Credential problems surface as per-attempt handshake failures at flush time rather than once at config load. Diagnostics only."
+  },
+  {
+   "id": "CONF-047",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:970; internal/config/config.go:64…",
+   "notes": "Pointing at a self-signed upstream produces loud per-attempt handshake failures and a growing cache until the operator sets tls_skip_verify: true, which reproduces C's default posture. No s…"
+  },
+  {
+   "id": "CONF-048",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/config/config.go:179-189",
+   "notes": "Configuration is YAML unmarshalled into a fixed struct, so there is no INI key table and no 'illegal key' concept; a relay tls_checkhost key simply does not exist. Worth recording for opera…"
+  },
+  {
+   "id": "CONF-049",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:315-341,603-698,1508-1533; inte…",
+   "notes": "`sudoreplay <ID>` with the stock -d fails to resolve a session; the operator must pass -d /var/log/gosudo-io/<user>. No command is ever killed by this."
+  },
+  {
+   "id": "CONF-050",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go:170; internal/storage/session.go:…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-051",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go:173; internal/storage/session.go:…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-052",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1180-1210",
+   "notes": ""
+  },
+  {
+   "id": "CONF-053",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:277-291,1032-1100",
+   "notes": "Ownership must be arranged externally by choosing the unit's User=. No practical read failure."
+  },
+  {
+   "id": "CONF-054",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:277-291",
+   "notes": "Same practical outcome as C's default when the daemon owns the tree."
+  },
+  {
+   "id": "CONF-055",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go (DeriveIologModes, EffectiveFileMode, EffectiveDirMode)",
+   "notes": ""
+  },
+  {
+   "id": "CONF-056",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go:174; internal/storage/session.go:…",
+   "notes": ""
+  },
+  {
+   "id": "CONF-057",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/config/config.go (ValidatePassPromptRegex), internal/storage/filter.go:46-110",
+   "notes": "Configurable now, with C's semantics: the first configured pattern replaces the default set rather than adding to it, patterns over 1024 bytes are rejected, and any compile failure aborts the config load. Deliberately different in the DEFAULT set: C ships one pattern ([Pp]assword[: ]*) and this ships nine covering en/de/es/fr/pt/ru/CJK prompts plus PIN and passphrase. The divergence only ever masks more than C, never less. Go's regexp handles a leading (?i) natively, so C's convention for requesting case-insensitivity is accepted as written."
+  },
+  {
+   "id": "CONF-058",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/eventlog/, internal/connection/handler.go (emitEvent, emitExitEvent), internal/server/server.go:114-121",
+   "notes": ""
+  },
+  {
+   "id": "CONF-059",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/eventlog/eventlog.go (SudoLine, JSONLine)",
+   "notes": "log_format accepts sudo (the default, matching C's field order and octal control-character escaping) and json. Deliberately different for json: this emits one compact object per line, where C's json is currently an alias for json_pretty and rewrites the entire file as a single object on every event. That shape cannot be tailed, appended to by two writers, or shipped line-by-line, which is what an event stream is for. C's json_compact and json_pretty spellings are not accepted."
+  },
+  {
+   "id": "CONF-060",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/eventlog/eventlog.go (Logger.Log logExit gate); internal/config/config.go (EventLogConfig.LogExit)",
+   "notes": ""
+  },
+  {
+   "id": "CONF-061",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/eventlog/sink.go (splitSyslogLine); internal/config/config.go (SyslogConfig.MaxLen)",
+   "notes": ""
+  },
+  {
+   "id": "CONF-062",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/eventlog/sink.go (facilities table); internal/config/config.go (SyslogConfig.Facility)",
+   "notes": "facility is implemented with C's table and case-sensitive matching, defaulting to authpriv. Deliberately absent: server_facility, the separate facility for the daemon's OWN warnings. Those go to slog here, which is configured by server_operational_log_level and its own handler, not by a syslog facility."
+  },
+  {
+   "id": "CONF-063",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/eventlog/sink.go (priorities table, -1 for none); internal/eventlog/configure.go",
+   "notes": ""
+  },
+  {
+   "id": "CONF-064",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/config/config.go (LogFileConfig); internal/eventlog/sink.go (newFileSink)",
+   "notes": "logfile.path is implemented, opened O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW as C does and flock'd per write. Deliberately different for time_format: this takes a Go reference-time layout rather than C's strftime string, because translating strftime would mean shipping a parser for a format nothing else in this config uses. C's default '%h %e %T' is 'Jan _2 15:04:05' here, and is the default."
+  },
+  {
+   "id": "CONF-065",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:34-39",
+   "notes": "Subsumed by CONF-058."
+  },
+  {
+   "id": "CONF-066",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:752-842",
+   "notes": "Unreachable in practice at 2.18 billion sessions; refusing is the safer outcome. No knob to clamp, and nothing to clamp."
+  },
+  {
+   "id": "CONF-067",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/server/server.go:345-380",
+   "notes": "The spec records this as an internal structuring concern with no external contract. Go has no shared iolog/eventlog library holding process-global state: configuration is a value passed to…"
+  },
+  {
+   "id": "CONF-068",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/server/server.go:345-362",
+   "notes": "The spec records this as an ordering artifact and states that an implementation validating up front should not be marked divergent. reload() does exactly that: LoadConfigRequired, then conf…"
+  },
+  {
+   "id": "IOLOG-001",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/storage/session.go:676-696",
+   "notes": "none at the syscall level - mkdir(\"a//b\") and mkdir(\"a/b\") name the same directory. The only difference is the stored path string, which feeds the log_id relative path, and no production cl…"
+  },
+  {
+   "id": "IOLOG-002",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/storage/session.go:640-674",
+   "notes": "A sudoers/logsrvd template containing one of the Go-only names (%{uid}, %{rand}, %{epoch}, %{command_path}, %{LIVEDIR}, ...) as intended-literal text expands to a value here and stays liter…"
+  },
+  {
+   "id": "IOLOG-003",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:676-677",
+   "notes": "A config with %{seq} in iolog_dir yields an XX/XX/XX hierarchy in the directory portion here and a directory literally named '%{seq}' on sudo_logsrvd. Config-portability only; no client-vis…"
+  },
+  {
+   "id": "IOLOG-004",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:178-180,638-658",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-005",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:658",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-006",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:208-271,683-684",
+   "notes": "Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable - the operat…"
+  },
+  {
+   "id": "IOLOG-007",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:694",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-008",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:293-300,690-692",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-009",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-010",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:753-874",
+   "notes": "Downgraded: C's OWN default iolog_dir is _PATH_SUDO_IO_LOGDIR with no escapes (logsrvd_conf.c:1696), so at C's default the seq file sits in exactly the place Go puts it - the divergence onl…"
+  },
+  {
+   "id": "IOLOG-011",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:776",
+   "notes": "A concurrently running sudo_logsrvd or sudoers plugin on the same iolog_dir is not excluded, so both can read the same counter value. Requires the same mixed-implementation shared tree as I…"
+  },
+  {
+   "id": "IOLOG-012",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:833-841",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-013",
+   "status": "DIVERGENT",
+   "severity": "informational",
+   "go_source": "internal/storage/session.go:624",
+   "notes": "Downgraded to informational: the shipped default iolog_file is '%{seq}' (config.go:170), so the normal path uses the value it allocates. For a %{seq}-free template the only artifact is a 's…"
+  },
+  {
+   "id": "IOLOG-014",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:354,414,762",
+   "notes": "On a C-to-Go migration onto an existing tree, directories keep whatever mode/owner they had. If those are tighter than the daemon needs, later opens fail with EACCES where C would have sile…"
+  },
+  {
+   "id": "IOLOG-015",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:108-109,168-174,228-245,355-370",
+   "notes": "Default transcripts are group-readable (0640/0750) where C ships 0600/0700. Practically narrow because both run as root:root, so the delta is 'members of group root can read' - but it is a…"
+  },
+  {
+   "id": "IOLOG-016",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1035,1052,1059,1090,766",
+   "notes": "none in the default configuration - a root daemon produces root-owned files either way. This is correctly scored as a missing option (a deployment that wants the tree owned by a non-daemon…"
+  },
+  {
+   "id": "IOLOG-017",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:277-289,1059,1090,1125",
+   "notes": "Under a restrictive inherited umask the configured file_permissions/dir_permissions are silently tightened (umask 0077 + file_permissions 0640 -> 0600 files, 0700 dirs) with nothing logged.…"
+  },
+  {
+   "id": "IOLOG-018",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:150-171,357,766",
+   "notes": "The seq symlink is only exploitable by someone who can already write log_directory, which is root-owned - not a practical escalation. The missing swapids retry means a root-squashing NFS ex…"
+  },
+  {
+   "id": "IOLOG-019",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1035-1076,1082-1102,1166",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-020",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1035 (and :446 for event sessio…",
+   "notes": "Downgraded from medium: the ONLY reader of the uuid file in the whole reference tree is verify_iolog_uuid, which runs only on the restart path - and the production client never restarts (lo…"
+  },
+  {
+   "id": "IOLOG-021",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1041-1052,188-199",
+   "notes": "A hand-read `log` shows '/usr/bin/id' where C shows '/usr/bin/id -u', and a tty-less client yields two empty fields where C writes 24:80. sudoreplay is unaffected: iolog_parse_loginfo (iolo…"
+  },
+  {
+   "id": "IOLOG-022",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1113-1152",
+   "notes": "Cosmetic. I verified the byte-level compatibility that matters: Go's output still ends in exactly \"\\n}\\n\", which is what C's store_exit_info_json lseek(fd,-3,SEEK_END) (logsrvd_local.c:348)…"
+  },
+  {
+   "id": "IOLOG-023",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:983-1029,1113-1118",
+   "notes": "sudoreplay still parses Go-written log.json. Go-only keys (server_log_id, submit_time, restarts, alerts, sub_commands) are unknown keys that eventlog_json_parse tolerates with a debug warni…"
+  },
+  {
+   "id": "IOLOG-024",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1016-1029",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-025",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1307,1331,1356",
+   "notes": "log.json's inode and mtime churn mid-session, so neither can be used as a completion signal, and an intercept-mode session pays a full rewrite of a growing sub_commands array per sub-comman…"
+  },
+  {
+   "id": "IOLOG-026",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1673-1700,1113-1152",
+   "notes": "Resulting JSON is semantically equivalent and still ends \"\\n}\\n\". Differences: a log.json deleted mid-session is recreated from memory (C no-ops), a zero run_time is emitted, and a signalle…"
+  },
+  {
+   "id": "IOLOG-027",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1710",
+   "notes": "timing is the one file whose final mode ignores configuration: file_permissions 0600 still yields 0440. Group-readable where C would be 0400. Same class as IOLOG-015 - a looser default, not…"
+  },
+  {
+   "id": "IOLOG-028",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1209-1213",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-029",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:88-97,100-109",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-030",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1248-1263",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-031",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:119-125,1266-1287",
+   "notes": "none for a conforming sudo client. A non-conforming client sending any other signal name gets its command killed rather than a verbatim timing record. Real but unreachable in practice; the…"
+  },
+  {
+   "id": "IOLOG-032",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1207,1255,1277,1238-1246",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-033",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1189-1217",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-034",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1059,1592",
+   "notes": "Downgraded from medium on reachability, not on the citation. Two writers can only meet on one timing file via a concurrent restart, and the production client never restarts (log_client.h:64…"
+  },
+  {
+   "id": "IOLOG-035",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1209,1257,1280",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-036",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1189-1197",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-037",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1098-1101,1059,1189-1204",
+   "notes": "Tree is slightly larger than C's and not byte-comparable. Replay is unaffected: iolog_open on read sniffs the gzip magic per file (iolog_open.c:102-107), so a plaintext timing beside gzippe…"
+  },
+  {
+   "id": "IOLOG-038",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1189-1204,1215",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-039",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go (writeIoEntry)",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-040",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/storage/filter.go:85-149",
+   "notes": "Downgraded from medium. Both divergences push the same way - more masking than C, never less - so no secret leaks. After a spurious match (`grep password /etc/*.conf`) the next typed line i…"
+  },
+  {
+   "id": "IOLOG-041",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/filter.go",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-042",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:315-340,350-351,1366-1380",
+   "notes": "No amplification: an empty-path log_id resolves to log_directory itself, which then fails the uuid check; a NUL-bearing path fails the os.Stat. Only sendlog or a hand-rolled client reaches…"
+  },
+  {
+   "id": "IOLOG-043",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1551-1558",
+   "notes": "none beyond IOLOG-020's mixed-tree case. The security-relevant half (a caller cannot resume a directory whose UUID it does not already hold) is intact."
+  },
+  {
+   "id": "IOLOG-044",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1561-1567",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-045",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1411-1505,1582-1624",
+   "notes": "Only the overshoot/EOF fallback diverges: Go logs a warning and appends instead of failing the restart (1585-1589), so the overlap region is duplicated in both the stream and the timing fil…"
+  },
+  {
+   "id": "IOLOG-046",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1569-1572",
+   "notes": "A sendlog- or relay-originated RestartMessage against a compressed tree gets 'Internal Server Error' and a dropped connection. Unreachable from the production client."
+  },
+  {
+   "id": "IOLOG-047",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1600-1604,1652-1666,1673-1712",
+   "notes": "C leaves log.json byte-identical across a restart; Go does not. 'restarts' is an unknown key that eventlog_json_parse tolerates. Restart-path only."
+  },
+  {
+   "id": "IOLOG-048",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1720-1765; internal/connection/…",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-049",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go",
+   "notes": ""
+  },
+  {
+   "id": "IOLOG-050",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1317-1362",
+   "notes": "The essential property holds - no second session directory, parent's log_id reused, nothing on disk relocated. An auditor must subtract timestamps by hand to place the sub-command in the re…"
+  },
+  {
+   "id": "IOLOG-051",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:713-728; internal/storage/se…",
+   "notes": "A tty-less client that omits lines/columns gets a log.json with no 'columns'/'lines' members (C always emits them) and two empty fields in the legacy log line - neither is required by iolog…"
+  },
+  {
+   "id": "PROTO-001",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:167-190,235-256",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-002",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:20,177,241",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-003",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/protocol/processor.go:177-179; internal/connection…",
+   "notes": "A peer that overruns the 2 MiB frame limit sees a bare FIN instead of \"client message too large\", and at the shipped info log level the server prints only \"Connection closed\". Diagnosabilit…"
+  },
+  {
+   "id": "PROTO-004",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:167-190; internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-005",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:168,181",
+   "notes": "Allocation strategy with no external contract, as the requirement itself states. Go allocates a right-sized []byte per frame instead of a 64 KiB power-of-two-grown buffer; like C it never r…"
+  },
+  {
+   "id": "PROTO-006",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:395-400; internal/storage/se…",
+   "notes": "A zero-length frame is answered but not fatal, so C's one-error-then-close contract is broken; the relay consequence is the retry loop scored under PROTO-042. No stock client sends one."
+  },
+  {
+   "id": "PROTO-007",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/protocol/processor.go:206-208; internal/connection…",
+   "notes": "A client with an encoding bug gets an unexplained disconnect instead of \"invalid ClientMessage\", and the server-side record is invisible at the default log level."
+  },
+  {
+   "id": "PROTO-008",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:194-238,359-364,487-493",
+   "notes": "None for sudo, sudo_sendlog or a C relay. Only a third-party client that legitimately omits ClientHello (legal per PROTO-011) would block in its hello read until its own timeout."
+  },
+  {
+   "id": "PROTO-009",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:487-493; internal/config/con…",
+   "notes": "Operator foot-gun only — with server_id explicitly emptied every sudo client fails the hello and (ignore_iolog_errors being false) the command is killed. C cannot hit this because server_id…"
+  },
+  {
+   "id": "PROTO-010",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:488-492",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-011",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:359-364; internal/storage/se…",
+   "notes": "Unreachable from any shipped client; the relay-replay half is the loop scored under PROTO-042."
+  },
+  {
+   "id": "PROTO-012",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/connection/handler.go:351-401",
+   "notes": "none — implementation-structure note, not a wire contract."
+  },
+  {
+   "id": "PROTO-013",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:296-300,366-368,382-385,614-…",
+   "notes": "A peer can reuse a connection after a RejectMessage where C would have dropped it; the stock client closes after a reject on its own (log_client.c:1453-1458 sets FINISHED and deletes both e…"
+  },
+  {
+   "id": "PROTO-014",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:717-728; internal/storage/se…",
+   "notes": "A hand-built or replayed Accept missing one of the four keys is refused with \"Internal Server Error\" instead of being stored; sudo and sudo_sendlog on live logs are unaffected."
+  },
+  {
+   "id": "PROTO-015",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-016",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:918-921,1337; internal/connecti…",
+   "notes": "Extra log_id messages a strict protocol validator would flag; the shipped client ignores them (handle_log_id stores only the first)."
+  },
+  {
+   "id": "PROTO-017",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:315-340,350-351",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-018",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:156-158",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-019",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:382-385,614-667",
+   "notes": "A content-free RejectMessage is persisted as a log.json audit record instead of being refused; audit noise only, and no shipped client sends one."
+  },
+  {
+   "id": "PROTO-020",
+   "status": "DIVERGENT",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:581-586; internal/connection/hand…",
+   "notes": "none observable — the extra message is written into a socket the client has stopped reading and is discarded when the client closes."
+  },
+  {
+   "id": "PROTO-021",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:386-388,670-710; internal/st…",
+   "notes": "A negative or out-of-range resume_point that C refuses instead resumes at offset 0 and overwrites forward as new data arrives — the same behaviour C's own {0,0} special case has (logsrv_uti…"
+  },
+  {
+   "id": "PROTO-022",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:673-676,691-694; internal/co…",
+   "notes": "Diagnosability only, and only for sudo_sendlog -R since production sudo never sends RestartMessage."
+  },
+  {
+   "id": "PROTO-023",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1366-1380,1508-1567,446,1035",
+   "notes": "A C sudo_logsrvd pointed at a Go-written iolog tree refuses to restart those sessions (\"unable to restart log\"); sudoreplay never reads the uuid file so replay is unaffected."
+  },
+  {
+   "id": "PROTO-024",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1710,1560-1567",
+   "notes": "With file_permissions tightened to 0600 the completed timing file becomes group-readable (0440) instead of 0400 — a small permission widening of a file that holds only byte counts and delay…"
+  },
+  {
+   "id": "PROTO-025",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1403-1472,1574-1589",
+   "notes": "A misaligned resume_point duplicates the overlap span in the transcript so sudoreplay replays those records twice, where C errors and drops the connection. Reachable only via sudo_sendlog -…"
+  },
+  {
+   "id": "PROTO-026",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1626-1641; internal/relay/sessi…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-027",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go writeIoEntry",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-028",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1248-1264; internal/relay/sessi…",
+   "notes": "Same timing-file corruption vector as PROTO-027 via a winsize delay; a pre-Accept ChangeWindowSize is answered with an error but not disconnected."
+  },
+  {
+   "id": "PROTO-029",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:119-125,1266-1287; internal/rel…",
+   "notes": "Wrong error string on the wire, and the same unvalidated-delay corruption as PROTO-027 through the suspend record."
+  },
+  {
+   "id": "PROTO-030",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1207,1255,1277; internal/relay/…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-031",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:60-66,1238-1246; internal/relay…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-032",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1238-1246; internal/relay/sessi…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-033",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:1219-1226; internal/relay/sessi…",
+   "notes": "Cadence differs on the wire (one early commit point, no trailing one); harmless because the client only requires the post-Exit commit point, which is unconditional (PROTO-035), and handle_c…"
+  },
+  {
+   "id": "PROTO-034",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1189-1217",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-035",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:944-952; internal/relay/session…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-036",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:274-300",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-037",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:1238-1246,944-952; internal/rel…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-038",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:944-952; internal/relay/session…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-039",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:281-300",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-040",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:390-393; internal/storage/se…",
+   "notes": "An arbitrary client-supplied signal string lands JSON-encoded in log.json where C would refuse the message; a pre-Accept Exit gets a silent close instead of \"state machine error\"."
+  },
+  {
+   "id": "PROTO-041",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:370-380; internal/storage/se…",
+   "notes": "A content-free AlertMessage is recorded as an audit entry instead of drawing \"invalid AlertMessage\" and a close. Audit noise only."
+  },
+  {
+   "id": "PROTO-042",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-043",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:261-270,395-400",
+   "notes": "Repeated error messages on a still-usable connection instead of exactly one followed by a close; rate-limited to 100 msg/s by waitForRateToken. Same root cause as PROTO-042."
+  },
+  {
+   "id": "PROTO-044",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:267,399,762-764",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-045",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:930-957,903-913",
+   "notes": "An upstream that rejects a session cannot tell the user's sudo session — it already reported success. The only symptom is a retry loop and a cache file that never drains."
+  },
+  {
+   "id": "PROTO-046",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:556-586,818-844",
+   "notes": "The client's commit point asserts local cache durability rather than upstream storage — the identical trade C's store_first mode makes."
+  },
+  {
+   "id": "PROTO-047",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:1016-1032,845-901",
+   "notes": "none observable — matters only to a byte-for-byte audit of the relayed stream, which no consumer performs."
+  },
+  {
+   "id": "PROTO-048",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:156-158,195-235",
+   "notes": "There is no upstream log_id to pass through: the store-and-forward design hands the downstream client a relay-local base64(UUID) at accept time and only contacts the upstream after the clie…"
+  },
+  {
+   "id": "PROTO-049",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:238-249,184-186",
+   "notes": "At the default info level a session truncated mid-command is indistinguishable from a clean one in the server log — only the generic \"Connection closed\" line appears."
+  },
+  {
+   "id": "PROTO-050",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:231-236,304-348; internal/co…",
+   "notes": ""
+  },
+  {
+   "id": "PROTO-051",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:278-340; internal/connection/hand…",
+   "notes": "An active I/O session is dropped with no last commit point and shutdown takes the full 30s. For a real sudo client the end result is the same either way — C's commit point is immediately fo…"
+  },
+  {
+   "id": "PROTO-052",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/protocol/infomsg.go:19-39; internal/storage/sessio…",
+   "notes": "An InfoMessage carrying an int64 list vanishes from log.json where C would record it; forward-compatibility gap only, plus a Debug-level skip where C warns \"protocol error: NULL value found…"
+  },
+  {
+   "id": "PROTO-053",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "pkg/sudosrv_proto/sudo_logsrv.proto:42-45; internal/storage…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-001",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:739-777,786-815; internal/se…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-002",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "README.md:145-157; internal/config/config.go:69-82",
+   "notes": "Operators cannot express C's streaming relay; the behavioral impact of that absence is scored under RELAY-003/RELAY-010, not here."
+  },
+  {
+   "id": "RELAY-003",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go:582-601; internal/relay/sess…",
+   "notes": "Deliberate: a client cannot read an upstream outage off a delayed/absent ServerHello, since the greeting is answered from local config before any upstream dial — C's own store_first timing.…"
+  },
+  {
+   "id": "RELAY-004",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:487-493",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-005",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:983-989",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-006",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:62; internal/relay/session.go:959…",
+   "notes": "A two-upstream deployment cannot be expressed. With one host configured the observable behavior is identical to C — a missing option, not a behavioral divergence."
+  },
+  {
+   "id": "RELAY-007",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:959-975",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-008",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:959-975,1000-1014; internal/confi…",
+   "notes": "An upstream slower than 5s fails the connect (or a flush operation) where C would have waited 30s. The cache file is retained and retried, so nothing is lost; C's at-least-once duplicate-on…"
+  },
+  {
+   "id": "RELAY-009",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:280-294,959-998",
+   "notes": "None beyond RELAY-006; scoring it twice inflates the count."
+  },
+  {
+   "id": "RELAY-010",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:115-126; internal/relay/session.g…",
+   "notes": "Deliberate fail-open: a privileged command runs during an upstream outage that C's default would have refused, and the record is delivered late rather than lost. Rationale at internal/confi…"
+  },
+  {
+   "id": "RELAY-011",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:1019-1032,1035-1053",
+   "notes": "None observable to a real sudo client or a real sudo_logsrvd upstream; only a byte-exact proxy test would see it. 'low' overstates a difference with no reachable outcome."
+  },
+  {
+   "id": "RELAY-012",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:547-554,356-376,859-901",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-013",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:614-618,752-773",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-014",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:556-586; README.md:145-157",
+   "notes": "none"
+  },
+  {
+   "id": "RELAY-015",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:903-957",
+   "notes": "none"
+  },
+  {
+   "id": "RELAY-016",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:930-957",
+   "notes": "No downstream forwarding of upstream commit points exists, and the flush has no connection state machine to violate, so 'commit_point received before RUNNING' has no meaning. readUpstreamAc…"
+  },
+  {
+   "id": "RELAY-017",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:903-908,930-957",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-018",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:883-896; internal/relay/session.g…",
+   "notes": "none"
+  },
+  {
+   "id": "RELAY-019",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:886-894,930-957",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-020",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:945-949,903-917",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-021",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:948-949",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-022",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go readUpstreamAck",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-023",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:1000-1014,877-881,930-943",
+   "notes": "Strictly better for liveness: a mute upstream fails the flush and is retried instead of stalling forever. The operator-visible cost is a retry — and therefore a full re-send/duplicate upstr…"
+  },
+  {
+   "id": "RELAY-024",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/protocol/processor.go:20,177-178,241-242; internal…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-025",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:686-705; internal/relay/sess…",
+   "notes": "none"
+  },
+  {
+   "id": "RELAY-026",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:149-158; internal/config/config.g…",
+   "notes": "Operator-visible layout only — no client or upstream contract depends on it, and the tighter 0700 is a security improvement over C's 0711-masked default."
+  },
+  {
+   "id": "RELAY-027",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:323 (os.OpenFile 0600), 149-151 (…",
+   "notes": "A symlink planted in the cache directory would be followed on create/append/flush. Exploitation requires write access to a daemon-owned 0700 directory, so the practical exposure is small, b…"
+  },
+  {
+   "id": "RELAY-028",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:323,203-208,754-789 (no syscall.F…",
+   "notes": "Two daemons sharing a cache directory, or a hand-driven sendlog restart against a live session, can interleave records; the file stays parseable but the replayed session is out of order. No…"
+  },
+  {
+   "id": "RELAY-029",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:1019-1032,1035-1053",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-030",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-031",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:556-586,328-338",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-032",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:487-493,201-301",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-033",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:156-158,522-528; internal/connect…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-034",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:591-609; internal/connection/handler.go:435-447 (processMessage routes to the active session)",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-035",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:556-586,42-43,442-461",
+   "notes": "Benign for the stock client, which only needs the final value to leave CLOSING (log_client.c handle_commit_point); an idle session simply gets its next commit late."
+  },
+  {
+   "id": "RELAY-036",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:195-235",
+   "notes": "A malformed log_id yields 'no cached session for log_id' instead of 'unable to parse log_id'. No behavioral difference beyond the message."
+  },
+  {
+   "id": "RELAY-037",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:190-194,226-229,320-349",
+   "notes": "With sendlog -R, the session delivered upstream can contain the overlap region twice, so sudoreplay shows repeated output for that interval, where C would have refused the restart. Unreacha…"
+  },
+  {
+   "id": "RELAY-038",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:320-349,190-194",
+   "notes": "C's garbage-trailing-record wart cannot occur; the trade is the duplicated overlap scored under RELAY-037."
+  },
+  {
+   "id": "RELAY-039",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:356-376,240-317",
+   "notes": "Operator-visible layout, plus a narrow race in which a restart against an already-exited, mid-flush session appends to an inode that retireCacheFile then removes, losing the appended record…"
+  },
+  {
+   "id": "RELAY-040",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:240-317,256-265",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-041",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:845-901,1035-1053",
+   "notes": "A cache file poisoned with an out-of-state record (see RELAY-030) is forwarded to the upstream and rejected there rather than being caught locally, converting a local parse failure into a p…"
+  },
+  {
+   "id": "RELAY-042",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go (flushFile retirement switch, deadLetter)",
+   "notes": "The unlink condition now matches: a journal is removed only after the upstream's final commit_point for an I/O session, or after a fully transmitted event-only session, which C treats as complete because it sends no acknowledgement for those at all. Deliberately different for a journal that can NEVER be acknowledged -- an I/O session with no ExitMessage, from a client that died or a crash-truncated cache file. C leaves those to be retried on every daemon start; here they are renamed to *.incomplete, so the bytes survive for an operator and nothing replays them forever. Guarded by TestIOSessionWithoutExitIsParkedNotRemoved."
+  },
+  {
+   "id": "RELAY-043",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:272-316",
+   "notes": "Failures C strands until the next daemon start are retried here, which is more delivery — but see RELAY-044: those in-process retries carry no backoff, so 'strictly better' is only true for…"
+  },
+  {
+   "id": "RELAY-044",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go run",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-045",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:699-751,240-317",
+   "notes": "Higher upstream concurrency after an outage than C would produce, capped at 5 for the recovery path; C's stall-until-some-other-event failure mode is absent."
+  },
+  {
+   "id": "RELAY-046",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:136-143,174-182; internal/config/…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-047",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:648-684; internal/server/server.g…",
+   "notes": "A stray foo.log would be attempted and fail at parse. The substantive difference favours Go: sessions still open when the daemon died are recovered and their cached prefix delivered, wherea…"
+  },
+  {
+   "id": "RELAY-048",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:651-655; internal/server/server.g…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-049",
+   "status": "INTENTIONAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go (ErrUpstreamRejected, deadLetter, FlushOrphanedFile)",
+   "notes": "This requirement documents a C behavior rather than a contract: a journal the upstream answers with an error stays in outgoing/ and is retried on every subsequent start, forever, with no poison-message or dead-letter handling. Deliberately NOT reproduced. An error or abort ServerMessage is a definitive refusal -- the upstream parsed the session and said no -- and is now distinguished from a failure to be reached: the journal is renamed to *.rejected, which matches neither orphan-recovery glob, and the retry loop ends. Transient failures still retry forever, which is the store-and-forward behavior operators expect. Guarded by TestRejectedOrphanIsParkedNotRetried."
+  },
+  {
+   "id": "RELAY-050",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:370-384,614-618",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-051",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:278-340; internal/relay/session.g…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-052",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:342-384,386-400; internal/connect…",
+   "notes": ""
+  },
+  {
+   "id": "RELAY-053",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:278-293 (signal.Notify covers onl…",
+   "notes": "kill -USR1 is silent. Partial equivalent exists via the optional management API (GET /api/v1/sessions exposes state, phase and cache path) but it is off by default and lists no pending-flus…"
+  },
+  {
+   "id": "RELAY-054",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:818-844,845-917,272-316",
+   "notes": ""
+  },
+  {
+   "id": "TLS-001",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:77-110, internal/connection/handl…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-002",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:151, internal/server/server.go:78…",
+   "notes": "A sudo_logsrvd.conf listen_address copied without a port (\"0.0.0.0\", \"host\") fails startup with a clear error instead of binding 30343/30344; no silent wrong-port bind. Separately noted but…"
+  },
+  {
+   "id": "TLS-003",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:85-110, internal/server/server.go…",
+   "notes": "Certificate rotation on the Go server requires a full process restart. Because sudo's def_ignore_iolog_errors is false, every in-flight session dropped by that restart kills the user's runn…"
+  },
+  {
+   "id": "TLS-004",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:21-40; internal/config/config.go:…",
+   "notes": "Deliberate: the 1.3 floor locks out only clients on pre-1.1.1 OpenSSL (whose command sudo then kills, since ignore_iolog_errors is false); every modern client negotiates 1.3 against C's 1.2…"
+  },
+  {
+   "id": "TLS-005",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": "Operator-visible only. Under the shipped 1.3 floor the TLS 1.2 suite list is unreachable entirely; with tls_min_version: \"1.2\" Go's built-in TLS 1.2 set applies, which is narrower than HIGH…"
+  },
+  {
+   "id": "TLS-006",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": "A different negotiated suite in a packet capture (AES-128-GCM vs AES-256-GCM) and no way for a site mandating AES-256 to enforce it. No connection that C would accept is refused, so the spe…"
+  },
+  {
+   "id": "TLS-007",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/capool.go",
+   "notes": "A named CA bundle is loaded and a load failure is fatal; empty means the platform trust store. C's conditional default path (/etc/ssl/sudo/cacert.pem adopted only when readable) has no anal…"
+  },
+  {
+   "id": "TLS-008",
+   "status": "ABSENT",
+   "severity": "informational",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": "none — a client is never asked to choose a certificate, so the missing DN list has no observable effect while TLS-015 is unimplemented."
+  },
+  {
+   "id": "TLS-009",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:86-94, internal/config/config.go:…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-010",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:90-103",
+   "notes": "A broken server certificate is discovered at the first client handshake rather than at daemon start, so deployment tooling that only checks 'did the unit start' will not catch it. Same even…"
+  },
+  {
+   "id": "TLS-011",
+   "status": "NA",
+   "severity": "none",
+   "go_source": "—",
+   "notes": "crypto/tls implements no finite-field DH ciphersuites (ECDHE only), so there are no DH parameters to load, no file to be lenient about, and no external contract a peer could observe."
+  },
+  {
+   "id": "TLS-012",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:147-177, internal/server/server.g…",
+   "notes": "Operator-visible only. A host migrated from sudo_logsrvd that relied on the built-in /etc/ssl/sudo paths yields a plaintext-only Go server until the paths are written into config.yaml — and…"
+  },
+  {
+   "id": "TLS-013",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/server/server.go:77-110, internal/config/config.go…",
+   "notes": "A config carrying tls_cert_file/tls_key_file but no listen_address_tls starts plaintext-only with no diagnostic; a client using log_servers=\"host:30344(tls)\" gets ECONNREFUSED. Diagnosable…"
+  },
+  {
+   "id": "TLS-014",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go:100-103",
+   "notes": ""
+  },
+  {
+   "id": "TLS-015",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/server/server.go",
+   "notes": ""
+  },
+  {
+   "id": "TLS-016",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:970-972, internal/server/server.g…",
+   "notes": "none — the relay leg is behaviourally equivalent to the C callback; the inbound gap is TLS-015's."
+  },
+  {
+   "id": "TLS-017",
+   "status": "ABSENT",
+   "severity": "informational",
+   "go_source": "internal/connection/handler.go:102-114, internal/connection…",
+   "notes": "No reverse DNS lookup happens anywhere on the inbound path; only conn.RemoteAddr() is recorded (registerSession's RemoteAddr, and every slog \"remote_addr\" field). Because the resolved name…"
+  },
+  {
+   "id": "TLS-018",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:970-972",
+   "notes": "Relaying to an upstream presenting a legacy SAN-less certificate fails every dial where sudo_logsrvd in its default config would have relayed. Narrow (SAN-less certs are non-conforming for…"
+  },
+  {
+   "id": "TLS-019",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:970-972",
+   "notes": "none — no upstream that C's comparator would accept is refused by Go's, and vice versa, for any well-formed certificate."
+  },
+  {
+   "id": "TLS-020",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/relay/session.go:970-972",
+   "notes": "none — the C behavior this gap is measured against is off by default and non-functional when enabled."
+  },
+  {
+   "id": "TLS-021",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:188-198, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-022",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:194-198, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-023",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:194-236, internal/connection…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-024",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:959-998, internal/relay/session.g…",
+   "notes": "In the default (fail-open) configuration a failed upstream TLS handshake during the flush phase is invisible to the sudo client, which already has its log_id and commit points — where C rep…"
+  },
+  {
+   "id": "TLS-025",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/config/config.go RelayTLS*File",
+   "notes": ""
+  },
+  {
+   "id": "TLS-026",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:179-189",
+   "notes": "Any misspelled or pasted-from-sudo_logsrvd.conf key ('tls_skip_verifyy', 'tls_checkhost', 'tls_cacert') is accepted with no diagnostic and has no effect, so an operator who believes a secur…"
+  },
+  {
+   "id": "TLS-027",
+   "status": "INTENTIONAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:83-99; internal/relay/session.go:…",
+   "notes": "Deliberate and stricter than C: an upstream with a self-signed or private-CA certificate that sudo_logsrvd would accept is refused on every dial. Rationale at internal/config/config.go:83-9…"
+  },
+  {
+   "id": "TLS-028",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/relay/session.go:965-972",
+   "notes": ""
+  },
+  {
+   "id": "TLS-029",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/relay/session.go:930-957, internal/relay/session.g…",
+   "notes": "A persistent upstream certificate rejection is invisible to sudo — the client reports success while transcripts accumulate in relay_cache_directory. Bounded by the require_upstream opt-in,…"
+  },
+  {
+   "id": "TLS-030",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/connection/handler.go:181-183, internal/protocol/p…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-031",
+   "status": "PARTIAL",
+   "severity": "informational",
+   "go_source": "internal/server/server.go:100-103, internal/relay/session.g…",
+   "notes": "An SNI-routing or SNI-enforcing upstream sees a server_name it would not see from sudo_logsrvd. No protocol contract is broken and neither side depends on resumption."
+  },
+  {
+   "id": "TLS-032",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "cmd/sudosrv/main.go:54-73, cmd/sudosrv/main.go:103-144",
+   "notes": ""
+  },
+  {
+   "id": "TLS-033",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:171-172, internal/storage/session…",
+   "notes": "Local transcripts are group-readable (0640) where C writes 0600 — harmless in the shipped posture, since the daemon runs as root and group=root, and ValidatePermissions blocks world-readabl…"
+  },
+  {
+   "id": "TLS-034",
+   "status": "ABSENT",
+   "severity": "low",
+   "go_source": "internal/config/config.go:104-112, internal/storage/session…",
+   "notes": "Operator-visible: log ownership cannot be decoupled from the daemon's credentials, so a root-run server writes root-owned transcripts with no supported way to hand them to a dedicated sudor…"
+  },
+  {
+   "id": "TLS-035",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:61-63, internal/server/server.go:…",
+   "notes": "Above 10000 concurrent sessions a client sees a TCP connect followed by an abrupt close with no protocol-level explanation, where sudo_logsrvd would have served it. Being stricter than the…"
+  },
+  {
+   "id": "TLS-036",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/protocol/processor.go:20, internal/protocol/proces…",
+   "notes": "A non-conforming client sees an abrupt EOF and reports a generic 'lost connection to log server' instead of C's specific reason. Diagnostic quality only — no conforming client approaches 2…"
+  },
+  {
+   "id": "TLS-037",
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go:173-180, internal/storage/sessi…",
+   "notes": ""
+  },
+  {
+   "id": "TLS-038",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/storage/session.go:150-171, internal/storage/sessi…",
+   "notes": "A symlink pre-planted at $log_directory/seq is followed and overwritten by a root-run daemon, where C refuses it. Reachable only if log_directory or a parent is writable by another user, wh…"
+  },
+  {
+   "id": "TLS-039",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/config/config.go:179-189, internal/config/config.g…",
+   "notes": "Typos and pasted foreign keys are accepted silently and never take effect, where C fails the whole read. Values that do have setters are validated at least as strictly as C."
+  },
+  {
+   "id": "TLS-040",
+   "status": "ABSENT",
+   "severity": "informational",
+   "go_source": "cmd/sudosrv/main.go:76-84",
+   "notes": "none in production — only the built-in way to exercise a client's RestartMessage/resume path against this server is missing."
+  },
+  {
+   "id": "TLS-041",
+   "status": "PARTIAL",
+   "severity": "low",
+   "go_source": "internal/server/server.go:78, internal/server/server.go:104…",
+   "notes": "One listener instead of two, IPv4-mapped peers accepted on the v6 socket, and IPv4 clients logged as remote_addr \"[::ffff:10.0.0.1]:port\" rather than \"10.0.0.1:port\" — which will not match…"
+  }
+ ]
+}
