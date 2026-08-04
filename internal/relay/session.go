@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/sessions"
@@ -40,9 +41,35 @@ const (
 	// this suffix are invisible to it — preventing the duplicate-upstream
 	// hazard that would arise from re-flushing already-delivered messages.
 	DeliveredSuffix = ".delivered"
+	// RejectedSuffix marks a journal the upstream DEFINITIVELY refused -- it
+	// answered our replay with an error or abort ServerMessage rather than
+	// failing to be reached. Retrying that is pointless: the upstream parsed the
+	// session and said no, so the next attempt gets the same answer.
+	//
+	// C has no such distinction and no dead-letter path at all. A rejected
+	// journal there is left in outgoing/ and retried on every subsequent daemon
+	// start, forever (logsrvd/logsrvd_relay.c:638-661 tears the connection down
+	// with the state still RUNNING, which is neither FINISHED nor CONNECTING, so
+	// the file is neither unlinked nor re-queued). Conformance: RELAY-049.
+	RejectedSuffix = ".rejected"
+	// IncompleteSuffix marks a journal that was transmitted in full but can never
+	// be acknowledged, because it holds an I/O session with no ExitMessage -- a
+	// client that died mid-session, or a cache file truncated by a crash. No
+	// commit point is coming for it however many times it is replayed.
+	//
+	// It is kept rather than removed so the bytes stay recoverable, and renamed
+	// rather than retried so a session that cannot complete does not replay
+	// itself upstream on every restart. Conformance: RELAY-042.
+	IncompleteSuffix = ".incomplete"
 	// commitPointInterval matches C sudo_logsrvd's ACK_FREQUENCY (10 seconds).
 	commitPointInterval = 10 * time.Second
 )
+
+// ErrUpstreamRejected reports that the upstream answered a replay with an error
+// or abort ServerMessage. It is distinguished from every other flush failure
+// because it is the one that will never succeed on retry, so it terminates the
+// retry loop and dead-letters the journal instead of spinning on it.
+var ErrUpstreamRejected = errors.New("upstream rejected the session")
 
 // Phase strings exposed via Session.LiveStats. Stored as package-level vars
 // because atomic.Pointer[string] requires a pointer; using `const` here would
@@ -334,6 +361,15 @@ func (s *Session) run() {
 			// If ctx was cancelled, the error is expected (we closed the conn).
 			if s.ctx.Err() != nil {
 				slog.Info("Relay flush aborted due to session cancellation", "log_id", s.logID)
+				return
+			}
+			// A definitive refusal ends the loop. With the default
+			// reconnect_attempts of -1 there is no other exit, so without this
+			// the daemon reconnects and replays a session the upstream has
+			// already refused for as long as the process lives.
+			// Conformance: docs/logsrvd-reference/ RELAY-049.
+			if errors.Is(err, ErrUpstreamRejected) {
+				deadLetter(s.cacheFileName, RejectedSuffix, err.Error())
 				return
 			}
 			slog.Error("Failed during cache flush, will retry.", "log_id", s.logID, "error", err)
@@ -847,6 +883,13 @@ func FlushOrphanedFile(ctx context.Context, filePath string, cfg *config.RelayCo
 	err = flushFile(ctx, proc, flushingFileName, cfg)
 	_ = proc.Close()
 	if err != nil {
+		// A definitive rejection is not a retryable failure. Renaming it back
+		// puts it in front of the next startup's orphan sweep, which gets the
+		// same refusal, forever. Conformance: RELAY-049.
+		if errors.Is(err, ErrUpstreamRejected) {
+			deadLetter(flushingFileName, RejectedSuffix, err.Error())
+			return fmt.Errorf("upstream refused orphaned file %s: %w", filePath, err)
+		}
 		slog.Error("Failed to flush orphaned file, renaming back", "path", flushingFileName, "error", err)
 		if renameErr := os.Rename(flushingFileName, filePath); renameErr != nil {
 			slog.Error("Failed to rename orphaned file back after flush failure", "path", flushingFileName, "error", renameErr)
@@ -882,6 +925,29 @@ func retireCacheFile(filePath string) {
 		"path", delivered,
 		"remove_error", err,
 	)
+}
+
+// deadLetter parks a journal that must not be retried but must not be lost
+// either, under the given suffix. Any FlushingSuffix is stripped first so the
+// result matches neither of orphan recovery's globs (*.log, *.log.flushing) and
+// the file is therefore never picked up again.
+//
+// Removing these files is deliberately left to the operator: each one is the
+// only copy of a privileged session that never reached the upstream, so the
+// daemon reporting the path and stopping is the honest outcome. Nothing prunes
+// them automatically -- the shipped logrotate fragments are kept away from the
+// relay spool on purpose (see packaging_logrotate_test.go), because rotating a
+// spool of pending sessions would rename them out from under orphan recovery.
+func deadLetter(filePath, suffix, reason string) {
+	base := strings.TrimSuffix(filePath, FlushingSuffix)
+	target := base + suffix
+	if err := os.Rename(filePath, target); err != nil {
+		slog.Error("Could not park undeliverable relay journal; it may be retried on the next start",
+			"path", filePath, "reason", reason, "error", err)
+		return
+	}
+	slog.Error("Relay journal parked and will NOT be retried; the session did not reach the upstream",
+		"path", target, "reason", reason)
 }
 
 // flushFile replays a cache file upstream and retires it only once the upstream
@@ -969,15 +1035,40 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 		}
 	}
 
-	if expectAck && sentExit {
+	switch {
+	case expectAck && sentExit:
 		// The durability barrier. Read past any periodic commit points the
 		// upstream emitted during the replay until the session is acknowledged.
 		if err := readUpstreamAck(ctx, proc, cfg, true); err != nil {
 			return fmt.Errorf("upstream did not acknowledge the session; keeping cache file: %w", err)
 		}
-	} else if incomplete {
-		slog.Warn("Retiring a truncated cache file without upstream acknowledgement; "+
-			"the partial session was sent but cannot be confirmed",
+
+	case expectAck:
+		// An I/O session whose journal holds no ExitMessage: the client died
+		// mid-session, or `incomplete` says the tail was truncated by a crash.
+		// The upstream is still waiting for more of a session that has no more,
+		// so no commit point is coming -- not on this attempt and not on any
+		// future one.
+		//
+		// Both of the obvious moves are wrong. Unlinking discards the only copy
+		// of a session the upstream may not have persisted, which is exactly the
+		// silent audit loss RELAY-042 is about; C unlinks only at FINISHED
+		// (logsrvd/logsrvd.c:296-305). Keeping it for retry replays the same
+		// unfinishable session on every restart, forever. So park it: the bytes
+		// stay on disk for an operator, and the loop ends.
+		// Conformance: docs/logsrvd-reference/ RELAY-042.
+		reason := "I/O session journal has no ExitMessage, so the upstream can never acknowledge it"
+		if incomplete {
+			reason = "cache file was truncated, so the session has no ExitMessage and can never be acknowledged"
+		}
+		deadLetter(filePath, IncompleteSuffix, reason)
+		return nil
+
+	case incomplete:
+		// Event-only session with a truncated tail. C sends no acknowledgement
+		// for these at all, so the write IS the completion and there is nothing
+		// further to wait for; only the truncated remainder is lost.
+		slog.Warn("Retiring a truncated event-only cache file; the records that parsed were sent",
 			"path", filePath)
 	}
 
@@ -1030,9 +1121,13 @@ func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.R
 
 		switch m := srvMsg.Type.(type) {
 		case *pb.ServerMessage_Error:
-			return fmt.Errorf("upstream rejected the session: %s", m.Error)
+			// A definitive refusal, not a failure to be reached: the upstream
+			// parsed this session and said no, so every retry gets the same
+			// answer. ErrUpstreamRejected routes it to the dead-letter path
+			// instead of the retry loop. Conformance: RELAY-049.
+			return fmt.Errorf("%w: %s", ErrUpstreamRejected, m.Error)
 		case *pb.ServerMessage_Abort:
-			return fmt.Errorf("upstream aborted the session: %s", m.Abort)
+			return fmt.Errorf("%w (abort): %s", ErrUpstreamRejected, m.Abort)
 		case *pb.ServerMessage_CommitPoint:
 			return nil
 		}

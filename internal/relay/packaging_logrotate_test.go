@@ -55,13 +55,17 @@ func logrotateCoversCache(pattern, dir string) (string, bool) {
 	if filepath.Clean(pattern) == filepath.Clean(dir) {
 		return dir, true
 	}
-	// A representative session cache file in each of the three states the
-	// spool can hold. Any of them being rotated loses the session.
+	// A representative session cache file in each state the spool can hold. Any
+	// of them being rotated loses the session — and the two parked states are
+	// the ones that matter most, because a parked journal is by definition the
+	// only surviving copy of a session that never reached the upstream.
 	const uuid = "0f5c2b1e-0f7b-4a0f-9a1e-7d3f2c4b6a80"
 	for _, name := range []string{
 		uuid + ".log",
 		uuid + ".log" + FlushingSuffix,
 		uuid + ".log" + DeliveredSuffix,
+		uuid + ".log" + RejectedSuffix,
+		uuid + ".log" + IncompleteSuffix,
 	} {
 		full := filepath.Join(dir, name)
 		if ok, err := filepath.Match(pattern, full); err == nil && ok {
