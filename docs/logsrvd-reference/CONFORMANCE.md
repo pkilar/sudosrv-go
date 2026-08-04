@@ -1,7 +1,7 @@
 # Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`
 
 > **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  
-> **Subject:** `sudosrv` @ `81be2ba`  
+> **Subject:** `sudosrv` @ `d5c0861`  
 > **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
 
 ## Summary
@@ -9,22 +9,22 @@
 | Subsystem | Reqs | MATCH | INTENTIONAL | PARTIAL | DIVERGENT | ABSENT | NA |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 13 | 1 | 18 | 5 | 6 | 2 |
-| [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 19 | 2 | 23 | 6 | 1 | 2 |
-| [Configuration Surface & Defaults](03-configuration.md) | 68 | 8 | 8 | 14 | 9 | 24 | 5 |
-| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 18 | 1 | 16 | 12 | 4 | 0 |
-| [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 24 | 5 | 11 | 7 | 2 | 5 |
+| [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 22 | 2 | 21 | 5 | 1 | 2 |
+| [Configuration Surface & Defaults](03-configuration.md) | 68 | 12 | 8 | 11 | 8 | 24 | 5 |
+| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 20 | 1 | 16 | 11 | 3 | 0 |
+| [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 25 | 5 | 10 | 7 | 2 | 5 |
 | [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 10 | 2 | 14 | 3 | 11 | 1 |
-| **Total** | **312** | **92** | **19** | **96** | **42** | **48** | **15** |
+| **Total** | **312** | **102** | **19** | **90** | **39** | **47** | **15** |
 
-Severity of the 205 requirements that are not `MATCH`/`NA`:
+Severity of the 195 requirements that are not `MATCH`/`NA`:
 
 | breaking | high | medium | low | informational |
 |--:|--:|--:|--:|--:|
-| 0 | 0 | 28 | 153 | 24 |
+| 0 | 0 | 13 | 158 | 24 |
 
 ### Effect of the adversarial pass
 
-225 findings were challenged: **189 upheld**, **24 downgraded**, **8 upgraded**, **4 refuted outright**.
+210 findings were challenged: **180 upheld**, **24 downgraded**, **2 upgraded**, **4 refuted outright**.
 
 ## Priority findings
 
@@ -115,7 +115,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-012` | Six connection states; a new connection starts in `INITIAL` | PARTIAL | informational | `internal/connection/handler.go:351-401` | none — implementation-structure note, not a wire contract. |
 | `PROTO-013` | AcceptMessage is rejected in `EXITED` and `FINISHED`, allow… | PARTIAL | low | `internal/connection/handler.go:296-300,366-368,382-385,614-…` | A peer can reuse a connection after a RejectMessage where C would have dropped it; the stock client closes after a reject on its own (log_client.c:1453-1458 sets FINISHED and deletes both e… |
 | `PROTO-014` | AcceptMessage requires `submit_time` and at least one `Info… | PARTIAL | low | `internal/connection/handler.go:717-728; internal/storage/se…` | A hand-built or replayed Accept missing one of the four keys is refused with "Internal Server Error" instead of being stored; sudo and sudo_sendlog on live logs are unaffected. |
-| `PROTO-015` | Only the first Accept sets `log_io` and moves `INITIAL` → `… | PARTIAL | medium | `internal/connection/handler.go:352-355,730-784,786-819` | In relay mode with sudo intercept/log_subcmds and no I/O logging, the FIRST intercepted sub-command of every session is silently missing from the upstream audit trail — no error, no log lin… |
+| `PROTO-015` | Only the first Accept sets `log_io` and moves `INITIAL` → `… | MATCH | none | `internal/relay/session.go` | — |
 | `PROTO-016` | A `log_id` is sent after the first Accept with `expect_iobu… | PARTIAL | low | `internal/storage/session.go:918-921,1337; internal/connecti…` | Extra log_id messages a strict protocol validator would flag; the shipped client ignores them (handle_log_id stores only the first). |
 | `PROTO-017` | Local-mode `log_id` is base64(16-byte UUID ‖ iolog path rel… | MATCH | none | `internal/storage/session.go:315-340,350-351` | — |
 | `PROTO-018` | Store-and-forward mode emits a `log_id` of base64(UUID) wit… | MATCH | none | `internal/relay/session.go:156-158` | — |
@@ -127,7 +127,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-024` | A restart of a completed log is refused; completion is sign… | PARTIAL | low | `internal/storage/session.go:1710,1560-1567` | With file_permissions tightened to 0600 the completed timing file becomes group-readable (0440) instead of 0400 — a small permission widening of a file that holds only byte counts and delay… |
 | `PROTO-025` | `resume_point` must land exactly on a timing-record boundary | INTENTIONAL | low | `internal/storage/session.go:1403-1472,1574-1589` | A misaligned resume_point duplicates the overlap span in the transcript so sudoreplay replays those records twice, where C errors and drops the connection. Reachable only via sudo_sendlog -… |
 | `PROTO-026` | A successful restart seeds the connection's elapsed time fr… | MATCH | none | `internal/storage/session.go:1626-1641; internal/relay/sessi…` | — |
-| `PROTO-027` | IoBuffer is valid only in `RUNNING` with `log_io`, and must… | PARTIAL | medium | `internal/storage/session.go:930-939,1155-1168; internal/con…` | One crafted IoBuffer delay permanently corrupts the session's timing file: sudoreplay aborts at that line, so every record written after it stays on disk but can never be replayed, while `s… |
+| `PROTO-027` | IoBuffer is valid only in `RUNNING` with `log_io`, and must… | MATCH | none | `internal/storage/session.go writeIoEntry` | — |
 | `PROTO-028` | ChangeWindowSize is valid only in `RUNNING` with `log_io` a… | PARTIAL | low | `internal/storage/session.go:1248-1264; internal/relay/sessi…` | Same timing-file corruption vector as PROTO-027 via a winsize delay; a pre-Accept ChangeWindowSize is answered with an error but not disconnected. |
 | `PROTO-029` | CommandSuspend requires a valid delay and one of exactly fi… | PARTIAL | low | `internal/storage/session.go:119-125,1266-1287; internal/rel…` | Wrong error string on the wire, and the same unvalidated-delay corruption as PROTO-027 through the suspend record. |
 | `PROTO-030` | Elapsed time accumulates delays from IoBuffer, ChangeWindow… | MATCH | none | `internal/storage/session.go:1207,1255,1277; internal/relay/…` | — |
@@ -142,7 +142,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-039` | After an ExitMessage the server stops reading from the clie… | MATCH | none | `internal/connection/handler.go:281-300` | — |
 | `PROTO-040` | ExitMessage is valid only in `RUNNING`; `run_time` is optio… | PARTIAL | low | `internal/connection/handler.go:390-393; internal/storage/se…` | An arbitrary client-supplied signal string lands JSON-encoded in log.json where C would refuse the message; a pre-Accept Exit gets a silent close instead of "state machine error". |
 | `PROTO-041` | AlertMessage has no state restriction | PARTIAL | low | `internal/connection/handler.go:370-380; internal/storage/se…` | A content-free AlertMessage is recorded as an audit entry instead of drawing "invalid AlertMessage" and a close. Audit noise only. |
-| `PROTO-042` | An out-of-order message produces `"state machine error"` an… | DIVERGENT | medium | `internal/connection/handler.go:395-400; internal/storage/se…` | One malformed message from any peer that can reach the listener permanently pins that session's cache file and re-delivers Accept + all preceding I/O to the upstream roughly once a minute,… |
+| `PROTO-042` | An out-of-order message produces `"state machine error"` an… | MATCH | none | `internal/connection/handler.go` | — |
 | `PROTO-043` | Errors are sent at most once, and reads stop the moment one… | PARTIAL | low | `internal/connection/handler.go:261-270,395-400` | Repeated error messages on a still-usable connection instead of exactly one followed by a close; rate-limited to 100 msg/s by waitForRateToken. Same root cause as PROTO-042. |
 | `PROTO-044` | `sudo_logsrvd` never sends an `abort` message | MATCH | none | `internal/connection/handler.go:267,399,762-764` | — |
 | `PROTO-045` | A relay converts an upstream `abort` into a downstream `err… | PARTIAL | low | `internal/relay/session.go:930-957,903-913` | An upstream that rejects a session cannot tell the user's sudo session — it already reported success. The only symptom is a retry loop and a cache file that never drains. |
@@ -162,7 +162,7 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | ID | Requirement | Verdict | Sev | Go source | Consequence |
 |---|---|---|---|---|---|
 | `CONF-001` | Configuration file is INI-style with six recognized sections | INTENTIONAL | low | `internal/config/config.go:34-112,179-189; README.md:20` | An existing /etc/sudo_logsrvd.conf must be hand-translated; nothing a client can observe. |
-| `CONF-002` | Key/value lines require `=`, and a section must be open | PARTIAL | medium | `internal/config/config.go:179-189 (yaml.Unmarshal, no Known…` | A single-character typo in listen_address is accepted silently and the daemon binds loopback; every remote sudo client then gets ECONNREFUSED, log_server_open fails, sudoers_io_open returns… |
+| `CONF-002` | Key/value lines require `=`, and a section must be open | MATCH | none | `internal/config/config.go` | — |
 | `CONF-003` | Whitespace around the key and value is stripped | INTENTIONAL | informational | `internal/config/config.go:179-189 (yaml.v3 scanner)` | None. |
 | `CONF-004` | `#` anywhere begins a comment; `;` only at start of line | INTENTIONAL | informational | `internal/config/config.go:179-189; config-example.yaml (use…` | None beyond a loud parse error if INI comment syntax is pasted in. |
 | `CONF-005` | Backslash line continuation | INTENTIONAL | informational | `internal/config/config.go:179-189 (yaml.v3 scanner)` | A continued INI line must be rewritten during migration. Nothing observable at runtime. |
@@ -198,12 +198,12 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-035` | `[server] tls_checkpeer` | ABSENT | low | `internal/server/server.go:100-103` | None at C's defaults — every stock sudo client behaves identically. Only a site that has opted into tls_checkpeer=true under sudo_logsrvd loses the ability to require client certificates. |
 | `CONF-036` | `[server] tls_checkhost` | ABSENT | low | `internal/server/server.go:100-103` | None at C's defaults; subsumed by CONF-035. |
 | `CONF-037` | `(tls)` is rejected when OpenSSL support is not compiled in | NA | none | `internal/server/server.go:85-108` | crypto/tls is unconditionally part of the Go standard library; there is no build variant without it, so the 'TLS not supported' rejection path and the conditional tls_* key table have no an… |
-| `CONF-038` | `[relay] relay_host` selects relay mode | PARTIAL | medium | `internal/config/config.go:43,62,269-276` | An operator who configures the relay block but forgets server.mode gets a daemon that logs and stores everything locally to /var/log/gosudo-io while they believe sessions are centralized —… |
-| `CONF-039` | `[relay] timeout` | PARTIAL | medium | `internal/relay/session.go:999-1012 (operationTimeout/withOp…` | A loaded or slow-fsync upstream that acknowledges a session in more than 5s gets the entire session replayed on retry and stores duplicate transcripts under two different log IDs; C's 30s r… |
+| `CONF-038` | `[relay] relay_host` selects relay mode | MATCH | none | `internal/config/config.go` | — |
+| `CONF-039` | `[relay] timeout` | MATCH | none | `internal/config/config.go` | — |
 | `CONF-040` | `[relay] connect_timeout` | PARTIAL | low | `internal/config/config.go:160,234-236; internal/relay/sessi…` | On a high-latency path the dial is abandoned after 5s and retried with backoff; delivery is delayed, not lost, unless a finite reconnect_attempts is also configured. |
 | `CONF-041` | `[relay] retry_interval` | INTENTIONAL | informational | `internal/relay/session.go:396-414 (calculateBackoff), 266-2…` | Different retry cadence; no delivery-correctness difference. |
-| `CONF-042` | `[relay] relay_dir` and its `incoming`/`outgoing` subdirect… | DIVERGENT | medium | `internal/relay/session.go:149-155,201-205,649-690; cmd/sudo…` | Relay mode plus an upstream outage that spans one weekly rotation: undelivered sudo session journals are renamed out from under both the in-process retry and orphan recovery, then deleted b… |
-| `CONF-043` | `[relay] store_first` | INTENTIONAL | medium | `internal/relay/session.go:54-78; README.md:146-172; config-example.yaml:21-27` | Deliberate: relay is C's store_first made unconditional, so the upstream never sees a live session and a client that dies without ExitMessage waits for the next restart to be delivered. Rationale at internal/relay/session.go:54-78 (Session doc comment) and README.md:146-172 ("A note on relay mode: store-and-forward only"). |
+| `CONF-042` | `[relay] relay_dir` and its `incoming`/`outgoing` subdirect… | MATCH | none | `packaging logrotate config` | — |
+| `CONF-043` | `[relay] store_first` | INTENTIONAL | low | `internal/relay/session.go:54-78; README.md:146-172; config-…` | Deliberate: relay is C's store_first made unconditional, so the upstream never sees a live session and a client that dies without ExitMessage waits for the next restart to be delivered. Rat… |
 | `CONF-044` | `[relay] tcp_keepalive` | MATCH | none | `internal/relay/session.go:960,969-974` | — |
 | `CONF-045` | Relay TLS string settings fall back to the `[server]` secti… | ABSENT | medium | `internal/relay/session.go:966-972; internal/config/config.g…` | Against an upstream sudo_logsrvd configured with tls_checkpeer=true, every relay handshake fails; completed sessions accumulate in relay_cache_directory indefinitely with no configuration t… |
 | `CONF-046` | `[relay] tls_verify` is tri-state with `[server]` fallback | ABSENT | low | `internal/relay/session.go:966-972; internal/config/config.g…` | Credential problems surface as per-attempt handshake failures at flush time rather than once at config load. Diagnostics only. |
@@ -244,7 +244,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-006` | Remaining `%` sequences are passed to `strftime(3)`; `%%` c… | PARTIAL | low | `internal/storage/session.go:208-271,683-684` | Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable - the operat… |
 | `IOLOG-007` | Leading duplicate slashes collapse; trailing slashes are tr… | MATCH | none | `internal/storage/session.go:694` | — |
 | `IOLOG-008` | Both expanded components are rejected if they contain a `..… | MATCH | none | `internal/storage/session.go:293-300,690-692` | — |
-| `IOLOG-009` | A path ending in `XXXXXX` is created with `mkdtemp(3)` sema… | ABSENT | medium | `internal/storage/session.go:694` | An operator using the documented uniqueness idiom gets one shared directory named 'XXXXXX'. Session 1 succeeds; session 2 hits the O_EXCL uuid write (session.go:1035) -> EEXIST -> 'Internal… |
+| `IOLOG-009` | A path ending in `XXXXXX` is created with `mkdtemp(3)` sema… | MATCH | none | `internal/storage/session.go` | — |
 | `IOLOG-010` | The `seq` file is a 7-byte, zero-padded, uppercase base-36… | PARTIAL | low | `internal/storage/session.go:753-874` | Downgraded: C's OWN default iolog_dir is _PATH_SUDO_IO_LOGDIR with no escapes (logsrvd_conf.c:1696), so at C's default the seq file sits in exactly the place Go puts it - the divergence onl… |
 | `IOLOG-011` | The `seq` file is serialised with a blocking POSIX record l… | DIVERGENT | low | `internal/storage/session.go:776` | A concurrently running sudo_logsrvd or sudoers plugin on the same iolog_dir is not excluded, so both can read the same counter value. Requires the same mixed-implementation shared tree as I… |
 | `IOLOG-012` | `%{seq}` expands to a three-level `XX/XX/XX` hierarchy | MATCH | none | `internal/storage/session.go:833-841` | — |
@@ -276,7 +276,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-038` | `iolog_flush` controls per-write flushing; commit points al… | MATCH | none | `internal/storage/session.go:1189-1204,1215` | — |
 | `IOLOG-039` | The password filter applies only to `ttyin`/`ttyout` | DIVERGENT | medium | `internal/storage/session.go:1173-1185` | Held at medium. Reachable with plain sudoers log_input/log_output and no tty: pipe a file into a sudo'd filter (`sudo tee`, `sudo mysql`, config-management piping a template) and the moment… |
 | `IOLOG-040` | Masking semantics: prompt on ttyout arms it, ttyin is starr… | DIVERGENT | low | `internal/storage/filter.go:85-149` | Downgraded from medium. Both divergences push the same way - more masking than C, never less - so no secret leaks. After a spurious match (`grep password /etc/*.conf`) the next typed line i… |
-| `IOLOG-041` | Default passprompt regex, and the filter's state is process… | DIVERGENT | medium | `internal/storage/filter.go:46-65; internal/config/config.go…` | Upgraded from low because this is the one direction where Go leaks. A colon-less prompt ('Enter your password' / 'Password >' / 'Password?') arms masking on sudo_logsrvd and does not here,… |
+| `IOLOG-041` | Default passprompt regex, and the filter's state is process… | MATCH | none | `internal/storage/filter.go` | — |
 | `IOLOG-042` | `log_id` is base64 of the 16-byte UUID concatenated with th… | PARTIAL | low | `internal/storage/session.go:315-340,350-351,1366-1380` | No amplification: an empty-path log_id resolves to log_directory itself, which then fails the uuid check; a NUL-bearing path fails the os.Stat. Only sendlog or a hand-rolled client reaches… |
 | `IOLOG-043` | Restart verifies the decoded UUID against the session's `uu… | PARTIAL | low | `internal/storage/session.go:1551-1558` | none beyond IOLOG-020's mixed-tree case. The security-relevant half (a caller cannot resume a directory whose UUID it does not already hold) is intact. |
 | `IOLOG-044` | A completed log cannot be restarted | MATCH | none | `internal/storage/session.go:1561-1567` | — |
@@ -295,15 +295,15 @@ Spec: [`05-relay.md`](05-relay.md)
 | ID | Requirement | Verdict | Sev | Go source | Consequence |
 |---|---|---|---|---|---|
 | `RELAY-001` | Configuring any relay host puts every connection into relay… | MATCH | none | `internal/connection/handler.go:739-777,786-815; internal/se…` | — |
-| `RELAY-002` | `store_first` selects the journal path and is forced off wi… | INTENTIONAL | low | `internal/relay/session.go:54-78; internal/config/config.go:115-126; README.md:146-172` | Deliberate: operators cannot express C's streaming relay, and the behavioural impact is scored under RELAY-003/RELAY-010. Rationale at internal/relay/session.go:54-78 and README.md:146-172. |
-| `RELAY-003` | In real-time relay mode the downstream `ServerHello` is def… | INTENTIONAL | medium | `internal/connection/handler.go:582-601; internal/relay/session.go:54-78; README.md:166-172` | Deliberate: a client cannot read an upstream outage off a delayed/absent ServerHello, since the greeting is answered from local config before any upstream dial — C's own store_first timing. Rationale at internal/connection/handler.go:582-601 (handleHello doc comment) and README.md:166-172; invertible with require_upstream. |
+| `RELAY-002` | `store_first` selects the journal path and is forced off wi… | INTENTIONAL | low | `README.md:145-157; internal/config/config.go:69-82` | Operators cannot express C's streaming relay; the behavioral impact of that absence is scored under RELAY-003/RELAY-010, not here. |
+| `RELAY-003` | In real-time relay mode the downstream `ServerHello` is def… | INTENTIONAL | low | `internal/connection/handler.go:582-601; internal/relay/sess…` | Deliberate: a client cannot read an upstream outage off a delayed/absent ServerHello, since the greeting is answered from local config before any upstream dial — C's own store_first timing.… |
 | `RELAY-004` | The `ServerHello` sent downstream is the relay's own, not t… | MATCH | none | `internal/connection/handler.go:487-493` | — |
 | `RELAY-005` | The relay synthesizes its own upstream `ClientHello` | MATCH | none | `internal/relay/session.go:983-989` | — |
 | `RELAY-006` | Relay hosts are tried in configuration order until one conn… | PARTIAL | low | `internal/config/config.go:62; internal/relay/session.go:959…` | A two-upstream deployment cannot be expressed. With one host configured the observable behavior is identical to C — a missing option, not a behavioral divergence. |
 | `RELAY-007` | Upstream sockets are non-blocking, with optional TCP keepal… | MATCH | none | `internal/relay/session.go:959-975` | — |
 | `RELAY-008` | `relay.connect_timeout` bounds the TCP connect and the TLS… | PARTIAL | low | `internal/relay/session.go:959-975,1000-1014; internal/confi…` | An upstream slower than 5s fails the connect (or a flush operation) where C would have waited 30s. The cache file is retained and retried, so nothing is lost; C's at-least-once duplicate-on… |
 | `RELAY-009` | A failed upstream TLS handshake falls through to the next r… | PARTIAL | informational | `internal/relay/session.go:280-294,959-998` | None beyond RELAY-006; scoring it twice inflates the count. |
-| `RELAY-010` | Exhausting the relay list produces a specific error to the… | INTENTIONAL | medium | `internal/config/config.go:115-126; internal/relay/session.go:155-168; internal/connection/handler.go:869-880,919-930; README.md:174-187` | Deliberate fail-open: a privileged command runs during an upstream outage that C's default would have refused, and the record is delivered late rather than lost. Rationale at internal/config/config.go:115-126 (RequireUpstream doc comment) and README.md:174-187; require_upstream: true makes it fail closed on both the I/O and event-only accept paths. |
+| `RELAY-010` | Exhausting the relay list produces a specific error to the… | INTENTIONAL | low | `internal/config/config.go:115-126; internal/relay/session.g…` | Deliberate fail-open: a privileged command runs during an upstream outage that C's default would have refused, and the record is delivered late rather than lost. Rationale at internal/confi… |
 | `RELAY-011` | Client messages are forwarded byte-for-byte, re-framed only | PARTIAL | informational | `internal/relay/session.go:1019-1032,1035-1053` | None observable to a real sudo client or a real sudo_logsrvd upstream; only a byte-exact proxy test would see it. 'low' overstates a difference with no reachable outcome. |
 | `RELAY-012` | Forwarding order is the receive order | MATCH | none | `internal/relay/session.go:547-554,356-376,859-901` | — |
 | `RELAY-013` | No local logging occurs in relay mode | MATCH | none | `internal/connection/handler.go:614-618,752-773` | — |
@@ -323,7 +323,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-027` | Journal files are created mode 0600 and `O_NOFOLLOW` | PARTIAL | low | `internal/relay/session.go:323 (os.OpenFile 0600), 149-151 (…` | A symlink planted in the cache directory would be followed on create/append/flush. Exploitation requires write access to a daemon-owned 0700 directory, so the practical exposure is small, b… |
 | `RELAY-028` | Each journal is held under a non-blocking exclusive file lo… | ABSENT | low | `internal/relay/session.go:323,203-208,754-789 (no syscall.F…` | Two daemons sharing a cache directory, or a hand-driven sendlog restart against a live session, can interleave records; the file stays parseable but the replayed session is out of order. No… |
 | `RELAY-029` | Journal record framing matches the wire protocol exactly | MATCH | none | `internal/relay/session.go:1019-1032,1035-1053` | — |
-| `RELAY-030` | `ClientHello` and `RestartMessage` are never journalled | PARTIAL | medium | `internal/connection/handler.go:359-364,386-389,670-710; int…` | A peer that sends Accept, then a ClientHello or RestartMessage, then Exit, produces a cache file whose replay a C upstream rejects with 'state machine error' (logsrvd.c:872-876 / :665-669)… |
+| `RELAY-030` | `ClientHello` and `RestartMessage` are never journalled | MATCH | none | `internal/relay/session.go` | — |
 | `RELAY-031` | Journal writes are buffered and never fsynced | MATCH | none | `internal/relay/session.go:556-586,328-338` | — |
 | `RELAY-032` | `store_first` answers the client immediately, without the u… | MATCH | none | `internal/connection/handler.go:487-493,201-301` | — |
 | `RELAY-033` | `store_first` `log_id` is base64 of the journal UUID with a… | MATCH | none | `internal/relay/session.go:156-158,522-528; internal/connect…` | — |
@@ -358,7 +358,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-001` | TLS is transport-only and selected per listener, never nego… | MATCH | none | `internal/server/server.go:77-110, internal/connection/handl…` | — |
 | `TLS-002` | Default ports are 30343 (plaintext) and 30344 (TLS) | PARTIAL | low | `internal/config/config.go:151, internal/server/server.go:78…` | A sudo_logsrvd.conf listen_address copied without a port ("0.0.0.0", "host") fails startup with a clear error instead of binding 30343/30344; no silent wrong-port bind. Separately noted but… |
 | `TLS-003` | Exactly one SSL_CTX per role, built at config load and shar… | PARTIAL | low | `internal/server/server.go:85-110, internal/server/server.go…` | Certificate rotation on the Go server requires a full process restart. Because sudo's def_ignore_iolog_errors is false, every in-flight session dropped by that restart kills the user's runn… |
-| `TLS-004` | Minimum protocol version is TLS 1.2; no maximum version is… | INTENTIONAL | medium | `internal/config/config.go:21-40; internal/config/config.go:202,212` | Deliberate: the 1.3 floor locks out only clients on pre-1.1.1 OpenSSL (whose command sudo then kills, since ignore_iolog_errors is false); every modern client negotiates 1.3 against C's 1.2-minimum-no-maximum anyway. Rationale at internal/config/config.go:21-40 (TLSVersion doc comment); escape hatch is server.tls_min_version: "1.2". |
+| `TLS-004` | Minimum protocol version is TLS 1.2; no maximum version is… | INTENTIONAL | low | `internal/config/config.go:21-40; internal/config/config.go:…` | Deliberate: the 1.3 floor locks out only clients on pre-1.1.1 OpenSSL (whose command sudo then kills, since ignore_iolog_errors is false); every modern client negotiates 1.3 against C's 1.2… |
 | `TLS-005` | TLS 1.2 cipher list defaults to `HIGH:!aNULL`, with non-fat… | ABSENT | low | `internal/server/server.go:100-103` | Operator-visible only. Under the shipped 1.3 floor the TLS 1.2 suite list is unreachable entirely; with tls_min_version: "1.2" Go's built-in TLS 1.2 set applies, which is narrower than HIGH… |
 | `TLS-006` | TLS 1.3 ciphersuites default to `TLS_AES_256_GCM_SHA384` on… | DIVERGENT | low | `internal/server/server.go:100-103` | A different negotiated suite in a packet capture (AES-128-GCM vs AES-256-GCM) and no way for a site mandating AES-256 to enforce it. No connection that C would accept is refused, so the spe… |
 | `TLS-007` | CA bundle: `tls_cacert` if set, otherwise the system defaul… | ABSENT | low | `internal/server/server.go:100-103, internal/relay/session.g…` | An operator cannot pin a per-daemon CA bundle for the relay leg and must widen trust to the whole host store (or disable verification). No connection is refused that would not also be refus… |
@@ -381,7 +381,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-024` | The relay leg performs its own TLS handshake after TCP conn… | PARTIAL | low | `internal/relay/session.go:959-998, internal/relay/session.g…` | In the default (fail-open) configuration a failed upstream TLS handshake during the flush phase is invisible to the sudo client, which already has its log_id and commit points — where C rep… |
 | `TLS-025` | Relay TLS settings inherit from `[server]` on a per-key bas… | ABSENT | medium | `internal/config/config.go:61-82, internal/relay/session.go:…` | A relay tier whose upstream requires client certificates cannot be replaced by sudosrv-go: every flush fails the handshake, cache files accumulate in relay_cache_directory forever (reconnec… |
 | `TLS-026` | `tls_checkhost` is not a recognised `[relay]` key, despite… | DIVERGENT | low | `internal/config/config.go:179-189` | Any misspelled or pasted-from-sudo_logsrvd.conf key ('tls_skip_verifyy', 'tls_checkhost', 'tls_cacert') is accepted with no diagnostic and has no effect, so an operator who believes a secur… |
-| `TLS-027` | The relay does not verify the upstream certificate by defau… | INTENTIONAL | medium | `internal/config/config.go:83-99; internal/relay/session.go:1055-1062; config-example.yaml:36-41; README.md:189-202` | Deliberate and stricter than C: an upstream with a self-signed or private-CA certificate that sudo_logsrvd would accept is refused on every dial. Rationale at internal/config/config.go:83-99 (TLSSkipVerify doc comment) and README.md:189-202; private CAs go in the system trust store or SSL_CERT_FILE, and tls_skip_verify: true restores C's posture. |
+| `TLS-027` | The relay does not verify the upstream certificate by defau… | INTENTIONAL | low | `internal/config/config.go:83-99; internal/relay/session.go:…` | Deliberate and stricter than C: an upstream with a self-signed or private-CA certificate that sudo_logsrvd would accept is refused on every dial. Rationale at internal/config/config.go:83-9… |
 | `TLS-028` | When relay peer verification *is* enabled, the identity che… | MATCH | none | `internal/relay/session.go:965-972` | — |
 | `TLS-029` | A TLS 1.3 upstream rejecting our client certificate surface… | ABSENT | low | `internal/relay/session.go:930-957, internal/relay/session.g…` | A persistent upstream certificate rejection is invisible to sudo — the client reports success while transcripts accumulate in relay_cache_directory. Bounded by the require_upstream opt-in,… |
 | `TLS-030` | `SSL_shutdown()` is attempted before the socket is closed,… | MATCH | none | `internal/connection/handler.go:181-183, internal/protocol/p…` | — |

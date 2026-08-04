@@ -84,7 +84,7 @@ def main():
     A("# Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`")
     A("")
     A("> **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  ")
-    A("> **Subject:** `sudosrv` @ `81be2ba`  ")
+    A("> **Subject:** `sudosrv` @ `d5c0861`  ")
     A("> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) "
       "was checked against the Go source, then every non-`MATCH` verdict was independently "
       "challenged by a second pass instructed to refute it. Verdict vocabulary is defined in "
