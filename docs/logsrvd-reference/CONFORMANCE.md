@@ -1,7 +1,7 @@
 # Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`
 
 > **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  
-> **Subject:** `sudosrv` @ `d5c0861`  
+> **Subject:** `sudosrv` @ `PENDING`  
 > **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
 
 ## Summary
@@ -10,21 +10,21 @@
 |---|--:|--:|--:|--:|--:|--:|--:|
 | [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 13 | 1 | 18 | 5 | 6 | 2 |
 | [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 22 | 2 | 21 | 5 | 1 | 2 |
-| [Configuration Surface & Defaults](03-configuration.md) | 68 | 12 | 8 | 11 | 8 | 24 | 5 |
+| [Configuration Surface & Defaults](03-configuration.md) | 68 | 14 | 8 | 12 | 8 | 21 | 5 |
 | [Local I/O Log Storage Format](04-local-storage.md) | 51 | 20 | 1 | 16 | 11 | 3 | 0 |
 | [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 25 | 5 | 10 | 7 | 2 | 5 |
-| [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 10 | 2 | 14 | 3 | 11 | 1 |
-| **Total** | **312** | **102** | **19** | **90** | **39** | **47** | **15** |
+| [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 12 | 2 | 15 | 3 | 8 | 1 |
+| **Total** | **312** | **106** | **19** | **92** | **39** | **41** | **15** |
 
-Severity of the 195 requirements that are not `MATCH`/`NA`:
+Severity of the 191 requirements that are not `MATCH`/`NA`:
 
 | breaking | high | medium | low | informational |
 |--:|--:|--:|--:|--:|
-| 0 | 0 | 13 | 158 | 24 |
+| 0 | 0 | 10 | 157 | 24 |
 
 ### Effect of the adversarial pass
 
-210 findings were challenged: **180 upheld**, **24 downgraded**, **2 upgraded**, **4 refuted outright**.
+204 findings were challenged: **176 upheld**, **22 downgraded**, **2 upgraded**, **4 refuted outright**.
 
 ## Priority findings
 
@@ -191,11 +191,11 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-028` | `[server] server_log` | ABSENT | low | `cmd/sudosrv/main.go:167-206; internal/config/config.go:57` | Sites collecting logsrvd diagnostics via syslog must instead collect the process's stdout via journald. |
 | `CONF-029` | `[server] tls_key` default is unconditional | ABSENT | low | `internal/config/config.go:47,147-177; internal/server/serve…` | Only the implicit default path is missing; the failure is loud and immediate rather than deferred. |
 | `CONF-030` | `[server] tls_cert` default is conditional on file existence | ABSENT | low | `internal/config/config.go:46,147-177 (no access(R_OK) probe…` | TLS requires three explicit keys and refuses to start otherwise with a clear message. Missing option, safer posture. |
-| `CONF-031` | `[server] tls_cacert` default is conditional on file existe… | ABSENT | low | `internal/server/server.go:100-103 (tls.Config sets only Cer…` | Only C's startup-time abort when a configured cacert fails to load is lost. No client-visible effect; overlaps CONF-035. |
+| `CONF-031` | `[server] tls_cacert` default is conditional on file existe… | PARTIAL | low | `internal/config/config.go` | tls_cacert_file exists with an empty default meaning the system trust store; C's access(R_OK) probe of a default path is not reproduced. |
 | `CONF-032` | `[server] tls_dhparams` | NA | none | `internal/server/server.go:100-103` | Go's crypto/tls implements no finite-field Diffie-Hellman (DHE) suites — key exchange is ECDHE, or RSA under TLS 1.2 — and exposes no API to supply DH parameters. A tls_dhparams setting cou… |
 | `CONF-033` | `[server] tls_ciphers_v12` and `tls_ciphers_v13` | PARTIAL | medium | `internal/config/config.go:22-31,48,156; internal/server/ser…` | A sudo client linked against an OpenSSL without TLS 1.3 cannot complete the handshake, so no command runs on that host until the operator sets server.tls_min_version: "1.2". Loud on both en… |
 | `CONF-034` | `[server] tls_verify` | ABSENT | low | `internal/server/server.go:90-94 (tls.LoadX509KeyPair only)` | Diagnostics only, and it cuts both ways: a broken chain surfaces at every client handshake instead of once at startup, while a self-signed server certificate needs no opt-out here. |
-| `CONF-035` | `[server] tls_checkpeer` | ABSENT | low | `internal/server/server.go:100-103` | None at C's defaults — every stock sudo client behaves identically. Only a site that has opted into tls_checkpeer=true under sudo_logsrvd loses the ability to require client certificates. |
+| `CONF-035` | `[server] tls_checkpeer` | MATCH | none | `internal/config/config.go TLSCheckPeer` | — |
 | `CONF-036` | `[server] tls_checkhost` | ABSENT | low | `internal/server/server.go:100-103` | None at C's defaults; subsumed by CONF-035. |
 | `CONF-037` | `(tls)` is rejected when OpenSSL support is not compiled in | NA | none | `internal/server/server.go:85-108` | crypto/tls is unconditionally part of the Go standard library; there is no build variant without it, so the 'TLS not supported' rejection path and the conditional tls_* key table have no an… |
 | `CONF-038` | `[relay] relay_host` selects relay mode | MATCH | none | `internal/config/config.go` | — |
@@ -205,7 +205,7 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-042` | `[relay] relay_dir` and its `incoming`/`outgoing` subdirect… | MATCH | none | `packaging logrotate config` | — |
 | `CONF-043` | `[relay] store_first` | INTENTIONAL | low | `internal/relay/session.go:54-78; README.md:146-172; config-…` | Deliberate: relay is C's store_first made unconditional, so the upstream never sees a live session and a client that dies without ExitMessage waits for the next restart to be delivered. Rat… |
 | `CONF-044` | `[relay] tcp_keepalive` | MATCH | none | `internal/relay/session.go:960,969-974` | — |
-| `CONF-045` | Relay TLS string settings fall back to the `[server]` secti… | ABSENT | medium | `internal/relay/session.go:966-972; internal/config/config.g…` | Against an upstream sudo_logsrvd configured with tls_checkpeer=true, every relay handshake fails; completed sessions accumulate in relay_cache_directory indefinitely with no configuration t… |
+| `CONF-045` | Relay TLS string settings fall back to the `[server]` secti… | MATCH | none | `internal/config/config.go resolveRelayTLSInheritance` | — |
 | `CONF-046` | `[relay] tls_verify` is tri-state with `[server]` fallback | ABSENT | low | `internal/relay/session.go:966-972; internal/config/config.g…` | Credential problems surface as per-attempt handshake failures at flush time rather than once at config load. Diagnostics only. |
 | `CONF-047` | `[relay] tls_checkpeer` is tri-state with `[server]` fallba… | PARTIAL | low | `internal/relay/session.go:970; internal/config/config.go:64…` | Pointing at a self-signed upstream produces loud per-attempt handshake failures and a growing cache until the operator sets tls_skip_verify: true, which reproduces C's default posture. No s… |
 | `CONF-048` | `[relay] tls_checkhost` is documented but does not exist | NA | none | `internal/config/config.go:179-189` | Configuration is YAML unmarshalled into a fixed struct, so there is no INI key table and no 'illegal key' concept; a relay tls_checkhost key simply does not exist. Worth recording for opera… |
@@ -361,7 +361,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-004` | Minimum protocol version is TLS 1.2; no maximum version is… | INTENTIONAL | low | `internal/config/config.go:21-40; internal/config/config.go:…` | Deliberate: the 1.3 floor locks out only clients on pre-1.1.1 OpenSSL (whose command sudo then kills, since ignore_iolog_errors is false); every modern client negotiates 1.3 against C's 1.2… |
 | `TLS-005` | TLS 1.2 cipher list defaults to `HIGH:!aNULL`, with non-fat… | ABSENT | low | `internal/server/server.go:100-103` | Operator-visible only. Under the shipped 1.3 floor the TLS 1.2 suite list is unreachable entirely; with tls_min_version: "1.2" Go's built-in TLS 1.2 set applies, which is narrower than HIGH… |
 | `TLS-006` | TLS 1.3 ciphersuites default to `TLS_AES_256_GCM_SHA384` on… | DIVERGENT | low | `internal/server/server.go:100-103` | A different negotiated suite in a packet capture (AES-128-GCM vs AES-256-GCM) and no way for a site mandating AES-256 to enforce it. No connection that C would accept is refused, so the spe… |
-| `TLS-007` | CA bundle: `tls_cacert` if set, otherwise the system defaul… | ABSENT | low | `internal/server/server.go:100-103, internal/relay/session.g…` | An operator cannot pin a per-daemon CA bundle for the relay leg and must widen trust to the whole host store (or disable verification). No connection is refused that would not also be refus… |
+| `TLS-007` | CA bundle: `tls_cacert` if set, otherwise the system defaul… | PARTIAL | low | `internal/server/capool.go` | A named CA bundle is loaded and a load failure is fatal; empty means the platform trust store. C's conditional default path (/etc/ssl/sudo/cacert.pem adopted only when readable) has no anal… |
 | `TLS-008` | The CA bundle is also published as the acceptable-client-CA… | ABSENT | informational | `internal/server/server.go:100-103` | none — a client is never asked to choose a certificate, so the missing DN list has no observable effect while TLS-015 is unimplemented. |
 | `TLS-009` | Certificate chain and private key loading; key defaults to… | MATCH | none | `internal/server/server.go:86-94, internal/config/config.go:…` | — |
 | `TLS-010` | `tls_verify` (default true) self-verifies the daemon's own… | ABSENT | low | `internal/server/server.go:90-103` | A broken server certificate is discovered at the first client handshake rather than at daemon start, so deployment tooling that only checks 'did the unit start' will not catch it. Same even… |
@@ -369,7 +369,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-012` | Built-in TLS paths, and the "only if it exists" rule for ca… | ABSENT | low | `internal/config/config.go:147-177, internal/server/server.g…` | Operator-visible only. A host migrated from sudo_logsrvd that relied on the built-in /etc/ssl/sudo paths yields a plaintext-only Go server until the paths are written into config.yaml — and… |
 | `TLS-013` | A readable default certificate silently enables a TLS liste… | DIVERGENT | low | `internal/server/server.go:77-110, internal/config/config.go…` | A config carrying tls_cert_file/tls_key_file but no listen_address_tls starts plaintext-only with no diagnostic; a client using log_servers="host:30344(tls)" gets ECONNREFUSED. Diagnosable… |
 | `TLS-014` | Client certificates are not requested by default | MATCH | none | `internal/server/server.go:100-103` | — |
-| `TLS-015` | When `tls_checkpeer` is true, a client certificate is manda… | ABSENT | medium | `internal/config/config.go:42-58, internal/server/server.go:…` | A site that authenticates its sudo hosts by client certificate has no migration path: the Go server accepts any peer that completes the handshake and the protocol carries no other credentia… |
+| `TLS-015` | When `tls_checkpeer` is true, a client certificate is manda… | MATCH | none | `internal/server/server.go` | — |
 | `TLS-016` | The verify callback propagates pre-verification failure and… | PARTIAL | informational | `internal/relay/session.go:970-972, internal/server/server.g…` | none — the relay leg is behaviourally equivalent to the C callback; the inbound gap is TLS-015's. |
 | `TLS-017` | `tls_checkhost` (default true) reverse-resolves the peer IP… | ABSENT | informational | `internal/connection/handler.go:102-114, internal/connection…` | No reverse DNS lookup happens anywhere on the inbound path; only conn.RemoteAddr() is recorded (registerSession's RemoteAddr, and every slog "remote_addr" field). Because the resolved name… |
 | `TLS-018` | Identity matching follows RFC 6125 §6.4.4: SAN first, CN on… | PARTIAL | low | `internal/relay/session.go:970-972` | Relaying to an upstream presenting a legacy SAN-less certificate fails every dial where sudo_logsrvd in its default config would have relayed. Narrow (SAN-less certs are non-conforming for… |
@@ -379,7 +379,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-022` | The TLS handshake is bounded by the `[server] timeout` (def… | MATCH | none | `internal/connection/handler.go:194-198, internal/connection…` | — |
 | `TLS-023` | `ServerHello` is queued only after the handshake completes | MATCH | none | `internal/connection/handler.go:194-236, internal/connection…` | — |
 | `TLS-024` | The relay leg performs its own TLS handshake after TCP conn… | PARTIAL | low | `internal/relay/session.go:959-998, internal/relay/session.g…` | In the default (fail-open) configuration a failed upstream TLS handshake during the flush phase is invisible to the sudo client, which already has its log_id and commit points — where C rep… |
-| `TLS-025` | Relay TLS settings inherit from `[server]` on a per-key bas… | ABSENT | medium | `internal/config/config.go:61-82, internal/relay/session.go:…` | A relay tier whose upstream requires client certificates cannot be replaced by sudosrv-go: every flush fails the handshake, cache files accumulate in relay_cache_directory forever (reconnec… |
+| `TLS-025` | Relay TLS settings inherit from `[server]` on a per-key bas… | MATCH | none | `internal/config/config.go RelayTLS*File` | — |
 | `TLS-026` | `tls_checkhost` is not a recognised `[relay]` key, despite… | DIVERGENT | low | `internal/config/config.go:179-189` | Any misspelled or pasted-from-sudo_logsrvd.conf key ('tls_skip_verifyy', 'tls_checkhost', 'tls_cacert') is accepted with no diagnostic and has no effect, so an operator who believes a secur… |
 | `TLS-027` | The relay does not verify the upstream certificate by defau… | INTENTIONAL | low | `internal/config/config.go:83-99; internal/relay/session.go:…` | Deliberate and stricter than C: an upstream with a self-signed or private-CA certificate that sudo_logsrvd would accept is refused on every dial. Rationale at internal/config/config.go:83-9… |
 | `TLS-028` | When relay peer verification *is* enabled, the identity che… | MATCH | none | `internal/relay/session.go:965-972` | — |

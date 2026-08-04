@@ -88,6 +88,8 @@ server:
   # listen_address_tls: "0.0.0.0:30344"
   # tls_cert_file: "server.crt"
   # tls_key_file: "server.key"
+  # tls_check_peer: false         # require + verify client certificates (mutual TLS)
+  # tls_cacert_file: "ca.pem"     # CA bundle for them; empty = system trust store
   # idle_timeout: 30m             # off by default; see note below
   # server_timeout: 30s           # write + TLS handshake deadline (default 30s)
   server_operational_log_level: "info"
@@ -113,6 +115,9 @@ local_storage:
 #   relay_cache_directory: "/var/log/gosudo-relay-cache"
 #   reconnect_attempts: -1         # -1 = infinite
 #   require_upstream: false        # true = refuse commands when upstream is down
+#   tls_cert_file: "relay.crt"     # client cert presented upstream (inherits server's)
+#   tls_key_file: "relay.key"      # (inherits server's)
+#   tls_cacert_file: "ca.pem"      # CA used to verify the upstream (inherits server's)
 #   max_reconnect_interval: 1m
 
 # Optional read-only management API. Omit the block (or leave listen_address
@@ -134,6 +139,43 @@ that is a silent auditing gap, so it fails at startup where you will see it.
 
 The same applies to a `relay` block left with `mode: "local"` — rather than quietly
 running local storage and never contacting the upstream, the load is rejected.
+
+### Mutual TLS
+
+`tls_check_peer: true` makes a client certificate **mandatory** on the TLS listener: a
+peer that presents none is rejected during the handshake, not merely recorded as
+unverified. `tls_cacert_file` names the CA bundle those certificates are verified
+against; leaving it empty uses the platform trust store, which is almost never what you
+want here — name the CA that issues your sudo hosts' certificates.
+
+It is **off by default**, matching `sudo_logsrvd`, whose `tls_checkpeer` also defaults to
+false. Turning it on rejects every client that is not already provisioned with a
+certificate, so roll it out to clients first.
+
+A named bundle that cannot be read, or that contains no certificates, is a **startup
+error** rather than a fallback to the system store. That is deliberate: a typo in the
+path would otherwise leave you trusting the entire public web PKI instead of the one CA
+you meant, and nothing would look wrong.
+
+#### The relay side
+
+A relay talking to an upstream that requires client certificates needs to present one.
+The three relay TLS keys each **inherit from the `[server]` section independently** when
+unset, matching C's `TLS_RELAY_STR` behaviour:
+
+```yaml
+server:
+  tls_cert_file: "host.crt"      # also used by the relay unless it overrides
+  tls_key_file:  "host.key"
+  tls_cacert_file: "ca.pem"
+relay:
+  tls_cacert_file: "upstream-ca.pem"   # only the CA differs; cert and key still inherit
+```
+
+Inheritance is per key, not all-or-nothing. Overriding just the CA above leaves the relay
+still presenting `host.crt` — if it were all-or-nothing, that config would silently stop
+presenting any certificate and every flush would fail at the upstream handshake while the
+local cache grew.
 
 ### A note on `idle_timeout`
 

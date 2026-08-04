@@ -59,14 +59,26 @@ type Config struct {
 
 // ServerConfig holds server-specific settings.
 type ServerConfig struct {
-	Mode             string        `yaml:"mode"` // "local" or "relay"
-	ListenAddress    string        `yaml:"listen_address"`
-	ListenAddressTLS string        `yaml:"listen_address_tls"`
-	TLSCertFile      string        `yaml:"tls_cert_file"`
-	TLSKeyFile       string        `yaml:"tls_key_file"`
-	TLSMinVersion    string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
-	ServerID         string        `yaml:"server_id"`
-	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	Mode             string `yaml:"mode"` // "local" or "relay"
+	ListenAddress    string `yaml:"listen_address"`
+	ListenAddressTLS string `yaml:"listen_address_tls"`
+	TLSCertFile      string `yaml:"tls_cert_file"`
+	TLSKeyFile       string `yaml:"tls_key_file"`
+	TLSMinVersion    string `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the protocol TLS listener
+	// TLSCheckPeer requires every TLS client to present a certificate that
+	// verifies against TLSCACertFile (or the system trust store). Default false,
+	// matching C's tls_checkpeer (logsrvd/logsrvd_conf.c:1688) -- turning it on
+	// by default would reject every existing client at the handshake.
+	// Conformance: docs/logsrvd-reference/ TLS-015, CONF-035.
+	TLSCheckPeer bool `yaml:"tls_check_peer"`
+	// TLSCACertFile is the CA bundle used to verify client certificates when
+	// TLSCheckPeer is set, and the pool the relay uses to verify an upstream.
+	// Empty means the system trust store, matching C's fallback to
+	// SSL_CTX_set_default_verify_paths (logsrvd/tls_init.c:294-319).
+	// Conformance: docs/logsrvd-reference/ TLS-007, CONF-031.
+	TLSCACertFile string        `yaml:"tls_cacert_file"`
+	ServerID      string        `yaml:"server_id"`
+	IdleTimeout   time.Duration `yaml:"idle_timeout"`
 	// ServerTimeout bounds writes to the client and the TLS handshake, mirroring
 	// C's [server] timeout (default 30s). It is NOT an idle read deadline — see
 	// IdleTimeout, which is a different knob with the opposite default. 0 or
@@ -96,8 +108,16 @@ type RelayConfig struct {
 	// by setting SSL_CERT_FILE — there is no relay CA-bundle key. Setting this to
 	// true reproduces C's posture and is warned about loudly at startup
 	// (cmd/sudosrv/main.go). Conformance: docs/logsrvd-reference/ TLS-027.
-	TLSSkipVerify  bool          `yaml:"tls_skip_verify"`
-	TLSMinVersion  string        `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
+	TLSSkipVerify bool   `yaml:"tls_skip_verify"`
+	TLSMinVersion string `yaml:"tls_min_version"` // "1.2" or "1.3" (default "1.3") for the upstream dial
+	// Relay TLS material. Each of these falls back to the [server] value when
+	// empty, PER KEY -- setting only TLSCACertFile leaves the relay presenting
+	// the server's certificate and key. Resolve them through Config's
+	// RelayTLS*File accessors rather than reading the fields directly.
+	// Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
+	TLSCertFile    string        `yaml:"tls_cert_file"`   // client cert presented to the upstream
+	TLSKeyFile     string        `yaml:"tls_key_file"`    // key for TLSCertFile
+	TLSCACertFile  string        `yaml:"tls_cacert_file"` // CA bundle used to verify the upstream
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
 	// ResponseTimeout bounds each message exchange with the upstream AFTER the
 	// connection is established, mirroring C's [relay] timeout (default 30s,
@@ -237,6 +257,46 @@ func defaultConfig() *Config {
 // each of which fails open on a security control. Do not relax this back to
 // yaml.Unmarshal. Conformance: docs/logsrvd-reference/ CONF-002.
 // Guarded by TestLoadConfigRejectsUnknownKeys.
+// Relay TLS material inherits from the [server] section on a PER-KEY basis, the
+// same rule as C's TLS_RELAY_STR macro (logsrvd/logsrvd_conf.c:65-71, 1809-1827):
+// each value falls back independently, so overriding one does not disinherit the
+// others. All-or-nothing inheritance would mean an operator setting a
+// relay-specific CA silently stops presenting a client certificate, and every
+// flush then fails at the upstream handshake with the cache growing behind it.
+//
+// Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
+func relayOrServer(relay, server string) string {
+	if relay != "" {
+		return relay
+	}
+	return server
+}
+
+// resolveRelayTLSInheritance copies the effective TLS material into the relay
+// section so RelayConfig is self-contained. It is idempotent: the accessors
+// return the relay value once set, so re-running changes nothing.
+func resolveRelayTLSInheritance(c *Config) {
+	c.Relay.TLSCertFile = c.RelayTLSCertFile()
+	c.Relay.TLSKeyFile = c.RelayTLSKeyFile()
+	c.Relay.TLSCACertFile = c.RelayTLSCACertFile()
+}
+
+// RelayTLSCertFile is the client certificate the relay presents upstream.
+func (c *Config) RelayTLSCertFile() string {
+	return relayOrServer(c.Relay.TLSCertFile, c.Server.TLSCertFile)
+}
+
+// RelayTLSKeyFile is the key for RelayTLSCertFile.
+func (c *Config) RelayTLSKeyFile() string {
+	return relayOrServer(c.Relay.TLSKeyFile, c.Server.TLSKeyFile)
+}
+
+// RelayTLSCACertFile is the CA bundle used to verify the upstream. Empty means
+// the system trust store.
+func (c *Config) RelayTLSCACertFile() string {
+	return relayOrServer(c.Relay.TLSCACertFile, c.Server.TLSCACertFile)
+}
+
 func unmarshalConfig(data []byte, config *Config) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -251,6 +311,12 @@ func unmarshalConfig(data []byte, config *Config) error {
 	// Re-apply defaults for zero-valued fields that yaml may have cleared
 	// when a section is partially specified in the config file.
 	applyZeroValueDefaults(config)
+
+	// Fold the [server] TLS material into the relay section, per key, so
+	// everything downstream reads effective values from RelayConfig alone and no
+	// caller has to remember the inheritance rule. Doing it once here also means
+	// -validate and -dry-run print what will actually be used, not what was typed.
+	resolveRelayTLSInheritance(config)
 
 	return nil
 }
@@ -329,6 +395,19 @@ func Validate(cfg *Config) error {
 		if cfg.Server.TLSCertFile == "" || cfg.Server.TLSKeyFile == "" {
 			return fmt.Errorf("TLS certificate and key files must be specified for TLS listener")
 		}
+	}
+	// tls_check_peer only does anything on a TLS listener. Accepting it without
+	// one would leave an operator believing client certificates are required
+	// while every connection arrives unauthenticated on the plaintext port.
+	// Conformance: docs/logsrvd-reference/ TLS-015.
+	if cfg.Server.TLSCheckPeer && cfg.Server.ListenAddressTLS == "" {
+		return fmt.Errorf("server.tls_check_peer requires a TLS listener; set listen_address_tls")
+	}
+	// A half-configured key pair can never produce a usable certificate. Failing
+	// here beats failing at every upstream handshake with the relay cache growing
+	// behind it. Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
+	if (cfg.Relay.TLSCertFile == "") != (cfg.Relay.TLSKeyFile == "") {
+		return fmt.Errorf("relay.tls_cert_file and relay.tls_key_file must be set together")
 	}
 	if _, err := TLSVersion(cfg.Server.TLSMinVersion); err != nil {
 		return fmt.Errorf("server.%w", err)

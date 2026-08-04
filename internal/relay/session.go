@@ -5,6 +5,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -1060,6 +1061,40 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 		// TLSSkipVerify doc comment in internal/config for the trade-off.
 		// Conformance: docs/logsrvd-reference/ TLS-027.
 		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: minVer}
+
+		// Present a client certificate when one is configured, so an upstream
+		// running with tls_checkpeer accepts us. Without this, such an upstream
+		// rejects every flush at the handshake and the cache grows without bound
+		// -- the failure is silent from the client's side, because relaying is
+		// store-and-forward and the session was already acknowledged downstream.
+		//
+		// These fields are already resolved against the [server] section at config
+		// load (per key, matching C's TLS_RELAY_STR), so reading them directly here
+		// is correct. Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			cert, certErr := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+			if certErr != nil {
+				return nil, fmt.Errorf("load relay client certificate: %w", certErr)
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
+		}
+		// A named CA bundle replaces the platform trust store for the upstream
+		// only, which is how a private-CA upstream is trusted without installing
+		// its root system-wide. An unreadable or empty bundle is fatal rather than
+		// a silent fall back to the system store: a typo'd path would otherwise
+		// trust the public web PKI instead of the one CA that was meant.
+		// Conformance: docs/logsrvd-reference/ TLS-007.
+		if cfg.TLSCACertFile != "" {
+			pem, readErr := os.ReadFile(cfg.TLSCACertFile)
+			if readErr != nil {
+				return nil, fmt.Errorf("read relay CA bundle %s: %w", cfg.TLSCACertFile, readErr)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("relay CA bundle %s contains no usable PEM certificates", cfg.TLSCACertFile)
+			}
+			tlsConfig.RootCAs = pool
+		}
 		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
 		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
 	} else {
