@@ -14,6 +14,7 @@ import (
 	"sudosrv/internal/api"
 	"sudosrv/internal/config"
 	"sudosrv/internal/connection"
+	"sudosrv/internal/eventlog"
 	"sudosrv/internal/metrics"
 	"sudosrv/internal/relay"
 	"sudosrv/internal/sessions"
@@ -109,6 +110,15 @@ func listenTCP(ctx context.Context, address string) (net.Listener, error) {
 // already begun handing connections to the session pipeline.
 func (s *Server) Start() error {
 	cfg := s.config.Load()
+
+	// The event log is installed before any listener, so no session can be
+	// accepted before its audit record has somewhere to go. A destination that
+	// cannot be opened fails startup, matching C, where a failed event-log open
+	// aborts the apply (logsrvd/logsrvd_conf.c:1834-1850).
+	// Conformance: docs/logsrvd-reference/ CONF-058.
+	if err := eventlog.Global.Configure(eventlog.SettingsFrom(cfg)); err != nil {
+		return fmt.Errorf("event log: %w", err)
+	}
 
 	// Phase 1: bind every required listener.
 	if cfg.Server.ListenAddressTLS != "" {
@@ -341,6 +351,12 @@ func (s *Server) Wait(shutdownTimeout time.Duration) {
 		}
 	}
 
+	// Release the event log after the listeners so a session still tearing down
+	// can still record its exit.
+	if err := eventlog.Global.Close(); err != nil {
+		slog.Error("Event log close error", "error", err)
+	}
+
 	// Wait for all goroutines to finish, bounded by shutdownTimeout.
 	done := make(chan struct{})
 	go func() {
@@ -427,6 +443,12 @@ func (s *Server) reload() {
 			return
 		}
 		s.tlsProvider = provider
+	}
+
+	if err := eventlog.Global.Configure(eventlog.SettingsFrom(newCfg)); err != nil {
+		slog.Error("Config reload rejected: event log could not be reconfigured; keeping previous config",
+			"path", s.configPath, "error", err)
+		return
 	}
 
 	// Rebuild the listener set. Established connections are untouched: closing a

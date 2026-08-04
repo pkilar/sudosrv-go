@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"sudosrv/internal/config"
+	"sudosrv/internal/eventlog"
 	"sudosrv/internal/server"
 	"time"
 )
@@ -158,8 +159,16 @@ func loadAndValidateConfig(configPath string) (*config.Config, error) {
 
 // validateConfiguration delegates to config.Validate so the same rules apply
 // to SIGHUP reload (see server.reload).
+//
+// The event-log settings are checked separately because their tables live in
+// internal/eventlog, which imports internal/config -- folding the check into
+// config.Validate would make that cycle. Running it here means -validate and
+// -dry-run catch an unknown facility or priority without the daemon starting.
 func validateConfiguration(cfg *config.Config) error {
-	return config.Validate(cfg)
+	if err := config.Validate(cfg); err != nil {
+		return err
+	}
+	return eventlog.Validate(eventlog.SettingsFrom(cfg))
 }
 
 // setupStructuredLogging configures logging with enhanced options.

@@ -280,6 +280,10 @@ func TestSubCommandAcceptReusesOneJournalAndOneLogID(t *testing.T) {
 		t.Errorf("session log_id changed from %q to %q across sub-command accepts", firstLogID, s.LogID())
 	}
 	_ = s.Close()
+	// Close only shuts the channel; the cache writer drains it on its own
+	// goroutine. Without waiting, the glob below races the last write and finds
+	// nothing under load.
+	s.Wait()
 
 	// Exactly one journal file for the whole session.
 	journals, err := filepath.Glob(filepath.Join(dir, "*.log"))

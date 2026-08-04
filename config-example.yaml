@@ -77,6 +77,24 @@ local_storage:
 #  relay_cache_directory: "/tmp/sudosrv-cache"
 #  reconnect_attempts: -1
 
+# sudo's EVENT log: one audit line per command, separate from this daemon's own
+# operational log and from the I/O session transcripts. Defaults to syslog, as
+# sudo_logsrvd does, so SIEM rules written against that stream keep working.
+# Set log_type to "none" to turn it off entirely.
+#eventlog:
+#  log_type: "syslog"       # none | syslog | logfile
+#  log_format: "sudo"       # sudo (KEY=value line) | json (one compact object per line)
+#  log_exit: false          # add a record when the command exits
+#syslog:
+#  facility: "authpriv"     # authpriv | auth | daemon | user | local0-7
+#  accept_priority: "notice"  # "none" disables that class entirely
+#  reject_priority: "alert"
+#  alert_priority: "alert"
+#  maxlen: 960              # sudo-format lines longer than this are split
+#logfile:
+#  path: "/var/log/sudo.log"
+#  time_format: "Jan _2 15:04:05"   # Go layout, NOT strftime ("%h %e %T" in sudo)
+
 # Optional read-only management HTTP API.
 # Leave listen_address empty (or omit the entire api: block) to disable it.
 #api:

@@ -96,6 +96,45 @@ type Config struct {
 	Relay        RelayConfig        `yaml:"relay"`
 	LocalStorage LocalStorageConfig `yaml:"local_storage"`
 	API          APIConfig          `yaml:"api"`
+	EventLog     EventLogConfig     `yaml:"eventlog"`
+	Syslog       SyslogConfig       `yaml:"syslog"`
+	LogFile      LogFileConfig      `yaml:"logfile"`
+}
+
+// EventLogConfig controls sudo's EVENT log: the one-line-per-command audit
+// record, distinct from this daemon's operational log and from the I/O session
+// transcripts. Conformance: docs/logsrvd-reference/ CONF-058 through CONF-060.
+type EventLogConfig struct {
+	// LogType is none, syslog, or logfile. It defaults to syslog, as
+	// sudo_logsrvd does (logsrvd/logsrvd_conf.c:919-934) -- a site migrating
+	// from it has SIEM rules already watching that stream, and silently not
+	// producing it is how a central audit trail ends up empty.
+	LogType string `yaml:"log_type"`
+	// LogFormat is sudo (the traditional KEY=value line) or json (one compact
+	// object per line). Conformance: CONF-059.
+	LogFormat string `yaml:"log_format"`
+	// LogExit adds a record when the command exits. Default false, as in C.
+	LogExit bool `yaml:"log_exit"`
+}
+
+// SyslogConfig shapes the syslog destination.
+// Conformance: docs/logsrvd-reference/ CONF-061 through CONF-063.
+type SyslogConfig struct {
+	Facility       string `yaml:"facility"`        // authpriv, auth, daemon, user, local0-7
+	AcceptPriority string `yaml:"accept_priority"` // "none" disables that class
+	RejectPriority string `yaml:"reject_priority"`
+	AlertPriority  string `yaml:"alert_priority"`
+	MaxLen         int    `yaml:"maxlen"` // sudo-format lines longer than this are split
+}
+
+// LogFileConfig shapes the logfile destination.
+// Conformance: docs/logsrvd-reference/ CONF-064.
+type LogFileConfig struct {
+	Path string `yaml:"path"`
+	// TimeFormat is a Go reference-time layout, NOT the strftime string C takes.
+	// C's default "%h %e %T" is "Jan _2 15:04:05" here. Translating strftime
+	// would mean shipping a parser for a format nothing else in this config uses.
+	TimeFormat string `yaml:"time_format"`
 }
 
 // ServerConfig holds server-specific settings.
@@ -372,6 +411,24 @@ func defaultConfig() *Config {
 			Compress:        false, // Compression disabled by default for compatibility
 			PasswordFilter:  true,  // Password filtering enabled by default for security
 		},
+		EventLog: EventLogConfig{
+			LogType:   "syslog", // C's default (logsrvd/logsrvd_conf.c:919-934)
+			LogFormat: "sudo",   // C's default (logsrvd/logsrvd_conf.c:936-954)
+			LogExit:   false,    // C's default (logsrvd/logsrvd_conf.c:956-967)
+		},
+		Syslog: SyslogConfig{
+			// C's build-time defaults: LOGFAC is authpriv wherever the platform
+			// declares LOG_AUTHPRIV, PRI_SUCCESS is notice, PRI_FAILURE is alert.
+			Facility:       "authpriv",
+			AcceptPriority: "notice",
+			RejectPriority: "alert",
+			AlertPriority:  "alert",
+			MaxLen:         960, // C's MAXSYSLOGLEN
+		},
+		LogFile: LogFileConfig{
+			Path:       "/var/log/sudo.log",
+			TimeFormat: "Jan _2 15:04:05", // C's "%h %e %T"
+		},
 	}
 }
 
@@ -490,6 +547,38 @@ func applyZeroValueDefaults(cfg *Config) {
 	if cfg.Relay.TLSMinVersion == "" {
 		cfg.Relay.TLSMinVersion = "1.3"
 	}
+	// Event-log defaults, re-applied because a partially specified [eventlog],
+	// [syslog] or [logfile] section leaves the untouched fields zeroed. An empty
+	// log_type would otherwise fail validation for a config that merely set
+	// log_exit.
+	if cfg.EventLog.LogType == "" {
+		cfg.EventLog.LogType = "syslog"
+	}
+	if cfg.EventLog.LogFormat == "" {
+		cfg.EventLog.LogFormat = "sudo"
+	}
+	if cfg.Syslog.Facility == "" {
+		cfg.Syslog.Facility = "authpriv"
+	}
+	if cfg.Syslog.AcceptPriority == "" {
+		cfg.Syslog.AcceptPriority = "notice"
+	}
+	if cfg.Syslog.RejectPriority == "" {
+		cfg.Syslog.RejectPriority = "alert"
+	}
+	if cfg.Syslog.AlertPriority == "" {
+		cfg.Syslog.AlertPriority = "alert"
+	}
+	if cfg.Syslog.MaxLen == 0 {
+		cfg.Syslog.MaxLen = 960
+	}
+	if cfg.LogFile.Path == "" {
+		cfg.LogFile.Path = "/var/log/sudo.log"
+	}
+	if cfg.LogFile.TimeFormat == "" {
+		cfg.LogFile.TimeFormat = "Jan _2 15:04:05"
+	}
+
 	if cfg.Relay.ConnectTimeout == 0 {
 		cfg.Relay.ConnectTimeout = 5 * time.Second
 	}
