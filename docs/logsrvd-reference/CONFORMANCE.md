@@ -1,7 +1,7 @@
 # Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`
 
 > **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  
-> **Subject:** `sudosrv` @ `PENDING`  
+> **Subject:** `sudosrv` @ `8728a6b`  
 > **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
 
 ## Summary

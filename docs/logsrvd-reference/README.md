@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` @ `d5c0861` — all 312 requirements re-derived |
+| **Verified against** | `sudosrv` @ `8728a6b` — all 312 requirements re-derived |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -44,14 +44,13 @@ Re-verifying a subsystem means re-deriving its rows, not editing the table in pl
 ## Where conformance stands
 
 All 312 requirements were re-verified against the current tree and every non-`MATCH`
-verdict independently challenged: **102 `MATCH`**, 19 `INTENTIONAL`, 90 `PARTIAL`,
-39 `DIVERGENT`, 47 `ABSENT`, 15 `NA`.
+verdict independently challenged: **106 `MATCH`**, 19 `INTENTIONAL`, 92 `PARTIAL`,
+39 `DIVERGENT`, 41 `ABSENT`, 15 `NA`.
 
-**Nothing is graded `breaking` or `high`.** Thirteen requirements are graded `medium`; the
-rest are `low` or `informational`. Those thirteen are features rather than defects — mutual
-TLS (`TLS-015`, `TLS-025`, `CONF-045` are one feature in three places), a syslog eventlog
-stream, listener reconciliation on reload, a configurable password-prompt pattern — each
-needing a product decision before any code is written, not a fix.
+**Nothing is graded `breaking` or `high`.** Ten requirements are graded `medium`; the rest
+are `low` or `informational`. Those ten are features needing a product decision — a syslog
+eventlog stream, listener reconciliation on reload, a configurable password-prompt
+pattern, cipher-suite selection — not defects.
 
 Two structural facts bound everything else:
 
