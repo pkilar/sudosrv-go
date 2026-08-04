@@ -124,6 +124,17 @@ local_storage:
 #   # tls_key_file:  "api.key"
 ```
 
+### Configuration is parsed strictly
+
+An unrecognised key anywhere in the config file is a **fatal load error**, not a warning.
+`sudo_logsrvd` behaves the same way (`illegal key` aborts its parse), and the reason is
+worth stating: a typo'd `iolog_dir` or `password_filter` that is silently ignored leaves
+you running the default while believing you configured something else. On a log server
+that is a silent auditing gap, so it fails at startup where you will see it.
+
+The same applies to a `relay` block left with `mode: "local"` — rather than quietly
+running local storage and never contacting the upstream, the load is rejected.
+
 ### A note on `idle_timeout`
 
 **It is off by default, and you should usually leave it off.**

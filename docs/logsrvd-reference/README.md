@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` @ `81be2ba` — all 312 requirements re-derived |
+| **Verified against** | `sudosrv` @ `d5c0861` — all 312 requirements re-derived |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -44,27 +44,27 @@ Re-verifying a subsystem means re-deriving its rows, not editing the table in pl
 ## Where conformance stands
 
 All 312 requirements were re-verified against the current tree and every non-`MATCH`
-verdict independently challenged: **92 `MATCH`**, 19 `INTENTIONAL`, 96 `PARTIAL`,
-42 `DIVERGENT`, 48 `ABSENT`, 15 `NA`.
+verdict independently challenged: **102 `MATCH`**, 19 `INTENTIONAL`, 90 `PARTIAL`,
+39 `DIVERGENT`, 47 `ABSENT`, 15 `NA`.
 
-**Nothing is graded `breaking` or `high`.** The worst remaining grade is `medium` (28
-requirements); the rest are `low` or `informational`. Every finding the audit raised at
-those two severities — 20 in total across the initial pass and the full re-verification —
-has been remediated.
+**Nothing is graded `breaking` or `high`.** Thirteen requirements are graded `medium`; the
+rest are `low` or `informational`. Those thirteen are features rather than defects — mutual
+TLS (`TLS-015`, `TLS-025`, `CONF-045` are one feature in three places), a syslog eventlog
+stream, listener reconciliation on reload, a configurable password-prompt pattern — each
+needing a product decision before any code is written, not a fix.
 
 Two structural facts bound everything else:
 
 - **The protobuf schema is field-for-field identical.** All 16 messages and 55 fields
-  match the C `log_server.proto` in name, number, type, label, and `oneof` membership.
-  (Go declares two unused top-level `StringList`/`NumberList` copies; `InfoMessage`
-  correctly uses its own nested versions, so there is no wire effect.)
+  match the C `log_server.proto` in name, number, type, label, and `oneof` membership,
+  with no extras on either side — the `diff` in the refresh procedure below returns clean.
 - **Framing and the timing-file markers match exactly:** a 4-byte big-endian length
   prefix, a 2 MiB ceiling (C `logsrv_util.h:36`, Go `processor.go:20`), and
   `IO_EVENT_*` 0–7 including the legacy `TTYOUT_1_8_7 = 6`.
 
-`PARTIAL` is the largest bucket at 100, and that is expected rather than alarming: most
-are a supported main path plus an unimplemented option or edge case. Read the severity,
-not the verdict.
+`PARTIAL` at 90 is the largest non-`MATCH` bucket, and that is expected rather than
+alarming: most are a supported main path plus an unimplemented option or edge case. Read
+the severity, not the verdict.
 
 ## Requirement IDs are a contract
 
