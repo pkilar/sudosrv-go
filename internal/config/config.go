@@ -50,6 +50,46 @@ func TLSVersion(s string) (uint16, error) {
 	}
 }
 
+// CipherSuites resolves configured TLS 1.2 suite names to crypto/tls IDs. An
+// empty list returns nil, which leaves Go's default selection in force.
+//
+// Unlike C, an unrecognized name is an ERROR rather than a warning-plus-
+// fallback. C warns and silently reverts to its default list when OpenSSL
+// rejects the configured string (logsrvd/tls_init.c:117-181), which means a
+// typo in a hardening change leaves the server running the defaults while the
+// config file and the change record both claim otherwise. Failing the load
+// makes the typo visible at the moment it is introduced.
+//
+// Insecure suites are not offered: only the forward-secret AEAD suites Go
+// reports in tls.CipherSuites() are selectable. tls.InsecureCipherSuites()
+// (CBC, RC4, 3DES, and the non-ECDHE RSA key exchanges) is deliberately not
+// consulted, so no configuration can talk this server down to them.
+func CipherSuites(names []string) ([]uint16, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	byName := make(map[string]uint16, len(tls.CipherSuites()))
+	for _, cs := range tls.CipherSuites() {
+		byName[cs.Name] = cs.ID
+	}
+	suites := make([]uint16, 0, len(names))
+	for _, n := range names {
+		id, ok := byName[strings.ToUpper(strings.TrimSpace(n))]
+		if !ok {
+			return nil, fmt.Errorf("unknown or insecure TLS 1.2 cipher suite %q; "+
+				"use an IANA name from crypto/tls (for example TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)", n)
+		}
+		suites = append(suites, id)
+	}
+	return suites, nil
+}
+
+// TLSCiphersKey renders the configured suite list as a single comparable
+// string, so reload can detect a change with ==.
+func (c *ServerConfig) TLSCiphersKey() string {
+	return strings.Join(c.TLSCiphersV12, ",")
+}
+
 // Config holds the application's configuration.
 type Config struct {
 	Server       ServerConfig       `yaml:"server"`
@@ -77,7 +117,25 @@ type ServerConfig struct {
 	// Empty means the system trust store, matching C's fallback to
 	// SSL_CTX_set_default_verify_paths (logsrvd/tls_init.c:294-319).
 	// Conformance: docs/logsrvd-reference/ TLS-007, CONF-031.
-	TLSCACertFile string        `yaml:"tls_cacert_file"`
+	TLSCACertFile string `yaml:"tls_cacert_file"`
+	// TLSCiphersV12 selects the TLS 1.2 cipher suites, by IANA name
+	// (TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, ...). Empty means Go's default
+	// selection, which is already restricted to forward-secret AEAD suites and
+	// is ordered by the runtime using per-platform AES-NI detection -- a better
+	// default than a hand-written list, so prefer leaving this unset.
+	//
+	// It is deliberately NOT an OpenSSL cipher string: C takes "HIGH:!aNULL"
+	// and hands it to SSL_CTX_set_cipher_list (logsrvd/tls_init.c:117-181),
+	// syntax only OpenSSL can parse. Naming suites individually is the honest
+	// translation; a config written for C will not load here, which is louder
+	// and safer than silently accepting a string we would have to guess at.
+	//
+	// There is no tls_ciphers_v13 counterpart because Go does not permit TLS 1.3
+	// suite selection at all: crypto/tls ignores CipherSuites for 1.3 and always
+	// offers its three AEAD suites. C's equivalent knob defaults to
+	// TLS_AES_256_GCM_SHA384, which Go offers, so the negotiated result agrees
+	// on the default path. Conformance: docs/logsrvd-reference/ CONF-033.
+	TLSCiphersV12 []string      `yaml:"tls_ciphers_v12"`
 	ServerID      string        `yaml:"server_id"`
 	IdleTimeout   time.Duration `yaml:"idle_timeout"`
 	// ServerTimeout bounds writes to the client and the TLS handshake, mirroring
@@ -494,6 +552,9 @@ func Validate(cfg *Config) error {
 	}
 	if _, err := TLSVersion(cfg.Server.TLSMinVersion); err != nil {
 		return fmt.Errorf("server.%w", err)
+	}
+	if _, err := CipherSuites(cfg.Server.TLSCiphersV12); err != nil {
+		return fmt.Errorf("server.tls_ciphers_v12: %w", err)
 	}
 	if _, err := TLSVersion(cfg.Relay.TLSMinVersion); err != nil {
 		return fmt.Errorf("relay.%w", err)

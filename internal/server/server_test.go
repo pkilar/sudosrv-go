@@ -88,7 +88,7 @@ func shutdown(srv *Server) {
 		cancel()
 	}
 	for _, l := range srv.listeners {
-		_ = l.Close()
+		_ = l.ln.Close()
 	}
 	done := make(chan struct{})
 	go func() { srv.waitGroup.Wait(); close(done) }()
@@ -100,6 +100,24 @@ func shutdown(srv *Server) {
 		// called from t.Cleanup paths where t.Fatal is a no-op.
 		fmt.Fprintln(os.Stderr, "test shutdown timed out waiting for goroutines")
 	}
+}
+
+// stopServer cancels a server and releases any listener it holds.
+//
+// t.Cleanup(srv.cancel) alone is no longer enough: reload() now binds the
+// configured addresses, so a test that reloads a server it never Start()ed
+// still ends up with live accept loops. cancel() does not unblock a goroutine
+// parked in Accept -- only closing the listener does -- so goleak fails the
+// package without this.
+func stopServer(t *testing.T, srv *Server) {
+	t.Helper()
+	t.Cleanup(func() {
+		srv.cancel()
+		for _, l := range srv.listeners {
+			_ = l.ln.Close()
+		}
+		srv.waitGroup.Wait()
+	})
 }
 
 func newTestServer(t *testing.T, cfg *config.Config) *Server {
@@ -137,7 +155,7 @@ func TestNewServer_ConnSemaphoreCreation(t *testing.T) {
 				},
 			}
 			srv := newTestServer(t, cfg)
-			t.Cleanup(srv.cancel)
+			stopServer(t, srv)
 			if tt.wantSemNil {
 				if srv.connSem != nil {
 					t.Errorf("connSem: got non-nil for MaxConnections=%d, want nil", tt.maxConnections)
@@ -307,7 +325,7 @@ func TestStart_PlainListenerLifecycle(t *testing.T) {
 	if len(srv.listeners) != 1 {
 		t.Fatalf("listeners: got %d, want 1", len(srv.listeners))
 	}
-	addr := srv.listeners[0].Addr().String()
+	addr := srv.listeners[0].ln.Addr().String()
 
 	// Verify the listener is actually accepting.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -338,7 +356,7 @@ func TestStart_TLSListenerLifecycle(t *testing.T) {
 	if len(srv.listeners) != 1 {
 		t.Fatalf("listeners: got %d, want 1", len(srv.listeners))
 	}
-	addr := srv.listeners[0].Addr().String()
+	addr := srv.listeners[0].ln.Addr().String()
 
 	// TLS dial; self-signed cert so we skip verification.
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
@@ -394,7 +412,7 @@ func TestAcceptLoop_RejectsOverCap(t *testing.T) {
 	}
 	defer shutdown(srv)
 
-	addr := srv.listeners[0].Addr().String()
+	addr := srv.listeners[0].ln.Addr().String()
 
 	// First connection: accepted, semaphore taken. Hold it open so the
 	// connection-handler goroutine keeps the slot.
@@ -468,7 +486,7 @@ local_storage:
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	t.Cleanup(srv.cancel)
+	stopServer(t, srv)
 
 	// Now write a config with an invalid mode so Validate fails. (We can't
 	// test "no listen address" because LoadConfig fills in the default.)
@@ -511,7 +529,7 @@ local_storage:
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	t.Cleanup(srv.cancel)
+	stopServer(t, srv)
 
 	// Replace file content with malformed YAML.
 	malformed := "server:\n  listen_address: [a, b\n  not yaml"
@@ -555,7 +573,7 @@ local_storage:
 	if err != nil {
 		t.Fatalf("NewServer() failed: %v", err)
 	}
-	t.Cleanup(srv.cancel)
+	stopServer(t, srv)
 
 	// Verify initial state
 	if logLevel.Level() != slog.LevelInfo {
@@ -690,17 +708,8 @@ local_storage:
   log_directory: "/tmp/test-logs"
 `,
 		},
-		{
-			name: "listen address",
-			update: `server:
-  mode: "local"
-  listen_address: "127.0.0.1:40404"
-  server_id: "Changed"
-  max_connections: 10
-local_storage:
-  log_directory: "/tmp/test-logs"
-`,
-		},
+		// listen_address deliberately absent: it is now reconciled at runtime
+		// rather than refused. See TestReload_RebindsListeners.
 		{
 			name: "max connections",
 			update: `server:
@@ -721,7 +730,7 @@ local_storage:
 			if err != nil {
 				t.Fatalf("NewServer: %v", err)
 			}
-			t.Cleanup(srv.cancel)
+			stopServer(t, srv)
 
 			if err := os.WriteFile(configPath, []byte(tt.update), 0600); err != nil {
 				t.Fatalf("write update: %v", err)

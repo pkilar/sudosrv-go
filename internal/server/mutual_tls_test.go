@@ -94,7 +94,7 @@ func startTLSServer(t *testing.T, certPath, keyPath, caPath string, checkPeer bo
 	if err := srv.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	return srv, srv.listeners[0].Addr().String()
+	return srv, srv.listeners[0].ln.Addr().String()
 }
 
 // serverRoots trusts the server's own self-signed certificate, so these tests

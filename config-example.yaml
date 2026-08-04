@@ -12,6 +12,16 @@ server:
   # idle_timeout: 30m
   # tls_check_peer: false       # true = require and verify a client certificate
   # tls_cacert_file: "ca.pem"   # CA bundle for client certs; empty = system trust store
+  # tls_ciphers_v12:            # TLS 1.2 suites by IANA name; unset = Go's default
+  #   - "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+  #   - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+  # NOTE: not an OpenSSL cipher string -- "HIGH:!aNULL" is not accepted. There is
+  # no tls_ciphers_v13: Go does not allow TLS 1.3 suite selection.
+  #
+  # SIGHUP applies changes to the listen addresses and to every tls_* setting
+  # above without dropping established connections. Certificates renewed IN PLACE
+  # (certbot, cert-manager) need no signal at all -- the key pair is re-read per
+  # handshake.
   # server_timeout: 30s          # bounds writes to the client and the TLS
   #                              # handshake (NOT an idle deadline). 0 disables.
   server_operational_log_level: "debug"
