@@ -418,7 +418,7 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 	// produced, and log_id must name the directory that really exists. C does
 	// the same, setting evlog->iolog_path from the buffer iolog_mkpath rewrote
 	// (logsrvd/iolog_writer.c:622-630).
-	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.DirPermissions))
+	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.EffectiveDirMode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session directory: %w", err)
 	}
@@ -446,7 +446,11 @@ func NewSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *config.
 
 	// Initialize password filter if enabled
 	if cfg.PasswordFilter {
-		session.passwordFilter = NewPasswordFilter()
+		filter, err := NewPasswordFilterWithPatterns(cfg.PassPromptRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build password filter: %w", err)
+		}
+		session.passwordFilter = filter
 		slog.Debug("Password filtering enabled for session", "log_id", logID)
 	}
 
@@ -484,7 +488,7 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	}
 	// Create the directory before deriving log_id; see NewSession for why the
 	// order matters when iolog_file is an mkdtemp template.
-	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.DirPermissions))
+	sessionDir, err = createSessionDir(sessionDir, os.FileMode(cfg.EffectiveDirMode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event session directory: %w", err)
 	}
@@ -520,7 +524,7 @@ func NewEventSession(sessionUUID uuid.UUID, acceptMsg *pb.AcceptMessage, cfg *co
 	submitTime := time.Unix(acceptMsg.SubmitTime.TvSec, int64(acceptMsg.SubmitTime.TvNsec))
 	event.logMeta["submit_time"] = submitTime.UTC().Format(time.RFC3339Nano)
 
-	if err := writeSessionFileAt(root, fileUUID, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.FilePermissions)); err != nil {
+	if err := writeSessionFileAt(root, fileUUID, []byte(sessionUUID.String()+"\n"), os.FileMode(cfg.EffectiveFileMode())); err != nil {
 		return nil, fmt.Errorf("failed to write event uuid file: %w", err)
 	}
 	if err := event.updateLogJSON(); err != nil {
@@ -636,7 +640,7 @@ func (s *EventSession) updateLogJSON() (err error) {
 	}
 	data = append(data, '\n')
 
-	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
+	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.EffectiveFileMode()))
 	if err != nil {
 		return fmt.Errorf("failed to open event log.json tempfile: %w", err)
 	}
@@ -897,11 +901,11 @@ func getNextSeq(baseDir string, cfg *config.LocalStorageConfig) (string, error) 
 	seqFile := filepath.Join(baseDir, "seq")
 
 	// Ensure the base directory exists
-	if err := os.MkdirAll(baseDir, os.FileMode(cfg.DirPermissions)); err != nil {
+	if err := os.MkdirAll(baseDir, os.FileMode(cfg.EffectiveDirMode())); err != nil {
 		return "", fmt.Errorf("could not create base directory %s: %w", baseDir, err)
 	}
 
-	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, os.FileMode(cfg.FilePermissions))
+	f, err := os.OpenFile(seqFile, os.O_RDWR|os.O_CREATE, os.FileMode(cfg.EffectiveFileMode()))
 	if err != nil {
 		return "", fmt.Errorf("could not open sequence file %s: %w", seqFile, err)
 	}
@@ -1171,7 +1175,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	// s.root refuses to traverse a symlink at any component, which is what
 	// defends against a local attacker pre-planting a symlink inside a
 	// predictable sessionDir.
-	if err := writeSessionFileAt(s.root, fileUUID, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeSessionFileAt(s.root, fileUUID, []byte(s.sessionUUID.String()+"\n"), os.FileMode(s.config.EffectiveFileMode())); err != nil {
 		return fmt.Errorf("failed to write uuid file: %w", err)
 	}
 	slog.Debug("Created UUID file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileUUID))
@@ -1188,7 +1192,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 		sanitizeLogSummaryField(infoMap["submitcwd"], false),
 		sanitizeLogSummaryField(infoMap["command"], false),
 	)
-	if err := writeSessionFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.FilePermissions)); err != nil {
+	if err := writeSessionFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.EffectiveFileMode())); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
 	}
 	slog.Debug("Created log summary file", "log_id", s.logID, "path", filepath.Join(s.sessionDir, fileLog))
@@ -1206,7 +1210,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 	// session, so the O_TRUNC open of a re-used directory fails EACCES instead.
 	// C restores the write bit and retries (lib/iolog/iolog_openat.c:58-67).
 	// Conformance: docs/logsrvd-reference/ IOLOG-049.
-	s.timingFile, err = openSessionFileAt(s.root, fileTiming, os.O_APPEND|os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	s.timingFile, err = openSessionFileAt(s.root, fileTiming, os.O_APPEND|os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.EffectiveFileMode()))
 	if err != nil {
 		return err
 	}
@@ -1244,7 +1248,7 @@ func (s *Session) ensureStreamFile(streamName string) error {
 	// streams through iolog_openat too (iolog_open.c:83), so a stale read-only
 	// stream is made writable and truncated, not treated as fatal.
 	// Conformance: docs/logsrvd-reference/ IOLOG-049.
-	f, err := openSessionFileAt(s.root, streamInfo.filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.FilePermissions))
+	f, err := openSessionFileAt(s.root, streamInfo.filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(s.config.EffectiveFileMode()))
 	if err != nil {
 		return err
 	}
@@ -1279,7 +1283,7 @@ func (s *Session) updateLogJSON() (err error) {
 	data = append(data, '\n')
 
 	// Clobber any stale tempfile from a prior interrupted write.
-	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.FilePermissions))
+	f, err := s.root.OpenFile(fileLogJSONTmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(s.config.EffectiveFileMode()))
 	if err != nil {
 		return fmt.Errorf("failed to open log.json tempfile: %w", err)
 	}
@@ -1324,16 +1328,30 @@ func (s *Session) writeIoEntry(streamName string, delay *pb.TimeSpec, data []byt
 		return nil, fmt.Errorf("failed to create stream file %s: %w", streamName, err)
 	}
 
-	// Apply password filtering if enabled.
-	// C sudo_logsrvd runs filtering on both TTY and non-TTY streams:
-	// prompt detection on ttyout/stdout, input masking on ttyin/stdin.
+	// Apply password filtering if enabled -- to the TTY streams ONLY.
+	//
+	// C's iolog_pwfilt_run switches on exactly IO_EVENT_TTYOUT and IO_EVENT_TTYIN;
+	// stdin, stdout and stderr fall through the switch untouched
+	// (lib/iolog/iolog_filter.c:189-241). Its rationale, verbatim from the comment
+	// at :182-187: echo can only be disabled when a tty is present, and filtering
+	// the input log for a prompt that appeared on the output log is pointless.
+	//
+	// This used to also run stdout -> stdin, described in a comment as matching C
+	// when it did the opposite. The cost was corrupting logs that are not secrets:
+	// with plain `log_input`/`log_output` and no tty, piping a file into a sudo'd
+	// filter (`sudo tee`, `sudo mysql`, config management piping a template) masks
+	// the remainder of a line the moment the piped CONTENT happens to contain
+	// something prompt-shaped. What it bought in exchange was thin -- with no tty
+	// on the session, stdin is a pipe or a file rather than a human typing, so any
+	// secret in it was already at rest somewhere else.
+	// Conformance: docs/logsrvd-reference/ IOLOG-039.
+	// Guarded by TestPasswordFilterIgnoresNonTTYStreams.
 	dataToWrite := data
 	if s.passwordFilter != nil {
-		if streamName == "ttyout" || streamName == "stdout" {
-			// Check output for password prompts
+		switch streamName {
+		case "ttyout":
 			s.passwordFilter.CheckOutput(data)
-		} else if streamName == "ttyin" || streamName == "stdin" {
-			// Filter input if password prompt was detected
+		case "ttyin":
 			dataToWrite = s.passwordFilter.FilterInput(data)
 			if len(dataToWrite) != len(data) || string(dataToWrite) != string(data) {
 				slog.Debug("Password input masked", "log_id", s.logID, "original_len", len(data), "masked_len", len(dataToWrite))
@@ -1635,9 +1653,9 @@ func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (i
 // against a symlink swap between finalize and restart.
 func openForRestartAt(root *os.Root, name string, cfg *config.LocalStorageConfig, seek bool, off int64) (*os.File, error) {
 	if !seek {
-		return root.OpenFile(name, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+		return root.OpenFile(name, os.O_APPEND|os.O_WRONLY, os.FileMode(cfg.EffectiveFileMode()))
 	}
-	f, err := root.OpenFile(name, os.O_WRONLY, os.FileMode(cfg.FilePermissions))
+	f, err := root.OpenFile(name, os.O_WRONLY, os.FileMode(cfg.EffectiveFileMode()))
 	if err != nil {
 		return nil, err
 	}
@@ -1803,7 +1821,11 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 
 	// Initialize password filter if enabled
 	if cfg.PasswordFilter {
-		session.passwordFilter = NewPasswordFilter()
+		filter, err := NewPasswordFilterWithPatterns(cfg.PassPromptRegex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build password filter: %w", err)
+		}
+		session.passwordFilter = filter
 	}
 
 	// Record restart event in log.json

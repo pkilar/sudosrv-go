@@ -19,6 +19,24 @@ server:
 # Settings for when server.mode is "local"
 local_storage:
   log_directory: "/tmp/gosudo-io"
+  # iolog_mode: 0600            # single knob, as in sudo_logsrvd. The file mode
+  #                             # and directory mode are DERIVED from it: owner
+  #                             # read+write are always forced on, only the
+  #                             # group/other read and write bits are honored,
+  #                             # and directory execute bits are re-derived.
+  #                             # 0600 -> file 0600, dir 0700 (the default);
+  #                             # 0640 -> file 0640, dir 0750.
+  # dir_permissions / file_permissions are DEPRECATED overrides kept so existing
+  # configs keep loading. Setting either pins that one mode and warns at startup.
+  #
+  # passprompt_regex REPLACES the built-in multi-locale prompt set rather than
+  # adding to it, matching sudo_logsrvd. Leave it unset to keep the built-ins.
+  # A pattern that does not compile, or is longer than 1024 bytes, fails startup.
+  # Only the ttyin/ttyout streams are filtered -- stdin/stdout/stderr are logged
+  # verbatim, as in sudo_logsrvd.
+  # passprompt_regex:
+  #   - "[Pp]assword[: ]*"
+  #   - "(?i)enter unlock code"
 
 # Settings for when server.mode is "relay". server.mode is the only switch that
 # turns relaying on: filling this block in while server.mode is "local" is now a

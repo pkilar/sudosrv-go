@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -168,13 +169,82 @@ type APIConfig struct {
 
 // LocalStorageConfig holds settings for local storage mode.
 type LocalStorageConfig struct {
-	LogDirectory    string `yaml:"log_directory"`    // Base directory, used if iolog_dir is not set
-	IologDir        string `yaml:"iolog_dir"`        // sudoers-style I/O log directory path
-	IologFile       string `yaml:"iolog_file"`       // sudoers-style I/O log session file name
-	DirPermissions  uint32 `yaml:"dir_permissions"`  // Directory permissions (octal, e.g., 0750)
-	FilePermissions uint32 `yaml:"file_permissions"` // File permissions (octal, e.g., 0640)
+	LogDirectory string `yaml:"log_directory"` // Base directory, used if iolog_dir is not set
+	IologDir     string `yaml:"iolog_dir"`     // sudoers-style I/O log directory path
+	IologFile    string `yaml:"iolog_file"`    // sudoers-style I/O log session file name
+	// IologMode is C's single [iolog] iolog_mode knob (default 0600). Both the
+	// file mode and the directory mode are DERIVED from it by DeriveIologModes
+	// rather than configured independently -- see that function for the rule.
+	// Conformance: docs/logsrvd-reference/ CONF-055.
+	IologMode uint32 `yaml:"iolog_mode"`
+	// DirPermissions and FilePermissions are pre-CONF-055 overrides, retained
+	// because the strict decoder (see unmarshalConfig) turns a removed key into a
+	// startup failure for every config that still sets one. Zero means "unset,
+	// derive from IologMode"; a non-zero value wins for that dimension alone and
+	// logs a deprecation warning. Read the effective values through
+	// EffectiveDirMode/EffectiveFileMode, never these fields directly.
+	DirPermissions  uint32 `yaml:"dir_permissions"`  // deprecated; overrides the derived directory mode
+	FilePermissions uint32 `yaml:"file_permissions"` // deprecated; overrides the derived file mode
 	Compress        bool   `yaml:"compress"`         // Enable gzip compression for I/O log files
 	PasswordFilter  bool   `yaml:"password_filter"`  // Enable regex-based password filtering
+	// PassPromptRegex replaces the built-in password-prompt pattern set when
+	// non-empty -- it does not add to it, matching C, where the first
+	// passprompt_regex line discards the default and later lines append
+	// (logsrvd/logsrvd_conf.c:507-519). An empty list keeps the built-ins.
+	// Conformance: docs/logsrvd-reference/ CONF-057.
+	PassPromptRegex []string `yaml:"passprompt_regex"`
+}
+
+// MaxPassPromptRegexLen is C's ceiling on a single passprompt_regex pattern
+// (lib/util/regex.c:143-188, "regular expression too large").
+const MaxPassPromptRegexLen = 1024
+
+// DeriveIologModes reproduces C's derivation of the file and directory modes
+// from the single iolog_mode setting (lib/iolog/iolog_conf.c:110-128):
+//
+//	iolog_filemode = S_IRUSR|S_IWUSR;
+//	iolog_filemode |= mode & (S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+//	iolog_dirmode = iolog_filemode | S_IXUSR;
+//	if (iolog_dirmode & (S_IRGRP|S_IWGRP)) iolog_dirmode |= S_IXGRP;
+//	if (iolog_dirmode & (S_IROTH|S_IWOTH)) iolog_dirmode |= S_IXOTH;
+//
+// Three consequences worth stating, because they are not what a reader expects
+// from a mode-like setting: owner read+write are forced on regardless of the
+// configured value; only the group/other READ and WRITE bits are honored, so
+// setuid/setgid/sticky and any configured execute bits are discarded; and the
+// directory execute bits are re-derived from the surviving read/write bits
+// rather than taken from the input. iolog_mode 0750 therefore yields file 0640
+// and directory 0750, and the default 0600 yields file 0600 and directory 0700.
+func DeriveIologModes(mode uint32) (fileMode, dirMode uint32) {
+	fileMode = 0600 | (mode & 0066)
+	dirMode = fileMode | 0100
+	if dirMode&0060 != 0 {
+		dirMode |= 0010
+	}
+	if dirMode&0006 != 0 {
+		dirMode |= 0001
+	}
+	return fileMode, dirMode
+}
+
+// EffectiveFileMode is the mode session files are created with: the deprecated
+// file_permissions override when set, otherwise the value derived from iolog_mode.
+func (c *LocalStorageConfig) EffectiveFileMode() uint32 {
+	if c.FilePermissions != 0 {
+		return c.FilePermissions
+	}
+	fileMode, _ := DeriveIologModes(c.IologMode)
+	return fileMode
+}
+
+// EffectiveDirMode is the mode session directories are created with: the
+// deprecated dir_permissions override when set, otherwise the derived value.
+func (c *LocalStorageConfig) EffectiveDirMode() uint32 {
+	if c.DirPermissions != 0 {
+		return c.DirPermissions
+	}
+	_, dirMode := DeriveIologModes(c.IologMode)
+	return dirMode
 }
 
 // LoadConfig reads the configuration from a YAML file. A missing file is an
@@ -232,13 +302,17 @@ func defaultConfig() *Config {
 			TLSMinVersion:        "1.3", // Secure default; "1.2" available for legacy upstreams
 		},
 		LocalStorage: LocalStorageConfig{
-			LogDirectory:    "/var/log/gosudo-io",
-			IologDir:        "%{LIVEDIR}/%{user}", // Default sudoers-style path
-			IologFile:       "%{seq}",             // Default sudoers-style file name
-			DirPermissions:  0750,                 // Default directory permissions
-			FilePermissions: 0640,                 // Default file permissions
-			Compress:        false,                // Compression disabled by default for compatibility
-			PasswordFilter:  true,                 // Password filtering enabled by default for security
+			LogDirectory: "/var/log/gosudo-io",
+			IologDir:     "%{LIVEDIR}/%{user}", // Default sudoers-style path
+			IologFile:    "%{seq}",             // Default sudoers-style file name
+			// C's default (logsrvd/logsrvd_conf.c:471-485), deriving file 0600 and
+			// directory 0700 -- owner-only. The deprecated overrides stay zero so
+			// EffectiveFileMode/EffectiveDirMode fall through to the derivation.
+			IologMode:       0600,
+			DirPermissions:  0,     // unset; derived from IologMode
+			FilePermissions: 0,     // unset; derived from IologMode
+			Compress:        false, // Compression disabled by default for compatibility
+			PasswordFilter:  true,  // Password filtering enabled by default for security
 		},
 	}
 }
@@ -358,12 +432,6 @@ func applyZeroValueDefaults(cfg *Config) {
 	if cfg.Relay.TLSMinVersion == "" {
 		cfg.Relay.TLSMinVersion = "1.3"
 	}
-	if cfg.LocalStorage.DirPermissions == 0 {
-		cfg.LocalStorage.DirPermissions = 0750
-	}
-	if cfg.LocalStorage.FilePermissions == 0 {
-		cfg.LocalStorage.FilePermissions = 0640
-	}
 	if cfg.Relay.ConnectTimeout == 0 {
 		cfg.Relay.ConnectTimeout = 5 * time.Second
 	}
@@ -377,8 +445,23 @@ func applyZeroValueDefaults(cfg *Config) {
 	// YAML 1.2 (gopkg.in/yaml.v3) treats 0750 as decimal 750, not octal.
 	// Auto-correct values where all digits are 0-7, which strongly indicates
 	// the user intended octal (e.g., decimal 750 → octal 0750 = 488).
+	//
+	// iolog_mode needs no zero-value default above: 0 derives to file 0600 and
+	// directory 0700 because DeriveIologModes forces owner read+write on, which
+	// is exactly the documented default. A yaml-zeroed iolog_mode is therefore
+	// indistinguishable from an omitted one, by construction rather than by luck.
+	cfg.LocalStorage.IologMode = reinterpretDecimalAsOctal(cfg.LocalStorage.IologMode, "iolog_mode")
 	cfg.LocalStorage.DirPermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.DirPermissions, "dir_permissions")
 	cfg.LocalStorage.FilePermissions = reinterpretDecimalAsOctal(cfg.LocalStorage.FilePermissions, "file_permissions")
+
+	if cfg.LocalStorage.DirPermissions != 0 {
+		slog.Warn("local_storage.dir_permissions is deprecated; set local_storage.iolog_mode instead and let the directory mode be derived from it",
+			"dir_permissions", fmt.Sprintf("0%o", cfg.LocalStorage.DirPermissions))
+	}
+	if cfg.LocalStorage.FilePermissions != 0 {
+		slog.Warn("local_storage.file_permissions is deprecated; set local_storage.iolog_mode instead and let the file mode be derived from it",
+			"file_permissions", fmt.Sprintf("0%o", cfg.LocalStorage.FilePermissions))
+	}
 }
 
 // Validate performs structural and security validation on a loaded Config.
@@ -447,6 +530,9 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Server.Mode == "local" {
 		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
+			return err
+		}
+		if err := ValidatePassPromptRegex(cfg.LocalStorage.PassPromptRegex); err != nil {
 			return err
 		}
 	}
@@ -520,25 +606,49 @@ func validateAuthTokenFile(path string) error {
 // session transcripts to unprivileged users. Returns an error rather than a
 // warning — misconfigured permissions are a security incident waiting to
 // happen and should block startup.
+// It validates the EFFECTIVE modes, so it covers a value that arrived via
+// iolog_mode as well as one set through the deprecated overrides.
 func ValidatePermissions(cfg *LocalStorageConfig) error {
+	dirMode, fileMode := cfg.EffectiveDirMode(), cfg.EffectiveFileMode()
 	// World-writable (o+w, 0002) on any session artefact lets another local
 	// user tamper with audit logs.
-	if cfg.DirPermissions&0002 != 0 {
-		return fmt.Errorf("dir_permissions 0%o is world-writable; refusing to start", cfg.DirPermissions)
+	if dirMode&0002 != 0 {
+		return fmt.Errorf("effective directory mode 0%o is world-writable; refusing to start", dirMode)
 	}
-	if cfg.FilePermissions&0002 != 0 {
-		return fmt.Errorf("file_permissions 0%o is world-writable; refusing to start", cfg.FilePermissions)
+	if fileMode&0002 != 0 {
+		return fmt.Errorf("effective file mode 0%o is world-writable; refusing to start", fileMode)
 	}
 	// World-readable (o+r, 0004) on file permissions exposes sudo transcripts
 	// (which may contain sensitive command output) to any local user.
-	if cfg.FilePermissions&0004 != 0 {
-		return fmt.Errorf("file_permissions 0%o is world-readable; sudo transcripts may contain secrets — refusing to start", cfg.FilePermissions)
+	if fileMode&0004 != 0 {
+		return fmt.Errorf("effective file mode 0%o is world-readable; sudo transcripts may contain secrets — refusing to start", fileMode)
 	}
 	// Directories without owner-exec are not traversable; this catches the
 	// classic `dir_permissions: 644` mistake (auto-octalled from decimal),
-	// which would otherwise produce inscrutable runtime errors.
-	if cfg.DirPermissions&0100 == 0 {
-		return fmt.Errorf("dir_permissions 0%o lacks owner-exec bit; directories would not be traversable", cfg.DirPermissions)
+	// which would otherwise produce inscrutable runtime errors. The derivation
+	// always sets this bit, so only an explicit dir_permissions can trip it.
+	if dirMode&0100 == 0 {
+		return fmt.Errorf("effective directory mode 0%o lacks owner-exec bit; directories would not be traversable", dirMode)
+	}
+	return nil
+}
+
+// ValidatePassPromptRegex compiles every configured prompt pattern so a bad one
+// fails the config load rather than silently disabling prompt detection at
+// runtime, which is C's behavior (any compilation failure aborts the apply,
+// logsrvd/logsrvd_conf.c:1750-1754).
+//
+// Go's regexp handles a leading (?i) natively, so C's convention of writing
+// "(?i)foo" -- optionally after a leading "^" -- to request case-insensitivity
+// needs no special handling here; it is accepted as written.
+func ValidatePassPromptRegex(patterns []string) error {
+	for _, p := range patterns {
+		if len(p) > MaxPassPromptRegexLen {
+			return fmt.Errorf("passprompt_regex pattern is %d bytes; the maximum is %d", len(p), MaxPassPromptRegexLen)
+		}
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("passprompt_regex %q: %w", p, err)
+		}
 	}
 	return nil
 }

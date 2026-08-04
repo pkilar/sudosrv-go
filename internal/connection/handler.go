@@ -737,7 +737,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	sessID := uuidStr[:6]
 	rejectDir := filepath.Join(h.config.LocalStorage.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6])
 
-	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.DirPermissions)); err != nil {
+	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.EffectiveDirMode())); err != nil {
 		slog.Error("Failed to create reject event directory", "error", err, "path", rejectDir)
 		metrics.Global.IncrementMessageErrors()
 		return nil, nil
@@ -770,7 +770,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	}
 
 	logJSONPath := filepath.Join(rejectDir, "log.json")
-	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.FilePermissions)); err != nil {
+	if err := os.WriteFile(logJSONPath, data, os.FileMode(h.config.LocalStorage.EffectiveFileMode())); err != nil {
 		slog.Error("Failed to write reject event log", "error", err, "path", logJSONPath)
 		metrics.Global.IncrementMessageErrors()
 		return nil, nil

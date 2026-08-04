@@ -1538,7 +1538,14 @@ func TestTimingFileIntegerFormat(t *testing.T) {
 	}
 }
 
-func TestPasswordFilteringStdoutStdin(t *testing.T) {
+// TestPasswordFilterIgnoresNonTTYStreams pins IOLOG-039: C's iolog_pwfilt_run
+// switches only on IO_EVENT_TTYOUT/TTYIN, so a prompt on stdout must NOT arm
+// masking of stdin. This assertion is deliberately the inverse of what this test
+// checked before: masking stdin off a stdout prompt corrupted legitimately
+// logged input whenever piped content happened to look like a prompt, and bought
+// little, because a session with no tty has a pipe or a file on stdin rather
+// than a human typing.
+func TestPasswordFilterIgnoresNonTTYStreams(t *testing.T) {
 	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
 	tmpDir := t.TempDir()
 	storageCfg := &config.LocalStorageConfig{
@@ -1571,7 +1578,7 @@ func TestPasswordFilteringStdoutStdin(t *testing.T) {
 		t.Fatalf("HandleClientMessage(StdoutBuf) failed: %v", err)
 	}
 
-	// Send password via stdin (non-TTY) — should be masked
+	// Send the secret via stdin (non-TTY) — must be written through untouched
 	stdinMsg := &pb.ClientMessage{
 		Type: &pb.ClientMessage_StdinBuf{
 			StdinBuf: &pb.IoBuffer{
@@ -1585,19 +1592,63 @@ func TestPasswordFilteringStdoutStdin(t *testing.T) {
 		t.Fatalf("HandleClientMessage(StdinBuf) failed: %v", err)
 	}
 
-	// Verify stdin file contains masked data, not "secret"
 	sessDir := filepath.Join(tmpDir, "a1/b2/c3")
 	stdinContent, err := os.ReadFile(filepath.Join(sessDir, "stdin"))
 	if err != nil {
 		t.Fatalf("Failed to read stdin file: %v", err)
 	}
 
-	if strings.Contains(string(stdinContent), "secret") {
-		t.Errorf("stdin file contains unmasked password 'secret': %s", string(stdinContent))
+	if got := string(stdinContent); got != "secret\n" {
+		t.Errorf("stdin must be logged verbatim when the prompt appeared on stdout; got %q, want %q", got, "secret\n")
 	}
-	// Should contain asterisks and the newline
-	if !strings.Contains(string(stdinContent), "******") {
-		t.Errorf("Expected masked content with asterisks in stdin, got: %q", string(stdinContent))
+}
+
+// TestPasswordFilterMasksTTYStreams is the positive half of IOLOG-039: the tty
+// path, which is the one C does filter, must still mask.
+func TestPasswordFilterMasksTTYStreams(t *testing.T) {
+	sessionUUID := uuid.MustParse("a1b2c3d4-e5f6-4a1b-8c3d-9e8f7a6b5c4d")
+	tmpDir := t.TempDir()
+	storageCfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		DirPermissions:  0755,
+		FilePermissions: 0644,
+		PasswordFilter:  true,
+	}
+
+	session, err := NewSession(sessionUUID, createTestAcceptMessage(), storageCfg)
+	if err != nil {
+		t.Fatalf("NewSession() failed: %v", err)
+	}
+	defer session.Close()
+
+	_, _ = session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: createTestAcceptMessage()},
+	})
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 100000000},
+			Data:  []byte("Password: "),
+		}},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(TtyoutBuf) failed: %v", err)
+	}
+
+	if _, err := session.HandleClientMessage(&pb.ClientMessage{
+		Type: &pb.ClientMessage_TtyinBuf{TtyinBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 0, TvNsec: 200000000},
+			Data:  []byte("secret\n"),
+		}},
+	}); err != nil {
+		t.Fatalf("HandleClientMessage(TtyinBuf) failed: %v", err)
+	}
+
+	ttyinContent, err := os.ReadFile(filepath.Join(tmpDir, "a1/b2/c3", "ttyin"))
+	if err != nil {
+		t.Fatalf("Failed to read ttyin file: %v", err)
+	}
+	if got := string(ttyinContent); got != "******\n" {
+		t.Errorf("ttyin must be masked after a ttyout prompt; got %q, want %q", got, "******\n")
 	}
 }
 
