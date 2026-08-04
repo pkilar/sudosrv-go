@@ -10,6 +10,8 @@ server:
   # ignore_iolog_errors defaults to false), so when this fires on an interactive
   # session the user's shell is killed, not just its log truncated.
   # idle_timeout: 30m
+  # tls_check_peer: false       # true = require and verify a client certificate
+  # tls_cacert_file: "ca.pem"   # CA bundle for client certs; empty = system trust store
   # server_timeout: 30s          # bounds writes to the client and the TLS
   #                              # handshake (NOT an idle deadline). 0 disables.
   server_operational_log_level: "debug"

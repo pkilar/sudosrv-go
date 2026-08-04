@@ -139,6 +139,29 @@ func (s *Server) Start() error {
 			GetCertificate: certReloader.GetCertificate,
 			MinVersion:     minVer,
 		}
+		// Mutual TLS. RequireAndVerifyClientCert is the pair of OpenSSL bits C
+		// sets when tls_checkpeer is on -- SSL_VERIFY_PEER together with
+		// SSL_VERIFY_FAIL_IF_NO_PEER_CERT (logsrvd/logsrvd.c:1451-1462) -- so a
+		// client presenting NO certificate is rejected during the handshake
+		// rather than merely left unverified. Anything weaker (VerifyClientCertIfGiven)
+		// would let a peer opt out of authentication by simply staying silent,
+		// which is the whole failure this setting exists to prevent.
+		//
+		// A nil ClientCAs means the platform trust store, matching C's fallback
+		// to SSL_CTX_set_default_verify_paths when no bundle is named.
+		//
+		// Conformance: docs/logsrvd-reference/ TLS-015, TLS-007, CONF-035.
+		if cfg.Server.TLSCheckPeer {
+			pool, err := loadCAPool(cfg.Server.TLSCACertFile)
+			if err != nil {
+				s.closeListeners()
+				return fmt.Errorf("server.tls_cacert_file: %w", err)
+			}
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			tlsConfig.ClientCAs = pool
+			slog.Info("Client certificate authentication enabled",
+				"ca_bundle", cmpOrSystem(cfg.Server.TLSCACertFile))
+		}
 		tlsBase, err := listenTCP(s.ctx, cfg.Server.ListenAddressTLS)
 		if err != nil {
 			s.closeListeners()
@@ -476,4 +499,13 @@ func (s *Server) logMetricsPeriodically() {
 			)
 		}
 	}
+}
+
+// cmpOrSystem renders an empty CA path as the platform trust store, so the
+// startup log says which trust anchor set is actually in force.
+func cmpOrSystem(path string) string {
+	if path == "" {
+		return "system trust store"
+	}
+	return path
 }
