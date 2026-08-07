@@ -1,0 +1,105 @@
+# Example configuration for logsh, the recording login shell.
+#
+# Install at /etc/logsh/logsh.yaml, owned by root, mode 0644.
+#
+# 0644 and not 0600: logsh runs as the LOGGING-IN USER, not as root -- it is that
+# account's login shell, exec'd by sshd after privileges have already been
+# dropped. It must be able to read this file. Root-owned and not group- or
+# world-writable is what matters; /etc/logsh itself must satisfy the same rule,
+# or the file could be swapped by rename(2) without ever being written to.
+#
+# Validate before deploying:   logsh -validate -config /etc/logsh/logsh.yaml
+# Check the host can run it:   logsh -selftest -config /etc/logsh/logsh.yaml
+
+# Which invocation name stands for which real shell. logsh is a multi-call
+# binary: install /usr/sbin/lbash as a symlink to it and set that as an account's
+# shell in /etc/passwd.
+#
+# This map is an ALLOWLIST, not a naming convention. logsh does not infer a
+# target by stripping the leading "l"; only what appears here can be exec'd.
+shells:
+  lsh: /bin/sh
+  lbash: /bin/bash
+  lzsh: /bin/zsh
+  ldash: /bin/dash
+
+# Accounts whose sessions are recorded. Anything not listed here gets the real
+# shell with no recording and no log entry, which is what makes it safe to
+# install logsh fleet-wide before deciding whose sessions to record.
+#
+# An entry matches either the account name or its numeric uid. Use the uid form
+# for LDAP/SSSD accounts: logsh is a static binary, so os/user cannot consult NSS
+# and would never match such an account by name.
+record_users:
+  - root
+
+# Stream capture.
+#
+# READ THIS BEFORE RELYING ON log_ttyin: false. It does NOT mean "we do not
+# record what the user types". Terminal echo puts nearly every keystroke into the
+# ttyout stream regardless. Turning ttyin off only protects the moments when echo
+# is disabled -- which is to say, password prompts. Any notice shown to users
+# must say so.
+log_ttyout: true # session output (on by default)
+log_ttyin: false # session input  (off by default)
+
+# Non-interactive (no PTY) sessions -- scp, rsync, git-over-ssh, `ssh host cmd`.
+# All off by default: such sessions are recorded as a metadata-only record naming
+# the command, so a 10GB transfer does not produce a 10GB transcript.
+log_stdin: false
+log_stdout: false
+log_stderr: false
+
+# Push each buffer as it is produced rather than batching. Matches sudo's
+# iolog_flush.
+iolog_flush: true
+
+server:
+  # RECOMMENDED TOPOLOGY: point logsh at a sudosrv running locally in relay mode.
+  #
+  #   logsh (as user) --loopback--> sudosrv relay (as root) --mTLS--> central
+  #
+  # logsh cannot safely hold a TLS client key: it runs as the logging-in user, so
+  # any key it can read, that user can steal and use to forge or suppress audit
+  # records at the central server. The local relay owns the host credentials and
+  # the spool directory, both staying root-only.
+  upstream_host: "127.0.0.1:30343"
+  use_tls: false
+
+  # Only for a host whose credentials are genuinely user-readable anyway (a
+  # single-admin box, a lab). -validate warns when these are set.
+  # use_tls: true
+  # tls_cacert_file: /etc/logsh/ca.pem
+  # tls_cert_file: /etc/logsh/client.pem
+  # tls_key_file: /etc/logsh/client.key
+  # tls_min_version: "1.3"
+
+  connect_timeout: 5s
+  response_timeout: 30s
+
+  # Leave empty when using the loopback topology above: the local relay's own
+  # cache directory is the spool, and it is root-owned. Setting a path here means
+  # every recorded user must be able to write to it, and therefore to read each
+  # other's spooled transcripts.
+  journal_directory: ""
+
+# Refuse a session that cannot be recorded.
+#
+# This fires only when the local journal cannot be opened AND the server is
+# unreachable -- never on a transient network failure, which the store-and-
+# forward journal absorbs. A blip must not lock out a fleet.
+fail_closed: true
+
+# Break-glass: while this root-owned file exists, sessions proceed UNRECORDED
+# with a crit-priority syslog alert and a banner on the terminal.
+#
+# It is honoured only if root owns it and no one else can write it; otherwise any
+# user could switch off their own recording. A marker that fails those checks is
+# ignored and alerted about rather than silently treated as absent.
+#
+# This covers "the box is reachable but recording is broken". The complementary
+# path for "the box is not reachable" is a second uid-0 account with a plain
+# shell, key-only, gated to a bastion, alerting on every use -- that lives in
+# sshd_config, not here. Both must be drilled before rollout; untested
+# break-glass is not break-glass.
+break_glass_marker: /etc/logsh/bypass
