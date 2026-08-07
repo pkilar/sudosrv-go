@@ -13,6 +13,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/syslog"
@@ -78,11 +80,30 @@ func runShell(inv logshell.Invocation) int {
 		return passthrough(inv, shellPath)
 	}
 
-	// M2 replaces this with the PTY relay. Until then a recorded account is
-	// refused rather than passed through: silently running an unrecorded
-	// session for an account the operator explicitly listed would be an audit
-	// gap that looks exactly like success.
-	return refuse(cfg, inv, shellPath, "session recording is not implemented in this build")
+	// Interactive or not is decided by whether a terminal is attached, NEVER by
+	// whether "-c" was passed. `ssh -t host /bin/bash` supplies a command AND
+	// allocates a pty; keying off "-c" would classify it as non-interactive and
+	// hand the user a fully interactive, entirely unrecorded shell.
+	if !logshell.IsTerminal(os.Stdin.Fd()) {
+		// M4 replaces this with a metadata-only session.
+		return refuse(cfg, inv, shellPath,
+			"non-interactive session recording is not implemented in this build")
+	}
+
+	outcome, err := logshell.RunRecorded(context.Background(), cfg, inv, shellPath, logshell.StdTerminal())
+	if err != nil {
+		if errors.Is(err, logshell.ErrRecordingUnavailable) {
+			// No shell was ever started, so the failure policy still has a
+			// meaningful choice to make.
+			return refuse(cfg, inv, shellPath, err.Error())
+		}
+		// The shell ran. The audit gap has already happened and cannot be
+		// undone by refusing; the user's exit status is a fact they are owed.
+		// Report loudly and pass it through.
+		logshell.Alertf(syslog.LOG_CRIT,
+			"session for uid %d ran but was NOT durably recorded: %v", uid, err)
+	}
+	return outcome.ExitCode
 }
 
 // lookupUsername resolves uid to a name, or "" if it cannot.
