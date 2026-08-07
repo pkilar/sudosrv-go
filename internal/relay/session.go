@@ -4,21 +4,17 @@ package relay
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"math/rand/v2"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sudosrv/internal/config"
+	"sudosrv/internal/logsrvclient"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/sessions"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -31,7 +27,6 @@ import (
 )
 
 const (
-	initialReconnectInterval = time.Second
 	// FlushingSuffix is appended to a cache file while it is being flushed upstream.
 	// Exported so startup orphan recovery can identify mid-flush files.
 	FlushingSuffix = ".flushing"
@@ -69,7 +64,10 @@ const (
 // or abort ServerMessage. It is distinguished from every other flush failure
 // because it is the one that will never succeed on retry, so it terminates the
 // retry loop and dead-letters the journal instead of spinning on it.
-var ErrUpstreamRejected = errors.New("upstream rejected the session")
+//
+// Aliased from logsrvclient, which is where the sentinel is now raised, so that
+// errors.Is keeps matching whichever package a caller reaches for.
+var ErrUpstreamRejected = logsrvclient.ErrUpstreamRejected
 
 // Phase strings exposed via Session.LiveStats. Stored as package-level vars
 // because atomic.Pointer[string] requires a pointer; using `const` here would
@@ -460,25 +458,14 @@ func (s *Session) writeMessagesToCache() (completed bool) {
 	}
 }
 
-// maxBackoffExponent caps the math.Pow(2, n) input to keep backoff from
-// overflowing float64 into +Inf during infinite-reconnect runs. 2^62ns is
-// already ~146 years — well past any realistic maxInterval.
-const maxBackoffExponent = 62
+func (s *Session) calculateBackoff(attempts int) time.Duration {
+	return logsrvclient.Backoff(attempts, s.config.MaxReconnectInterval)
+}
 
 // sleepWithContext sleeps for d or returns ctx.Err() if cancellation arrives
 // first. Used for jitter splays that must respect server shutdown.
 func sleepWithContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return logsrvclient.Sleep(ctx, d)
 }
 
 // waitBeforeRetry sleeps for the backoff belonging to the attempt that just
@@ -499,25 +486,6 @@ func (s *Session) waitBeforeRetry(attempt int) bool {
 	case <-time.After(backoff):
 		return true
 	}
-}
-
-func (s *Session) calculateBackoff(attempts int) time.Duration {
-	maxInterval := s.config.MaxReconnectInterval
-	if maxInterval <= 0 {
-		maxInterval = time.Minute
-	}
-	exp := min(attempts, maxBackoffExponent)
-	backoff := min(
-		float64(initialReconnectInterval)*math.Pow(2, float64(exp)),
-		float64(maxInterval),
-	)
-	// Apply equal jitter to prevent thundering herd: base/2 + rand(0, base/2).
-	// math/rand/v2 is auto-seeded per-process and safe for concurrent use.
-	half := time.Duration(backoff) / 2
-	if half > 0 {
-		return half + time.Duration(rand.Int64N(int64(half)))
-	}
-	return time.Duration(backoff)
 }
 
 // extractIoDelay returns the stream name and delay for I/O buffer messages.
@@ -1105,118 +1073,36 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 //
 // An error or abort from the upstream is always a failure.
 func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, waitCommit bool) error {
-	for {
-		var srvMsg *pb.ServerMessage
-		err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
-			var readErr error
-			srvMsg, readErr = proc.ReadServerMessageContext(opCtx)
-			return readErr
-		})
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return fmt.Errorf("upstream closed the connection before acknowledging the session: %w", err)
-		}
-		if err != nil {
-			return err
-		}
+	return logsrvclient.ReadAck(ctx, proc, clientConfig(cfg), waitCommit)
+}
 
-		switch m := srvMsg.Type.(type) {
-		case *pb.ServerMessage_Error:
-			// A definitive refusal, not a failure to be reached: the upstream
-			// parsed this session and said no, so every retry gets the same
-			// answer. ErrUpstreamRejected routes it to the dead-letter path
-			// instead of the retry loop. Conformance: RELAY-049.
-			return fmt.Errorf("%w: %s", ErrUpstreamRejected, m.Error)
-		case *pb.ServerMessage_Abort:
-			return fmt.Errorf("%w (abort): %s", ErrUpstreamRejected, m.Abort)
-		case *pb.ServerMessage_CommitPoint:
-			return nil
-		}
-		if !waitCommit {
-			return nil
-		}
+// relayClientID is announced to the upstream in the ClientHello. It names this
+// component specifically -- an upstream's logs must distinguish a relayed
+// session from one originated by sudo or by the recording login shell.
+const relayClientID = "GoSudoLogSrv-Relay/1.0"
+
+// clientConfig projects the relay section onto the neutral logsrvclient.Config.
+//
+// The TLS fields are already resolved against the [server] section at config
+// load (per key, matching C's TLS_RELAY_STR), so reading them directly here is
+// correct. Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
+func clientConfig(cfg *config.RelayConfig) logsrvclient.Config {
+	return logsrvclient.Config{
+		ClientID:        relayClientID,
+		UpstreamHost:    cfg.UpstreamHost,
+		UseTLS:          cfg.UseTLS,
+		TLSSkipVerify:   cfg.TLSSkipVerify,
+		TLSMinVersion:   cfg.TLSMinVersion,
+		TLSCertFile:     cfg.TLSCertFile,
+		TLSKeyFile:      cfg.TLSKeyFile,
+		TLSCACertFile:   cfg.TLSCACertFile,
+		ConnectTimeout:  cfg.ConnectTimeout,
+		ResponseTimeout: cfg.ResponseTimeout,
 	}
 }
 
 func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.Processor, error) {
-	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
-	var conn net.Conn
-	var err error
-
-	slog.Debug("Dialing upstream", "host", cfg.UpstreamHost, "use_tls", cfg.UseTLS, "tls_skip_verify", cfg.TLSSkipVerify)
-	if cfg.UseTLS {
-		minVer, verErr := config.TLSVersion(cfg.TLSMinVersion)
-		if verErr != nil {
-			return nil, fmt.Errorf("invalid relay tls_min_version: %w", verErr)
-		}
-		// InsecureSkipVerify tracks tls_skip_verify, which defaults to false —
-		// so by default the upstream's chain AND hostname are verified. That is
-		// deliberately stricter than C, whose relay does not verify at all
-		// unless tls_checkpeer is turned on (logsrvd/tls_client.c:251-256, and
-		// the default chain at logsrvd/logsrvd_conf.c:341-346,1688). See the
-		// TLSSkipVerify doc comment in internal/config for the trade-off.
-		// Conformance: docs/logsrvd-reference/ TLS-027.
-		tlsConfig := &tls.Config{InsecureSkipVerify: cfg.TLSSkipVerify, MinVersion: minVer}
-
-		// Present a client certificate when one is configured, so an upstream
-		// running with tls_checkpeer accepts us. Without this, such an upstream
-		// rejects every flush at the handshake and the cache grows without bound
-		// -- the failure is silent from the client's side, because relaying is
-		// store-and-forward and the session was already acknowledged downstream.
-		//
-		// These fields are already resolved against the [server] section at config
-		// load (per key, matching C's TLS_RELAY_STR), so reading them directly here
-		// is correct. Conformance: docs/logsrvd-reference/ TLS-025, CONF-045.
-		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-			cert, certErr := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-			if certErr != nil {
-				return nil, fmt.Errorf("load relay client certificate: %w", certErr)
-			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
-		}
-		// A named CA bundle replaces the platform trust store for the upstream
-		// only, which is how a private-CA upstream is trusted without installing
-		// its root system-wide. An unreadable or empty bundle is fatal rather than
-		// a silent fall back to the system store: a typo'd path would otherwise
-		// trust the public web PKI instead of the one CA that was meant.
-		// Conformance: docs/logsrvd-reference/ TLS-007.
-		if cfg.TLSCACertFile != "" {
-			pem, readErr := os.ReadFile(cfg.TLSCACertFile)
-			if readErr != nil {
-				return nil, fmt.Errorf("read relay CA bundle %s: %w", cfg.TLSCACertFile, readErr)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pem) {
-				return nil, fmt.Errorf("relay CA bundle %s contains no usable PEM certificates", cfg.TLSCACertFile)
-			}
-			tlsConfig.RootCAs = pool
-		}
-		tlsDialer := tls.Dialer{NetDialer: dialer, Config: tlsConfig}
-		conn, err = tlsDialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", cfg.UpstreamHost)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("dial failed: %w", err)
-	}
-
-	proc := protocol.NewProcessorWithCloser(conn, conn, conn)
-	slog.Debug("Starting handshake with upstream")
-	helloMsg := &pb.ClientMessage{Type: &pb.ClientMessage_HelloMsg{HelloMsg: &pb.ClientHello{ClientId: "GoSudoLogSrv-Relay/1.0"}}}
-	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
-		return proc.WriteClientMessageContext(opCtx, helloMsg)
-	}); err != nil {
-		_ = proc.Close()
-		return nil, fmt.Errorf("failed to send ClientHello to upstream: %w", err)
-	}
-	if err := withOperationTimeout(ctx, cfg, func(opCtx context.Context) error {
-		_, err = proc.ReadServerMessageContext(opCtx)
-		return err
-	}); err != nil {
-		_ = proc.Close()
-		return nil, fmt.Errorf("failed to receive ServerHello from upstream: %w", err)
-	}
-	return proc, nil
+	return logsrvclient.Connect(ctx, clientConfig(cfg))
 }
 
 // operationTimeout bounds a single message exchange with an upstream that is
@@ -1232,56 +1118,20 @@ func connectToUpstream(ctx context.Context, cfg *config.RelayConfig) (protocol.P
 // exactly the loaded upstreams that are slowest to acknowledge.
 // Conformance: docs/logsrvd-reference/ CONF-039.
 func operationTimeout(cfg *config.RelayConfig) time.Duration {
-	if cfg.ResponseTimeout > 0 {
-		return cfg.ResponseTimeout
-	}
-	return 30 * time.Second
+	return clientConfig(cfg).OperationTimeout()
 }
 
 func withOperationTimeout(parent context.Context, cfg *config.RelayConfig, fn func(context.Context) error) error {
-	if parent == nil {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parent, operationTimeout(cfg))
-	defer cancel()
-	return fn(ctx)
+	return clientConfig(cfg).WithTimeout(parent, fn)
 }
 
-// writeProtoMessage serializes and writes a single protobuf message with its length prefix.
-// Length prefix and payload are combined into a single write for atomicity — a partial
-// write (e.g., process crash) won't leave a length prefix without a payload.
+// writeProtoMessage journals a single message in wire framing. See
+// logsrvclient.WriteMessage for why the prefix and payload are one Write.
 func writeProtoMessage(w io.Writer, msg *pb.ClientMessage) error {
-	data, err := proto.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	if len(data) > protocol.MaxMessageSize {
-		return fmt.Errorf("message too large: length %d exceeds limit of %d", len(data), protocol.MaxMessageSize)
-	}
-	buf := make([]byte, 4+len(data))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(data)))
-	copy(buf[4:], data)
-	_, err = w.Write(buf)
-	return err
+	return logsrvclient.WriteMessage(w, msg)
 }
 
-// readProtoMessage reads a single length-prefixed protobuf message.
+// readProtoMessage reads a single length-prefixed message back from a journal.
 func readProtoMessage(r io.Reader) (*pb.ClientMessage, error) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(r, lenBuf); err != nil {
-		return nil, err
-	}
-	msgLen := binary.BigEndian.Uint32(lenBuf)
-	if msgLen > protocol.MaxMessageSize {
-		return nil, fmt.Errorf("relay cache message size %d exceeds limit of %d", msgLen, protocol.MaxMessageSize)
-	}
-	data := make([]byte, msgLen)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, err
-	}
-	msg := &pb.ClientMessage{}
-	if err := proto.Unmarshal(data, msg); err != nil {
-		return nil, err
-	}
-	return msg, nil
+	return logsrvclient.ReadMessage(r)
 }
