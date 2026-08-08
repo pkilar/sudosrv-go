@@ -322,8 +322,8 @@ func (s *slowSink) Send(*pb.ClientMessage) error {
 	s.mu.Unlock()
 	return nil
 }
-func (s *slowSink) Finish(context.Context) error { return nil }
-func (s *slowSink) Close() error                 { return nil }
+func (s *slowSink) Finish(context.Context, time.Duration) error { return nil }
+func (s *slowSink) Close() error                                { return nil }
 
 func (s *slowSink) seen() int {
 	s.mu.Lock()
@@ -351,7 +351,7 @@ func TestBufferedSinkBlocksRatherThanDropping(t *testing.T) {
 			t.Fatalf("Send: %v", err)
 		}
 	}
-	if err := b.Finish(context.Background()); err != nil {
+	if err := b.Finish(context.Background(), 0); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -583,5 +583,99 @@ func TestGarbageAfterAValidExitIsNotSilentlyDropped(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path + journalCorrupt); statErr != nil {
 		t.Errorf("the journal was not kept: %v; spool holds %v", statErr, journalFiles(t, dir))
+	}
+}
+
+// TestExitWaitsForTheFinalCommitPoint pins what waiting for an acknowledgement
+// is actually FOR.
+//
+// The server emits a commit point on the first I/O event of a session and every
+// ACK_FREQUENCY after (internal/storage writeIoEntry), so by the time a client
+// sends its ExitMessage an interim one is very likely already sitting on the
+// socket. Returning on the first commit point seen therefore returns BEFORE the
+// exit has been processed -- the caller concludes the session is durable, logsh
+// exits, sshd tears the connection down, and the exit record may never be
+// written.
+//
+// A commit point carries the elapsed time the server has committed, so the final
+// one is identified the way C's client does it: committed >= the elapsed clock
+// the client itself accumulated.
+//
+// The server here sends an interim commit point early and holds the final one
+// back, so a client that accepts the interim returns measurably too soon.
+func TestExitWaitsForTheFinalCommitPoint(t *testing.T) {
+	const serverWork = 400 * time.Millisecond
+
+	exitSeen := make(chan struct{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		proc := protocol.NewProcessorWithCloser(conn, conn, conn)
+		for {
+			msg, rerr := proc.ReadClientMessage()
+			if rerr != nil {
+				return
+			}
+			switch msg.Type.(type) {
+			case *pb.ClientMessage_HelloMsg:
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_Hello{Hello: &pb.ServerHello{ServerId: "commit"}}})
+			case *pb.ClientMessage_AcceptMsg:
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_LogId{LogId: "id"}})
+			case *pb.ClientMessage_TtyoutBuf:
+				// An interim commit point covering nothing, exactly as the real
+				// server sends on the first I/O event.
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{}}})
+			case *pb.ClientMessage_ExitMsg:
+				close(exitSeen)
+				time.Sleep(serverWork) // persisting the exit record
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{TvSec: 1 << 20}}})
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close(); <-done })
+
+	cfg := testConfig(ln.Addr().String())
+	rec, err := StartRecorder(context.Background(), cfg,
+		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
+	if err != nil {
+		t.Fatalf("StartRecorder: %v", err)
+	}
+	defer func() { _ = rec.Close() }()
+
+	if err := rec.TTYOut([]byte("provoke an interim commit point\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Let the interim commit point land on the socket ahead of the exit.
+	<-time.After(150 * time.Millisecond)
+
+	start := time.Now()
+	if err := rec.Exit(context.Background(), 0, "", false); err != nil {
+		t.Fatalf("Exit: %v", err)
+	}
+	waited := time.Since(start)
+
+	select {
+	case <-exitSeen:
+	default:
+		t.Fatal("Exit returned before the server had even seen the ExitMessage")
+	}
+	if waited < serverWork {
+		t.Errorf("Exit returned after %v, before the server finished persisting (%v). It "+
+			"accepted an interim commit point as the acknowledgement, so the caller believes a "+
+			"session is durable when the exit record may never be written.", waited, serverWork)
 	}
 }

@@ -30,7 +30,11 @@ type Sink interface {
 	Send(*pb.ClientMessage) error
 	// Finish is called once the ExitMessage has been sent. It blocks until the
 	// session is durable, or until it is certain it cannot be made durable.
-	Finish(ctx context.Context) error
+	//
+	// elapsed is the sum of the delays the session sent, which is how the FINAL
+	// commit point is told apart from the interim ones the server emits during
+	// a session. See logsrvclient.ReadCommitAtLeast.
+	Finish(ctx context.Context, elapsed time.Duration) error
 	Close() error
 }
 
@@ -166,12 +170,12 @@ func (s *streamSink) Send(msg *pb.ClientMessage) error { return s.proc.WriteClie
 // the transcript is durable. Returning before it would let logsh exit -- and
 // sshd tear the connection down -- while the session was still only in the
 // server's memory.
-func (s *streamSink) Finish(ctx context.Context) error {
+func (s *streamSink) Finish(ctx context.Context, elapsed time.Duration) error {
 	if !s.expectAck {
 		// Transmission IS completion for an event-only session. See expectAck.
 		return nil
 	}
-	return logsrvclient.ReadAck(ctx, s.proc, s.cfg, true)
+	return logsrvclient.ReadCommitAtLeast(ctx, s.proc, s.cfg, elapsed)
 }
 
 func (s *streamSink) Close() error { return s.proc.Close() }
@@ -217,7 +221,7 @@ func (j *journalSink) Send(msg *pb.ClientMessage) error {
 // still cannot be delivered is renamed rather than deleted: it is the only copy
 // of that session, and losing it silently is the one outcome worse than
 // delivering it late.
-func (j *journalSink) Finish(ctx context.Context) error {
+func (j *journalSink) Finish(ctx context.Context, _ time.Duration) error {
 	if err := j.file.Sync(); err != nil {
 		return fmt.Errorf("sync journal %s: %w", j.path, err)
 	}
@@ -281,7 +285,7 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	// Validated BEFORE anything is sent. A journal is parsed end to end first so
 	// a corrupt one is never half-transmitted, and -- more importantly -- never
 	// mistaken for a delivered one and deleted.
-	expectAck, err := validateJournal(flushing)
+	expectAck, elapsed, err := validateJournal(flushing)
 	if err != nil {
 		return park(flushing, path+journalCorrupt, ErrJournalCorrupt, err)
 	}
@@ -296,7 +300,7 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	}
 	defer func() { _ = proc.Close() }()
 
-	if err := transmitJournal(ctx, flushing, cfg, proc, expectAck); err != nil {
+	if err := transmitJournal(ctx, flushing, cfg, proc, expectAck, elapsed); err != nil {
 		if errors.Is(err, logsrvclient.ErrUpstreamRejected) {
 			// A definitive refusal: the server parsed the session and said no,
 			// so it stored nothing and every retry gets the same answer.
@@ -345,10 +349,10 @@ func park(from, to string, sentinel, cause error) error {
 // end of file. That made a corrupt journal indistinguishable from a complete
 // one, and because a malformed FIRST record also left expectAck false, the
 // replay reported success and the caller deleted the only copy of the session.
-func validateJournal(path string) (expectAck bool, err error) {
+func validateJournal(path string) (expectAck bool, elapsed time.Duration, err error) {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -362,36 +366,39 @@ func validateJournal(path string) (expectAck bool, err error) {
 		if readErr != nil {
 			// io.ErrUnexpectedEOF is a record cut in half; anything else is a
 			// bad length prefix or unparseable protobuf. Neither is an end.
-			return false, fmt.Errorf("record %d: %w", count+1, readErr)
+			return false, 0, fmt.Errorf("record %d: %w", count+1, readErr)
 		}
 
 		if count == 0 {
 			a, ok := msg.Type.(*pb.ClientMessage_AcceptMsg)
 			if !ok {
-				return false, fmt.Errorf("first record is %T, not an AcceptMessage", msg.Type)
+				return false, 0, fmt.Errorf("first record is %T, not an AcceptMessage", msg.Type)
 			}
 			expectAck = a.AcceptMsg.GetExpectIobufs()
 		}
 		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
 			sawExit = true
 		}
+		// The server sums these into the elapsed clock it reports back in commit
+		// points, so the total is how the final one is recognised on replay.
+		elapsed += messageDelay(msg)
 		count++
 	}
 
 	if count == 0 {
-		return false, errors.New("journal is empty")
+		return false, 0, errors.New("journal is empty")
 	}
 	// An I/O session is acknowledged only after its ExitMessage. Sending one
 	// that has none and then waiting for a commit point hangs the logout
 	// forever, so it is refused here rather than discovered later.
 	if expectAck && !sawExit {
-		return false, errors.New("I/O journal has no ExitMessage; it can never be acknowledged")
+		return false, 0, errors.New("I/O journal has no ExitMessage; it can never be acknowledged")
 	}
-	return expectAck, nil
+	return expectAck, elapsed, nil
 }
 
 // transmitJournal sends a validated journal and waits for acknowledgement.
-func transmitJournal(ctx context.Context, path string, cfg *Config, proc protocol.Processor, expectAck bool) error {
+func transmitJournal(ctx context.Context, path string, cfg *Config, proc protocol.Processor, expectAck bool, elapsed time.Duration) error {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
 	if err != nil {
 		return err
@@ -419,7 +426,7 @@ func transmitJournal(ctx context.Context, path string, cfg *Config, proc protoco
 	if !expectAck {
 		return nil
 	}
-	return logsrvclient.ReadAck(ctx, proc, cfg.ClientConfig(), true)
+	return logsrvclient.ReadCommitAtLeast(ctx, proc, cfg.ClientConfig(), elapsed)
 }
 
 // bufferedSink moves the actual delivery onto its own goroutine.
@@ -489,7 +496,7 @@ func (b *bufferedSink) Send(msg *pb.ClientMessage) error {
 // Finish drains everything queued before asking the inner sink to make the
 // session durable. Skipping the drain would ask the server to commit a
 // transcript whose last buffers are still sitting in this channel.
-func (b *bufferedSink) Finish(ctx context.Context) error {
+func (b *bufferedSink) Finish(ctx context.Context, elapsed time.Duration) error {
 	b.mu.Lock()
 	if !b.closed {
 		b.closed = true
@@ -504,7 +511,7 @@ func (b *bufferedSink) Finish(ctx context.Context) error {
 	if sendErr != nil {
 		return sendErr
 	}
-	return b.inner.Finish(ctx)
+	return b.inner.Finish(ctx, elapsed)
 }
 
 func (b *bufferedSink) Close() error {
@@ -553,4 +560,30 @@ func flushWithBudget(ctx context.Context, path string, cfg *Config, budget time.
 			return err
 		}
 	}
+}
+
+// messageDelay returns the delay a session message carries, or zero for one
+// that carries none.
+func messageDelay(msg *pb.ClientMessage) time.Duration {
+	var ts *pb.TimeSpec
+	switch m := msg.Type.(type) {
+	case *pb.ClientMessage_TtyinBuf:
+		ts = m.TtyinBuf.GetDelay()
+	case *pb.ClientMessage_TtyoutBuf:
+		ts = m.TtyoutBuf.GetDelay()
+	case *pb.ClientMessage_StdinBuf:
+		ts = m.StdinBuf.GetDelay()
+	case *pb.ClientMessage_StdoutBuf:
+		ts = m.StdoutBuf.GetDelay()
+	case *pb.ClientMessage_StderrBuf:
+		ts = m.StderrBuf.GetDelay()
+	case *pb.ClientMessage_WinsizeEvent:
+		ts = m.WinsizeEvent.GetDelay()
+	case *pb.ClientMessage_SuspendEvent:
+		ts = m.SuspendEvent.GetDelay()
+	}
+	if ts == nil {
+		return 0
+	}
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())
 }

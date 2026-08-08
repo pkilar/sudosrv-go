@@ -55,6 +55,7 @@ func (s *mockServer) serve() {
 	}
 	defer func() { _ = conn.Close() }()
 	proc := protocol.NewProcessorWithCloser(conn, conn, conn)
+	sentInterim := false
 
 	for {
 		msg, err := proc.ReadClientMessage()
@@ -77,6 +78,16 @@ func (s *mockServer) serve() {
 			s.mu.Lock()
 			s.ttyout.Write(m.TtyoutBuf.GetData())
 			s.mu.Unlock()
+			// The real server emits a commit point on the FIRST I/O event and
+			// every ACK_FREQUENCY after (internal/storage writeIoEntry), so one
+			// is very likely already queued when the client sends its exit. The
+			// mock reproduces that: without it, nothing here would notice a
+			// client that returns on the first commit point it sees.
+			if !sentInterim {
+				sentInterim = true
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{}}})
+			}
 		case *pb.ClientMessage_TtyinBuf:
 			s.mu.Lock()
 			s.ttyin.Write(m.TtyinBuf.GetData())
@@ -94,7 +105,9 @@ func (s *mockServer) serve() {
 			s.exit = m.ExitMsg
 			s.mu.Unlock()
 			_ = proc.WriteServerMessage(&pb.ServerMessage{
-				Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{}}})
+				Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{
+					TvSec: 1 << 20, // comfortably past any test session's elapsed clock
+				}}})
 			return
 		}
 	}
@@ -104,6 +117,26 @@ func (s *mockServer) suspends() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.suspend...)
+}
+
+// waitForExit blocks until the server has read the session's ExitMessage.
+//
+// Needed for event-only sessions specifically. Those are never acknowledged, so
+// the client returns the moment the exit has been WRITTEN and cannot know when
+// the server read it -- asserting on the server's state immediately after is a
+// race the client has no way to close. An I/O session does not need this: its
+// Finish waits for a commit point, which the server only sends after processing
+// the exit.
+func waitForExit(t *testing.T, s *mockServer) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, exit, _ := s.snapshot(); exit != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("the server never received an ExitMessage")
 }
 
 func (s *mockServer) snapshot() (out, in string, ws []*pb.ChangeWindowSize, exit *pb.ExitMessage, acc *pb.AcceptMessage) {

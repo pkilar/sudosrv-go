@@ -87,7 +87,12 @@ func startSudosrv(t *testing.T) (addr, logDir string) {
 	}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		// cmd.Wait, NOT cmd.Process.Wait: the former also waits for the
+		// goroutines os/exec spawned to copy the child's output into daemonLog.
+		// Process.Wait only reaps the process, so reading the buffer afterwards
+		// races those copiers -- which the race detector catches only on the
+		// failure path, because that is the only path that reads it.
+		_ = cmd.Wait()
 		if t.Failed() {
 			t.Logf("sudosrv output:\n%s", daemonLog.String())
 		}
@@ -106,21 +111,34 @@ func startSudosrv(t *testing.T) (addr, logDir string) {
 	return "", ""
 }
 
-// findSessionDir returns the one session directory beneath root.
+// findSessionDir returns the one session directory beneath root, waiting for it
+// to appear.
+//
+// The wait is required, not defensive. An event-only session is never
+// acknowledged -- C does not acknowledge one either -- so logsh returns as soon
+// as the ExitMessage has been WRITTEN, with no way to learn when the server
+// finished persisting it. There is simply no synchronisation point to use, and a
+// single check races the daemon. It passed locally and failed on CI, which is
+// the usual way round for this class of bug.
 func findSessionDir(t *testing.T, root string) string {
 	t.Helper()
 	var found []string
-	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		found = found[:0]
+		_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !info.IsDir() && info.Name() == "log.json" {
+				found = append(found, filepath.Dir(p))
+			}
 			return nil
+		})
+		if len(found) > 0 || time.Now().After(deadline) {
+			break
 		}
-		if !info.IsDir() && info.Name() == "log.json" {
-			found = append(found, filepath.Dir(p))
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+		time.Sleep(50 * time.Millisecond)
 	}
 	if len(found) != 1 {
 		var all []string
@@ -198,13 +216,27 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 
 	// The metadata the server derived from logsh's info keys. If logsh sent a
 	// key the server did not expect, or omitted one it needs, it shows up here.
-	raw, err := os.ReadFile(filepath.Join(session, "log.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Polled, not read once. See Recorder.Exit: when no time passes between the
+	// last output and the exit, the interim commit point already covers the full
+	// elapsed clock, so the client can return before the server has written the
+	// exit metadata. The transcript is durable by then; this last field is not
+	// synchronised by anything the protocol offers.
 	var meta map[string]any
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		t.Fatalf("log.json is not valid JSON: %v\n%s", err, raw)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		raw, readErr := os.ReadFile(filepath.Join(session, "log.json"))
+		if readErr == nil {
+			meta = nil
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				t.Fatalf("log.json is not valid JSON: %v\n%s", err, raw)
+			}
+			if _, ok := meta["exit_value"]; ok || time.Now().After(deadline) {
+				break
+			}
+		} else if time.Now().After(deadline) {
+			t.Fatalf("reading log.json: %v", readErr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	for _, key := range []string{"submituser", "runuser", "command", "ttyname"} {
 		if v, ok := meta[key]; !ok || v == "" {

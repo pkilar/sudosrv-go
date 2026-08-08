@@ -193,6 +193,11 @@ type Recorder struct {
 	mu   sync.Mutex
 	last time.Time // when the previous event was sent
 	sent bool      // an ExitMessage has been sent; further events are dropped
+	// elapsed is the running sum of the delays sent so far, which is exactly the
+	// clock the server accumulates and reports back in commit points. It is what
+	// tells the FINAL commit point apart from the interim ones the server emits
+	// during a session -- see logsrvclient.ReadCommitAtLeast.
+	elapsed time.Duration
 
 	logID string
 }
@@ -247,8 +252,12 @@ func (r *Recorder) send(build func(delay *pb.TimeSpec) *pb.ClientMessage) error 
 		return nil
 	}
 	now := time.Now()
-	msg := build(durationSpec(now.Sub(r.last)))
+	// Clamped: a backwards clock step would otherwise make the elapsed total
+	// disagree with the server's, and the final commit point would never match.
+	delta := max(now.Sub(r.last), 0)
+	msg := build(durationSpec(delta))
 	r.last = now
+	r.elapsed += delta
 	return r.sink.Send(msg)
 }
 
@@ -293,11 +302,28 @@ func (r *Recorder) WinSize(s WinSize) error {
 	})
 }
 
-// Exit sends the ExitMessage and waits for the server's final commit point.
+// Exit sends the ExitMessage and waits for a commit point covering the whole
+// session.
 //
-// Waiting matters: the commit point is the server's statement that the session
-// is durable. Returning before it means logsh can exit -- and sshd can tear the
-// connection down -- while the transcript is still only in the server's memory.
+// Waiting matters: a commit point is the server's statement that everything up
+// to that elapsed time is durable. Returning without one would let logsh exit,
+// and sshd tear the connection down, while the transcript was still only in the
+// server's memory.
+//
+// KNOWN RESIDUAL GAP, and it is small but real. The server emits a commit point
+// on the first I/O event and every ACK_FREQUENCY after, then one more after
+// processing the exit. When no time passes between the last output and the exit
+// -- a shell that prints once and returns -- the interim commit point already
+// covers the full elapsed clock, so it is indistinguishable from the final one
+// by the only field the protocol gives us. Exit can therefore return on the
+// interim one.
+//
+// What that costs is bounded: the TRANSCRIPT is durable either way, because the
+// commit point that was accepted covers all of the I/O. Only the exit metadata
+// -- exit_value, run_time, signal -- may be lost, and only if the daemon dies in
+// the sub-millisecond window between the two. Closing it properly means draining
+// server messages concurrently for the whole session, the way sudo's event loop
+// does, which is a lot of machinery for that window in a login shell.
 func (r *Recorder) Exit(ctx context.Context, code int, signal string, coreDumped bool) error {
 	r.mu.Lock()
 	if r.sent {
@@ -316,7 +342,11 @@ func (r *Recorder) Exit(ctx context.Context, code int, signal string, coreDumped
 	if err := r.sink.Send(exit); err != nil {
 		return fmt.Errorf("send ExitMessage: %w", err)
 	}
-	return r.sink.Finish(ctx)
+
+	r.mu.Lock()
+	elapsed := r.elapsed
+	r.mu.Unlock()
+	return r.sink.Finish(ctx, elapsed)
 }
 
 // Close releases the sink. Safe to call after Exit.

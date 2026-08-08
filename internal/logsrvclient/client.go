@@ -213,6 +213,58 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 //
 // An error or abort from the server is always a failure, and always
 // ErrUpstreamRejected.
+// ReadCommitAtLeast consumes server messages until a commit point covering
+// minElapsed arrives.
+//
+// Waiting for ANY commit point is not enough, and the difference is a real
+// durability hole. The server emits one on the first I/O event of a session and
+// every ACK_FREQUENCY thereafter (internal/storage writeIoEntry), so by the time
+// a client sends its ExitMessage there is very likely an interim commit point
+// already queued on the socket. A reader that returns on the first one it sees
+// returns BEFORE the exit has been processed -- so the caller concludes the
+// session is durable, exits, and lets sshd tear the connection down while the
+// server has not yet written the exit record.
+//
+// A commit point carries the elapsed time the server has committed, so the
+// final one is identified the way C's client identifies it: committed >=
+// elapsed, where elapsed is the sum of the delays the client itself sent.
+func ReadCommitAtLeast(ctx context.Context, proc protocol.Processor, cfg Config, minElapsed time.Duration) error {
+	for {
+		var srvMsg *pb.ServerMessage
+		err := cfg.WithTimeout(ctx, func(opCtx context.Context) error {
+			var readErr error
+			srvMsg, readErr = proc.ReadServerMessageContext(opCtx)
+			return readErr
+		})
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("server closed the connection before acknowledging the session: %w", err)
+		}
+		if err != nil {
+			return err
+		}
+
+		switch m := srvMsg.Type.(type) {
+		case *pb.ServerMessage_Error:
+			return fmt.Errorf("%w: %s", ErrUpstreamRejected, m.Error)
+		case *pb.ServerMessage_Abort:
+			return fmt.Errorf("%w (abort): %s", ErrUpstreamRejected, m.Abort)
+		case *pb.ServerMessage_CommitPoint:
+			if commitDuration(m.CommitPoint) >= minElapsed {
+				return nil
+			}
+			// An interim commit point from earlier in the session. Keep reading.
+		}
+	}
+}
+
+// commitDuration reads a commit point's elapsed time.
+func commitDuration(ts *pb.TimeSpec) time.Duration {
+	if ts == nil {
+		return 0
+	}
+	return time.Duration(ts.GetTvSec())*time.Second + time.Duration(ts.GetTvNsec())
+}
+
 func ReadAck(ctx context.Context, proc protocol.Processor, cfg Config, waitCommit bool) error {
 	for {
 		var srvMsg *pb.ServerMessage

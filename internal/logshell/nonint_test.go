@@ -122,6 +122,8 @@ func TestNonInteractiveRecordsTheCommandLine(t *testing.T) {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
 
+	waitForExit(t, srv)
+
 	_, _, _, _, acc := srv.snapshot()
 	if acc == nil {
 		t.Fatal("no AcceptMessage reached the server")

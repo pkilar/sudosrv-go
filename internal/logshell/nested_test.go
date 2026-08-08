@@ -259,6 +259,8 @@ func TestMetadataOnlySessionRecordsNoTranscript(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 5", outcome.ExitCode)
 	}
 
+	waitForExit(t, srv)
+
 	out, in, _, exit, acc := srv.snapshot()
 	if out != "" || in != "" {
 		t.Errorf("a nested session produced a transcript anyway: %d out / %d in bytes",
