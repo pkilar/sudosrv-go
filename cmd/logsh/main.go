@@ -98,13 +98,35 @@ func runShell(inv logshell.Invocation) int {
 	}
 	defer func() { _ = cmdLog.Close() }()
 
+	// Something above us may already be recording these keystrokes. `sudo -i`
+	// runs the target account's passwd shell, so once logsh IS that shell the
+	// session is captured twice -- three times when the invoking account also
+	// uses logsh -- with a pseudo-terminal layer for each.
+	nesting := logshell.DetectNesting()
+
 	var outcome logshell.Outcome
-	if logshell.IsTerminal(os.Stdin.Fd()) {
-		outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
-			logshell.StdTerminal(), cmdLog)
-	} else {
-		outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath,
-			logshell.StdStreams(), cmdLog)
+	switch mode := cfg.NestedMode(nesting); mode {
+	case logshell.NestedModeSkip:
+		logshell.Alertf(syslog.LOG_INFO,
+			"session nested inside %s; not recording here (nested_sessions=%s)",
+			nesting.Kind, mode)
+		return passthrough(inv, shellPath)
+
+	case logshell.NestedModeMetadata:
+		// Streams pass straight through, so no second pty and no duplicate
+		// transcript -- but the session still leaves a record, carrying both
+		// UUIDs so it joins to whatever the outer recorder stored.
+		outcome, err = logshell.RunMetadataOnly(ctx, cfg, inv, shellPath,
+			logshell.StdStreams(), cmdLog, nesting)
+
+	default:
+		if logshell.IsTerminal(os.Stdin.Fd()) {
+			outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
+				logshell.StdTerminal(), cmdLog)
+		} else {
+			outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath,
+				logshell.StdStreams(), cmdLog)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {

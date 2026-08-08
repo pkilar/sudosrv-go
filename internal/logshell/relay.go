@@ -116,6 +116,7 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 
 	meta := CollectMeta(pty.Name, size, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
+	meta.ApplyNesting(DetectNesting())
 
 	rec, err := StartRecorder(ctx, cfg, meta)
 	if err != nil {
@@ -135,7 +136,7 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		c.Args = argv
-		c.Env = PrepareEnv(os.Environ(), shellPath)
+		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), shellPath), cmdLog.SessionID())
 		c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
 		// Setsid puts the shell in its own session with the INNER pty as
 		// controlling terminal, which is what makes job control, ^C and ^Z work

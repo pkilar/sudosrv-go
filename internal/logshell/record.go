@@ -24,6 +24,7 @@ import (
 // and sudoreplay both expect them and an absent runuser would leave the path
 // escapes and the `log` summary with empty fields.
 type SessionMeta struct {
+	// User/UID/Group/GID are who the session RUNS as.
 	User  string
 	UID   int
 	Group string
@@ -31,6 +32,23 @@ type SessionMeta struct {
 	Home  string
 	Host  string
 	Cwd   string
+
+	// SubmitUser/UID/Group/GID are who INVOKED it, which is the same thing
+	// except when sudo is in the chain.
+	//
+	// Keeping them apart matters for more than tidiness. Under `sudo -i` the
+	// session runs as root but alice is the one at the keyboard, and a record
+	// naming root in both fields cannot answer the only question anybody asks of
+	// it. sudo's own logs make exactly this distinction; logsh reporting root as
+	// the submitter was simply wrong.
+	SubmitUser  string
+	SubmitUID   int
+	SubmitGroup string
+	SubmitGID   int
+
+	// Nested and ParentSession describe an enclosing recorder, if any.
+	Nested        string
+	ParentSession string
 
 	// TTYName is the INNER pty, not the outer one.
 	//
@@ -81,6 +99,9 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 	if g, err := user.LookupGroupId(strconv.Itoa(gid)); err == nil {
 		meta.Group = g.Name
 	}
+	// Submitter defaults to the runner; ApplyNesting corrects it under sudo.
+	meta.SubmitUser, meta.SubmitUID = meta.User, uid
+	meta.SubmitGroup, meta.SubmitGID = meta.Group, gid
 	if h, err := os.Hostname(); err == nil {
 		meta.Host = h
 	}
@@ -88,6 +109,29 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 		meta.Cwd = cwd
 	}
 	return meta
+}
+
+// ApplyNesting records an enclosing recorder and, under sudo, corrects the
+// submitter to the account that escalated.
+func (m *SessionMeta) ApplyNesting(n Nesting) {
+	m.Nested = n.Kind.String()
+	m.ParentSession = n.ParentSession
+
+	if n.Kind != NestedSudo || n.SudoUser == "" {
+		return
+	}
+	m.SubmitUser = n.SudoUser
+	if n.SudoUID >= 0 {
+		m.SubmitUID = n.SudoUID
+	}
+	if n.SudoGID >= 0 {
+		m.SubmitGID = n.SudoGID
+		if g, err := user.LookupGroupId(strconv.Itoa(n.SudoGID)); err == nil {
+			m.SubmitGroup = g.Name
+		} else {
+			m.SubmitGroup = ""
+		}
+	}
 }
 
 func strInfo(key, val string) *pb.InfoMessage {
@@ -104,10 +148,10 @@ func numInfo(key string, val int64) *pb.InfoMessage {
 // recorded here byte-comparable with one recorded by sudo.
 func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 	return []*pb.InfoMessage{
-		strInfo("submituser", m.User),
-		numInfo("submituid", int64(m.UID)),
-		strInfo("submitgroup", m.Group),
-		numInfo("submitgid", int64(m.GID)),
+		strInfo("submituser", m.SubmitUser),
+		numInfo("submituid", int64(m.SubmitUID)),
+		strInfo("submitgroup", m.SubmitGroup),
+		numInfo("submitgid", int64(m.SubmitGID)),
 		strInfo("submithost", m.Host),
 		strInfo("submitcwd", m.Cwd),
 
@@ -126,6 +170,8 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 		// internal/storage copies every info key into log.json, so this lands in
 		// the recorded session's metadata without needing server-side support.
 		strInfo("logsh_session", m.SessionID),
+		strInfo("logsh_nested", m.Nested),
+		strInfo("logsh_parent_session", m.ParentSession),
 		{Key: "runargv", Value: &pb.InfoMessage_Strlistval{
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.Argv},
 		}},

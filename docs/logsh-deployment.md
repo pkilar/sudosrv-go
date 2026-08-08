@@ -125,6 +125,55 @@ the host, and the account is useless if you have lost the key.
 
 ---
 
+## Nested sessions (`sudo -i` and friends)
+
+`sudo -i` runs the **target** account's passwd shell. Once logsh is root's shell,
+the same session is captured twice — three times when the invoking account also
+uses logsh:
+
+```
+sshd pty
+└─ logsh(alice)      pty #2  ← transcript 1
+   └─ bash(alice)
+      └─ sudo -i     pty #3  ← transcript 2 (if sudoers has log_output)
+         └─ logsh(root) pty #4  ← transcript 3
+            └─ bash(root)
+```
+
+Four pseudo-terminals for one session, the same keystrokes stored three times,
+and the raw-mode keystroke-timing regression stacked at every layer.
+
+`nested_sessions` controls it. Detection is by **process ancestry** (walking the
+`PPid` chain), not by environment: sudo's `env_reset` strips `LOGSH_SESSION`, and
+`SUDO_USER` — which sudo sets *after* the reset, so it does survive — is
+forgeable by anyone who controls their environment. The ancestry walk is not.
+
+**Inside another logsh it always skips**, whatever the setting says. There is no
+ambiguity: the outer logsh is certainly recording, because the bytes pass through
+its pty to reach here.
+
+**Under sudo it is a judgement call, and logsh cannot make it.** sudo records I/O
+only when the matched sudoers rule carries `log_output`, and nothing visible from
+inside the session reveals whether it did. Determining it would mean
+reimplementing the policy engine.
+
+| Value | Behaviour |
+|---|---|
+| `metadata` *(default)* | No second pty, no transcript, but a record is kept: who escalated, what shell, when, exit status, and both session UUIDs. If sudo was not logging you still know the session happened. |
+| `skip` | Plain exec through. Nothing recorded, nothing emitted. Only safe when **every** sudoers rule reaching a shell has `log_output` — otherwise a root session is recorded by nobody and nothing says so. |
+| `record` | Full second transcript. Never a gap, at the cost of duplication and the extra pty. De-duplicate downstream on the shared UUID. |
+
+The default is `metadata` rather than `skip` deliberately: a de-duplication
+feature that manufactures a silent audit gap is worse than the duplication it
+removes. `logsh -validate` warns when `skip` is set.
+
+**Who escalated.** Under sudo, logsh records `submituser` as the account that
+escalated (alice) and `runuser` as the account the session runs as (root),
+matching sudo's own convention. Before this, both said root, and the record could
+not answer the only question anybody asks of it.
+
+---
+
 ## Command log (optional, off by default)
 
 One syslog record per command executed in the session, independent of session

@@ -70,6 +70,23 @@ type Config struct {
 	// a mere network blip, because a blip must not lock out a fleet.
 	FailClosed bool `yaml:"fail_closed"`
 
+	// NestedSessions decides what to do when logsh finds itself inside something
+	// that may already be recording: record, metadata, or skip. Default metadata.
+	//
+	// It applies to sudo only. Nesting inside another logsh always skips, because
+	// there is nothing to weigh up -- the outer logsh is certainly capturing these
+	// bytes, they pass through its pty to get here.
+	//
+	// Under sudo it IS a judgement call, and logsh cannot make it: sudo records
+	// I/O only when the matched sudoers rule carries log_output, and nothing
+	// visible from inside the session says whether it did. Choosing `skip` on a
+	// host whose sudoers lacks log_output produces a root session recorded by
+	// nobody -- an audit gap manufactured by a de-duplication feature, which is
+	// worse than the duplication it removes. `metadata` is the default because it
+	// drops the duplicate transcript while still leaving a record that the
+	// session happened and who escalated.
+	NestedSessions string `yaml:"nested_sessions"`
+
 	// CommandLog logs each executed command to LOCAL syslog, keyed by a session
 	// UUID. Independent of session recording in every direction: its own toggle,
 	// its own destination, and it works whether the session is recorded,
@@ -169,6 +186,7 @@ func DefaultConfig() *Config {
 			MaxLen:         DefaultCommandLogMaxLen,
 			Required:       false,
 		},
+		NestedSessions:   NestedModeMetadata,
 		FailClosed:       true,
 		BreakGlassMarker: "/etc/logsh/bypass",
 	}
@@ -306,6 +324,12 @@ func (c *Config) Validate() error {
 	if _, err := config.TLSVersion(c.Server.TLSMinVersion); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	switch c.NestedSessions {
+	case "", NestedModeRecord, NestedModeMetadata, NestedModeSkip:
+	default:
+		return fmt.Errorf("nested_sessions: %q is not one of %q, %q, %q",
+			c.NestedSessions, NestedModeRecord, NestedModeMetadata, NestedModeSkip)
+	}
 	if c.CommandLog.Enabled {
 		if _, err := eventlog.ParseFacility(c.CommandLog.SyslogFacility); err != nil {
 			return fmt.Errorf("command_log.syslog_facility: %w", err)
@@ -334,6 +358,11 @@ func (c *Config) Warnings() []string {
 				"are readable by every recorded user and can be used to forge audit records. "+
 				"Prefer a local sudosrv relay on loopback that holds the credentials as root.",
 			c.Server.TLSCertFile))
+	}
+	if c.NestedSessions == NestedModeSkip {
+		w = append(w, "nested_sessions is \"skip\": a session under sudo will not be recorded "+
+			"here at all. That is only safe if every sudoers rule reaching a shell carries "+
+			"log_output, because logsh cannot tell whether sudo actually recorded.")
 	}
 	if c.CommandLog.Enabled {
 		w = append(w, "command_log is enabled: it traces execve with ptrace, so strace and gdb "+

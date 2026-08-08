@@ -46,13 +46,38 @@ func (c *Config) recordsAnyStream() bool {
 // Setting any of log_stdin / log_stdout / log_stderr promotes the session to a
 // full I/O recording of those streams, at the cost of that pass-through.
 func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog) (Outcome, error) {
+	return runPassthrough(ctx, cfg, inv, shellPath, std, cmdLog,
+		Nesting{SudoUID: -1, SudoGID: -1}, cfg.recordsAnyStream())
+}
+
+// RunMetadataOnly runs the shell with its streams passed straight through and
+// only a metadata record kept: who, what, when, and how it exited.
+//
+// This is the nested case. Something above us -- sudo, or another logsh -- is
+// already carrying the transcript, so allocating a second pseudo-terminal to
+// capture the same bytes buys nothing and costs a layer. Passing the terminal
+// through untouched also means the raw-mode keystroke-timing regression is not
+// stacked a second time.
+//
+// It keeps a record rather than exec'ing straight through so that a nested
+// session is still visible as a fact -- with both session UUIDs, so it joins to
+// whatever the outer recorder stored.
+func RunMetadataOnly(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog, nesting Nesting) (Outcome, error) {
+	return runPassthrough(ctx, cfg, inv, shellPath, std, cmdLog, nesting, false)
+}
+
+func runPassthrough(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog, nesting Nesting, captureStreams bool) (Outcome, error) {
 	argv0 := ChildArgv0(shellPath, inv.LoginShell)
 	argv := append([]string{argv0}, inv.Args...)
 
-	meta := CollectMeta("", WinSize{}, shellPath, argv)
+	// A nested interactive session has a real terminal even though logsh did not
+	// allocate one; naming it is what lets this record be lined up against the
+	// enclosing recorder's.
+	meta := CollectMeta(TTYNameOf(std.In.Fd()), WinSize{}, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
+	meta.ApplyNesting(nesting)
 
-	rec, err := StartEventRecorder(ctx, cfg, meta)
+	rec, err := StartEventRecorder(ctx, cfg, meta, captureStreams)
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
@@ -72,8 +97,8 @@ func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPa
 		closers = nil
 		cmd = exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		cmd.Args = argv
-		cmd.Env = PrepareEnv(os.Environ(), shellPath)
-		closers, wireErr = wireStreams(cmd, std, cfg, rec, &wg)
+		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), shellPath), cmdLog.SessionID())
+		closers, wireErr = wireStreams(cmd, std, cfg, rec, &wg, captureStreams)
 		return cmd
 	}
 
@@ -105,14 +130,14 @@ func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPa
 // wireStreams connects the child's three streams, teeing the ones being
 // recorded. It returns the parent-side descriptors that must be closed after
 // the child starts.
-func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.WaitGroup) ([]*os.File, error) {
+func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.WaitGroup, capture bool) ([]*os.File, error) {
 	var closers []*os.File
 
 	// Pass-through is the default and the fast path: handing os/exec the real
 	// *os.File means the child inherits the descriptor with no copy at all.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = std.In, std.Out, std.Err
 
-	if cfg.LogStdin {
+	if capture && cfg.LogStdin {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -124,7 +149,7 @@ func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.
 			copyRecording(pw, std.In, func(b []byte) { _ = rec.Stream("stdin", b) })
 		})
 	}
-	if cfg.LogStdout {
+	if capture && cfg.LogStdout {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -136,7 +161,7 @@ func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.
 			copyRecording(std.Out, pr, func(b []byte) { _ = rec.Stream("stdout", b) })
 		})
 	}
-	if cfg.LogStderr {
+	if capture && cfg.LogStderr {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -180,7 +205,7 @@ func copyRecording(dst io.Writer, src io.Reader, record func([]byte)) {
 // false the server stores a metadata-only record and -- crucially -- sends no
 // reply at all, neither a log id nor a commit point. The sinks know not to wait;
 // see streamSink.expectAck.
-func StartEventRecorder(ctx context.Context, cfg *Config, meta SessionMeta) (*Recorder, error) {
+func StartEventRecorder(ctx context.Context, cfg *Config, meta SessionMeta, expectIobufs bool) (*Recorder, error) {
 	sink, err := OpenSink(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -190,7 +215,7 @@ func StartEventRecorder(ctx context.Context, cfg *Config, meta SessionMeta) (*Re
 	accept := &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
 		SubmitTime:   timeSpec(now),
 		InfoMsgs:     meta.InfoMessages(),
-		ExpectIobufs: cfg.recordsAnyStream(),
+		ExpectIobufs: expectIobufs,
 	}}}
 
 	logID, err := sink.Start(ctx, accept)

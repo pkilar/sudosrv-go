@@ -107,6 +107,42 @@ server:
   # with a timer, and never point logrotate at this directory.
   journal_directory: ""
 
+# What to do when logsh finds itself inside something that may already be
+# recording. Values: metadata | skip | record.
+#
+# THE PROBLEM. `sudo -i` runs the TARGET account's passwd shell, so once logsh is
+# root's shell the same session gets captured twice — three times when the
+# invoking account also uses logsh:
+#
+#   sshd pty -> logsh(alice) -> bash -> sudo -i -> logsh(root) -> bash
+#               ^^ transcript 1          ^^ transcript 2  ^^ transcript 3
+#
+# Four pseudo-terminals for one session, and the raw-mode keystroke-timing
+# regression stacked at every layer.
+#
+# Inside another logsh this ALWAYS skips regardless of the setting: the outer
+# logsh is certainly recording, the bytes pass through its pty to get here.
+#
+# Under sudo it is a judgement call and logsh cannot make it. sudo records I/O
+# only when the matched sudoers rule carries log_output, and nothing visible from
+# inside the session says whether it did:
+#
+#   metadata  (default) No second pty and no transcript, but a record is still
+#             kept — who escalated, what shell, when, exit status, and both
+#             session UUIDs so it joins to sudo's transcript. If sudo turns out
+#             not to have been logging you still know the session happened.
+#   skip      Plain exec straight through. Nothing recorded, nothing emitted.
+#             Only safe if EVERY sudoers rule reaching a shell has log_output —
+#             otherwise a root session goes unrecorded and nothing says so.
+#   record    Today's behaviour: a full second transcript. Never a gap, at the
+#             cost of duplicate storage and the extra pty layer. De-duplicate
+#             downstream on the shared UUID.
+#
+# Note that under sudo, logsh records submituser as the account that ESCALATED
+# (alice) and runuser as the account the session runs as (root), matching sudo's
+# own convention.
+nested_sessions: metadata
+
 # Command log: one syslog record per command executed in the session.
 #
 # INDEPENDENT of session recording in every direction — its own toggle, it goes

@@ -64,6 +64,25 @@ func Exec(shellPath, argv0 string, args, env []string) error {
 	return nil // unreachable
 }
 
+// WithSessionEnv adds the enclosing session's UUID to an environment, so a logsh
+// started underneath this one can recognise the nesting and name its parent.
+//
+// It does not survive sudo's env_reset, which is why detection does not rely on
+// it -- see DetectNesting.
+func WithSessionEnv(env []string, sessionID string) []string {
+	if sessionID == "" {
+		return env
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, LogshSessionEnv+"=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, LogshSessionEnv+"="+sessionID)
+}
+
 // ExecInvocation runs the resolved shell for an invocation with no recording.
 // It is a free function rather than a Config method because the break-glass path
 // reaches it with no usable configuration at all.
