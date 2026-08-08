@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/user"
 	"strconv"
-	"sudosrv/internal/logsrvclient"
-	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
 	"time"
@@ -132,8 +130,8 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 // event -- computing it outside the lock would let two events interleave and
 // produce a transcript whose timings do not add up.
 type Recorder struct {
-	proc  protocol.Processor
-	cfg   Config
+	sink  Sink
+	cfg   *Config
 	start time.Time
 
 	mu   sync.Mutex
@@ -143,14 +141,14 @@ type Recorder struct {
 	logID string
 }
 
-// StartRecorder connects to the log server, sends the AcceptMessage and waits
-// for the log_id that acknowledges it.
+// StartRecorder opens a sink for the session and delivers its AcceptMessage.
 //
-// Waiting is correct HERE and only here. An I/O session (expect_iobufs=true) is
-// acknowledged with a log_id; an event-only one never is, and blocking for a
-// reply that is not coming would hang the session forever. See ReadAck.
-func StartRecorder(ctx context.Context, cfg Config, meta SessionMeta) (*Recorder, error) {
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
+// expect_iobufs is true here because this is an interactive transcript. That
+// choice is what makes the log id meaningful: an I/O session is acknowledged
+// with one, while an event-only session is never acknowledged at all. See
+// logsrvclient.ReadAck.
+func StartRecorder(ctx context.Context, cfg *Config, meta SessionMeta) (*Recorder, error) {
+	sink, err := OpenSink(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -162,36 +160,13 @@ func StartRecorder(ctx context.Context, cfg Config, meta SessionMeta) (*Recorder
 		ExpectIobufs: true,
 	}}}
 
-	if err := cfg.ClientConfig().WithTimeout(ctx, func(opCtx context.Context) error {
-		return proc.WriteClientMessageContext(opCtx, accept)
-	}); err != nil {
-		_ = proc.Close()
-		return nil, fmt.Errorf("send AcceptMessage: %w", err)
+	logID, err := sink.Start(ctx, accept)
+	if err != nil {
+		_ = sink.Close()
+		return nil, err
 	}
 
-	var logID string
-	if err := cfg.ClientConfig().WithTimeout(ctx, func(opCtx context.Context) error {
-		srv, readErr := proc.ReadServerMessageContext(opCtx)
-		if readErr != nil {
-			return readErr
-		}
-		switch m := srv.Type.(type) {
-		case *pb.ServerMessage_LogId:
-			logID = m.LogId
-			return nil
-		case *pb.ServerMessage_Error:
-			return fmt.Errorf("%w: %s", logsrvclient.ErrUpstreamRejected, m.Error)
-		case *pb.ServerMessage_Abort:
-			return fmt.Errorf("%w (abort): %s", logsrvclient.ErrUpstreamRejected, m.Abort)
-		default:
-			return fmt.Errorf("expected a log_id, got %T", srv.Type)
-		}
-	}); err != nil {
-		_ = proc.Close()
-		return nil, fmt.Errorf("AcceptMessage was not acknowledged: %w", err)
-	}
-
-	return &Recorder{proc: proc, cfg: cfg, start: now, last: now, logID: logID}, nil
+	return &Recorder{sink: sink, cfg: cfg, start: now, last: now, logID: logID}, nil
 }
 
 // LogID is the server-assigned identifier for this session.
@@ -218,7 +193,7 @@ func (r *Recorder) send(build func(delay *pb.TimeSpec) *pb.ClientMessage) error 
 	now := time.Now()
 	msg := build(durationSpec(now.Sub(r.last)))
 	r.last = now
-	return r.proc.WriteClientMessage(msg)
+	return r.sink.Send(msg)
 }
 
 // TTYOut records terminal output.
@@ -282,13 +257,11 @@ func (r *Recorder) Exit(ctx context.Context, code int, signal string, coreDumped
 	r.sent = true
 	r.mu.Unlock()
 
-	if err := r.cfg.ClientConfig().WithTimeout(ctx, func(opCtx context.Context) error {
-		return r.proc.WriteClientMessageContext(opCtx, exit)
-	}); err != nil {
+	if err := r.sink.Send(exit); err != nil {
 		return fmt.Errorf("send ExitMessage: %w", err)
 	}
-	return logsrvclient.ReadAck(ctx, r.proc, r.cfg.ClientConfig(), true)
+	return r.sink.Finish(ctx)
 }
 
-// Close releases the connection. Safe to call after Exit.
-func (r *Recorder) Close() error { return r.proc.Close() }
+// Close releases the sink. Safe to call after Exit.
+func (r *Recorder) Close() error { return r.sink.Close() }

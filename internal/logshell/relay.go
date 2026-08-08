@@ -109,7 +109,7 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	argv0 := ChildArgv0(shellPath, inv.LoginShell)
 	argv := append([]string{argv0}, inv.Args...)
 
-	rec, err := StartRecorder(ctx, *cfg, CollectMeta(pty.Name, size, shellPath, argv))
+	rec, err := StartRecorder(ctx, cfg, CollectMeta(pty.Name, size, shellPath, argv))
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}

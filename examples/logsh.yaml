@@ -77,10 +77,23 @@ server:
   connect_timeout: 5s
   response_timeout: 30s
 
-  # Leave empty when using the loopback topology above: the local relay's own
-  # cache directory is the spool, and it is root-owned. Setting a path here means
-  # every recorded user must be able to write to it, and therefore to read each
-  # other's spooled transcripts.
+  # Local spool. When set and writable, it becomes the PRIMARY path: the session
+  # is journalled to disk and forwarded at logout. That keeps the network out of
+  # the keystroke path entirely and makes a server outage cost nothing — the
+  # session records normally and is delivered afterwards.
+  #
+  # When empty (or unwritable), logsh streams straight to the server instead.
+  # Leave it empty with the loopback topology above: the local relay already
+  # spools, as root, and adding a second spool here only duplicates the job.
+  #
+  # A shared spool needs mode 1777 — every recorded user writes to it, and the
+  # sticky bit stops them removing each other's files. Journals themselves are
+  # created 0600, so one user cannot read another's transcript; only the
+  # filenames are visible.
+  #
+  # Undelivered journals are parked as *.journal.undelivered and NEVER pruned:
+  # each is the only copy of a session that never reached the server. Sweep them
+  # with a timer, and never point logrotate at this directory.
   journal_directory: ""
 
 # Refuse a session that cannot be recorded.

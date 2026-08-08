@@ -344,7 +344,7 @@ func TestRecorderDelaysAreDeltas(t *testing.T) {
 	srv := newMockServer(t)
 
 	cfg := testConfig(srv.addr)
-	rec, err := StartRecorder(context.Background(), *cfg,
+	rec, err := StartRecorder(context.Background(), cfg,
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
