@@ -45,11 +45,12 @@ func (c *Config) recordsAnyStream() bool {
 //
 // Setting any of log_stdin / log_stdout / log_stderr promotes the session to a
 // full I/O recording of those streams, at the cost of that pass-through.
-func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO) (Outcome, error) {
+func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog) (Outcome, error) {
 	argv0 := ChildArgv0(shellPath, inv.LoginShell)
 	argv := append([]string{argv0}, inv.Args...)
 
 	meta := CollectMeta("", WinSize{}, shellPath, argv)
+	meta.SessionID = cmdLog.SessionID()
 
 	rec, err := StartEventRecorder(ctx, cfg, meta)
 	if err != nil {
@@ -57,17 +58,30 @@ func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPa
 	}
 	defer func() { _ = rec.Close() }()
 
-	cmd := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
-	cmd.Args = argv
-	cmd.Env = PrepareEnv(os.Environ(), shellPath)
+	cmdLog.Bind(meta, rec.LogID())
 
 	var wg sync.WaitGroup
-	closers, err := wireStreams(cmd, std, cfg, rec, &wg)
-	if err != nil {
-		return Outcome{}, unavailable(err)
+	var closers []*os.File
+	var cmd *exec.Cmd
+	var wireErr error
+
+	build := func() *exec.Cmd {
+		// Any previous attempt's pipes are spent along with its exec.Cmd, so the
+		// streams are rewired per attempt rather than shared.
+		closeAll(closers)
+		closers = nil
+		cmd = exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
+		cmd.Args = argv
+		cmd.Env = PrepareEnv(os.Environ(), shellPath)
+		closers, wireErr = wireStreams(cmd, std, cfg, rec, &wg)
+		return cmd
 	}
 
-	if err := cmd.Start(); err != nil {
+	child, err := startChild(build, cfg, cmdLog)
+	if err == nil && wireErr != nil {
+		err = wireErr
+	}
+	if err != nil {
 		closeAll(closers)
 		return Outcome{}, unavailable(err)
 	}
@@ -78,8 +92,9 @@ func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPa
 	stopSignals := forwardSignals(cmd)
 	defer stopSignals()
 
-	outcome := waitOutcome(cmd)
+	outcome := child.Wait()
 	wg.Wait()
+	cmdLog.End(outcome)
 
 	if err := rec.Exit(ctx, outcome.ExitCode, outcome.Signal, outcome.CoreDumped); err != nil {
 		return outcome, err

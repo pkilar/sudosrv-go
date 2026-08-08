@@ -107,6 +107,43 @@ server:
   # with a timer, and never point logrotate at this directory.
   journal_directory: ""
 
+# Command log: one syslog record per command executed in the session.
+#
+# INDEPENDENT of session recording in every direction — its own toggle, it goes
+# to LOCAL syslog rather than the log server, and it works whether the session
+# is recorded, journalled, or not recorded at all. The transcript shows what a
+# session looked like; this shows what it ran, and this is the one a SIEM can
+# grep. Every record carries SESSION=<uuid>, and the same uuid is attached to the
+# recorded session as `logsh_session` in log.json, so the two join on it.
+#
+# Records look like:
+#   SESSION=<uuid> ; USER=root ; UID=0 ; TTY=pts/3 ; PID=4711 ; CMD=/usr/bin/vi /etc/passwd
+#
+# READ THIS BEFORE ENABLING. It is implemented with ptrace on the session's whole
+# process tree, which buys a property no shell hook can offer — it catches
+# commands run from scripts, from subshells and from inside editors, and cannot
+# be switched off from within the session — at three real costs:
+#
+#   * strace and gdb DO NOT WORK inside a recorded session. A process can have
+#     only one tracer. For an admin shell that is a genuine loss.
+#   * Every exec stops the process briefly. Unmeasurable interactively;
+#     noticeable in a build that spawns 100k processes.
+#   * It is blocked outright where kernel.yama.ptrace_scope is 2 or 3, which
+#     logsh cannot work around because it runs unprivileged. It warns and carries
+#     on with session recording intact.
+#
+# It logs EXECUTIONS, not commands as typed: a pipeline is three records, and
+# `ls` is one record for /usr/bin/ls.
+command_log:
+  enabled: false
+  syslog_facility: authpriv
+  syslog_priority: info
+  max_len: 960
+  # Refuse the session when tracing cannot start. Off by default: a kernel
+  # setting logsh has no influence over can veto ptrace, and locking every
+  # account out of a host over an audit add-on is a poor trade.
+  required: false
+
 # Refuse a session that cannot be recorded.
 #
 # This fires only when the local journal cannot be opened AND the server is

@@ -125,6 +125,44 @@ the host, and the account is useless if you have lost the key.
 
 ---
 
+## Command log (optional, off by default)
+
+One syslog record per command executed in the session, independent of session
+recording — separate toggle, local syslog rather than the log server, and it runs
+whether the session is recorded, journalled, or not recorded at all.
+
+```
+SESSION=<uuid> ; USER=root ; UID=0 ; TTY=pts/3 ; PID=4711 ; CMD=/usr/bin/vi /etc/passwd
+```
+
+Every record carries `SESSION=<uuid>`, and the same uuid is attached to the
+recorded session as `logsh_session` in its `log.json`, so a command record and
+the transcript it came from join on one field.
+
+It is implemented with **ptrace** over the session's whole process tree. That
+buys what no shell hook can — commands run from scripts, from subshells and from
+inside editors are all caught, and it cannot be switched off from within the
+session — at three costs you must accept deliberately:
+
+- **`strace` and `gdb` do not work inside a recorded session.** A process can
+  have only one tracer. For an admin shell this is a real loss, and it is the
+  most common reason to leave the command log off.
+- **Every exec stops the process briefly.** Invisible interactively; measurable
+  in a build spawning 100k processes.
+- **`kernel.yama.ptrace_scope` of 2 or 3 blocks it entirely.** logsh runs
+  unprivileged and cannot work around it. It warns to syslog, emits a `note`
+  record in the command stream, and carries on with session recording intact —
+  unless `command_log.required: true`, which refuses the session instead.
+
+It records *executions*, not commands as typed: a pipeline produces three
+records, and `ls` produces one for `/usr/bin/ls`. If you want commands as the
+user typed them, this is the wrong mechanism.
+
+`logsh -validate` warns whenever it is enabled, so the costs are stated at
+deploy time rather than discovered later.
+
+---
+
 ## Failure behaviour
 
 Recording is refused only when **both** paths fail:

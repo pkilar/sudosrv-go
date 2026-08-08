@@ -46,6 +46,13 @@ type SessionMeta struct {
 	// Command is the real shell; Argv is how it was invoked, argv[0] included.
 	Command string
 	Argv    []string
+
+	// SessionID is logsh's own per-session UUID, minted locally rather than
+	// taken from the server's log id -- that id does not exist for a journalled
+	// session and does not exist at all when recording is off. It is sent as an
+	// info key so a recorded session carries the same identifier the command log
+	// stamps on every line, and the two can be joined.
+	SessionID string
 }
 
 // CollectMeta gathers session metadata for the current process.
@@ -116,6 +123,9 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 		numInfo("columns", int64(m.Cols)),
 
 		strInfo("command", m.Command),
+		// internal/storage copies every info key into log.json, so this lands in
+		// the recorded session's metadata without needing server-side support.
+		strInfo("logsh_session", m.SessionID),
 		{Key: "runargv", Value: &pb.InfoMessage_Strlistval{
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.Argv},
 		}},

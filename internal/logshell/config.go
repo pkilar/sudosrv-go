@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"sudosrv/internal/config"
+	"sudosrv/internal/eventlog"
 	"sudosrv/internal/logsrvclient"
 	"syscall"
 	"time"
@@ -68,6 +69,12 @@ type Config struct {
 	// the local journal cannot be opened AND the server is unreachable, never on
 	// a mere network blip, because a blip must not lock out a fleet.
 	FailClosed bool `yaml:"fail_closed"`
+
+	// CommandLog logs each executed command to LOCAL syslog, keyed by a session
+	// UUID. Independent of session recording in every direction: its own toggle,
+	// its own destination, and it works whether the session is recorded,
+	// journalled, or not recorded at all.
+	CommandLog CommandLogConfig `yaml:"command_log"`
 
 	// BreakGlassMarker names a root-owned file whose existence forces fail-open
 	// for the session, with a crit-priority syslog alert and a banner on the
@@ -154,6 +161,13 @@ func DefaultConfig() *Config {
 			TLSMinVersion:   "1.3",
 			ConnectTimeout:  5 * time.Second,
 			ResponseTimeout: 30 * time.Second,
+		},
+		CommandLog: CommandLogConfig{
+			Enabled:        false, // opt-in: it is ptrace, see CommandLogConfig.Enabled
+			SyslogFacility: "authpriv",
+			SyslogPriority: "info",
+			MaxLen:         DefaultCommandLogMaxLen,
+			Required:       false,
 		},
 		FailClosed:       true,
 		BreakGlassMarker: "/etc/logsh/bypass",
@@ -292,6 +306,14 @@ func (c *Config) Validate() error {
 	if _, err := config.TLSVersion(c.Server.TLSMinVersion); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	if c.CommandLog.Enabled {
+		if _, err := eventlog.ParseFacility(c.CommandLog.SyslogFacility); err != nil {
+			return fmt.Errorf("command_log.syslog_facility: %w", err)
+		}
+		if _, err := eventlog.ParsePriority(c.CommandLog.SyslogPriority); err != nil {
+			return fmt.Errorf("command_log.syslog_priority: %w", err)
+		}
+	}
 	if c.BreakGlassMarker != "" && !filepath.IsAbs(c.BreakGlassMarker) {
 		return fmt.Errorf("break_glass_marker: %q is not an absolute path", c.BreakGlassMarker)
 	}
@@ -312,6 +334,11 @@ func (c *Config) Warnings() []string {
 				"are readable by every recorded user and can be used to forge audit records. "+
 				"Prefer a local sudosrv relay on loopback that holds the credentials as root.",
 			c.Server.TLSCertFile))
+	}
+	if c.CommandLog.Enabled {
+		w = append(w, "command_log is enabled: it traces execve with ptrace, so strace and gdb "+
+			"WILL NOT WORK inside a recorded session, and every exec costs a stop. It is also "+
+			"blocked outright where kernel.yama.ptrace_scope is 2 or 3.")
 	}
 	if c.Server.TLSSkipVerify {
 		w = append(w, "server.tls_skip_verify is set: session transcripts will be sent to any peer that completes a handshake")

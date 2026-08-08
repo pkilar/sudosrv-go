@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/syslog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -50,6 +51,10 @@ type Outcome struct {
 	CoreDumped bool
 }
 
+// syslogWarning is the priority for recorder problems that do not stop the
+// session.
+const syslogWarning = syslog.LOG_WARNING
+
 // ErrRecordingUnavailable reports that recording could not be STARTED, and so
 // that no shell was ever spawned.
 //
@@ -85,7 +90,7 @@ type TerminalIO struct {
 // StdTerminal is the production TerminalIO.
 func StdTerminal() TerminalIO { return TerminalIO{In: os.Stdin, Out: os.Stdout} }
 
-func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath string, tio TerminalIO) (Outcome, error) {
+func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath string, tio TerminalIO, cmdLog *CommandLog) (Outcome, error) {
 	stdin := tio.In
 
 	size, err := GetWinSize(stdin.Fd())
@@ -109,28 +114,39 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	argv0 := ChildArgv0(shellPath, inv.LoginShell)
 	argv := append([]string{argv0}, inv.Args...)
 
-	rec, err := StartRecorder(ctx, cfg, CollectMeta(pty.Name, size, shellPath, argv))
+	meta := CollectMeta(pty.Name, size, shellPath, argv)
+	meta.SessionID = cmdLog.SessionID()
+
+	rec, err := StartRecorder(ctx, cfg, meta)
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
 	defer func() { _ = rec.Close() }()
+
+	// Bound only now: the tty name is part of every command record and does not
+	// exist until the pty does.
+	cmdLog.Bind(meta, rec.LogID())
 
 	slave, err := pty.OpenSlave()
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
 
-	cmd := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
-	cmd.Args = argv
-	cmd.Env = PrepareEnv(os.Environ(), shellPath)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
-	// Setsid puts the shell in its own session with the INNER pty as controlling
-	// terminal, which is what makes job control, ^C and ^Z work inside the
-	// recorded session instead of hitting logsh. Ctty is the fd number as the
-	// CHILD will see it, i.e. stdin.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	build := func() *exec.Cmd {
+		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
+		c.Args = argv
+		c.Env = PrepareEnv(os.Environ(), shellPath)
+		c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
+		// Setsid puts the shell in its own session with the INNER pty as
+		// controlling terminal, which is what makes job control, ^C and ^Z work
+		// inside the recorded session instead of hitting logsh. Ctty is the fd
+		// number as the CHILD will see it, i.e. stdin.
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+		return c
+	}
 
-	if err := cmd.Start(); err != nil {
+	child, err := startChild(build, cfg, cmdLog)
+	if err != nil {
 		_ = slave.Close()
 		return Outcome{}, unavailable(err)
 	}
@@ -160,7 +176,8 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	relayInput(stdin, pty.Master, rec)
 	relayOutput(pty.Master, tio.Out, rec)
 
-	outcome := waitOutcome(cmd)
+	outcome := child.Wait()
+	cmdLog.End(outcome)
 
 	if err := rec.Exit(ctx, outcome.ExitCode, outcome.Signal, outcome.CoreDumped); err != nil {
 		// The shell has already run; its exit status is the truth and must be
@@ -170,6 +187,43 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 		return outcome, err
 	}
 	return outcome, nil
+}
+
+// childProc is a started child whose exit status can be collected.
+type childProc interface{ Wait() Outcome }
+
+type plainChild struct{ cmd *exec.Cmd }
+
+func (p plainChild) Wait() Outcome { return waitOutcome(p.cmd) }
+
+// startChild launches the shell, under exec tracing when the command log wants
+// it, and plainly otherwise.
+//
+// build produces a FRESH exec.Cmd each call. That is not fussiness: a failed
+// trace attempt has already forked and killed a process, so its exec.Cmd is
+// spent and cannot be reused for the untraced fallback.
+func startChild(build func() *exec.Cmd, cfg *Config, cmdLog *CommandLog) (childProc, error) {
+	if cfg.CommandLog.Enabled {
+		tc, err := startTraced(build(), cmdLog.Exec)
+		if err == nil {
+			return tc, nil
+		}
+		if cfg.CommandLog.Required {
+			return nil, fmt.Errorf("exec tracing is required but could not start: %w", err)
+		}
+		// Carry on without the command log. Refusing the login over an audit
+		// add-on that a kernel setting can veto is the worse trade -- but say so
+		// in both streams, because a command log that is quietly absent is
+		// indistinguishable from a session that ran no commands.
+		Alertf(syslogWarning, "exec tracing unavailable, continuing without a command log: %v", err)
+		cmdLog.Note("exec tracing unavailable: " + err.Error())
+	}
+
+	cmd := build()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return plainChild{cmd}, nil
 }
 
 // relayInput copies the user's keystrokes to the shell.

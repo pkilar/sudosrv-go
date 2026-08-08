@@ -154,7 +154,7 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 		Args: []string{"-c", "printf 'END-TO-END-MARKER\\n'; exit 9"}}
 
 	outcome, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw})
+		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestEndToEndNonInteractiveSessionIsMetadataOnly(t *testing.T) {
 		defer close(done)
 		_, _ = RunNonInteractive(context.Background(), cfg,
 			Invocation{Name: "lsh", Args: []string{"-c", "true"}}, "/bin/sh",
-			StdIO{In: rIn, Out: wOut, Err: wOut})
+			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 	}()
 	select {
 	case <-done:

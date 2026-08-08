@@ -85,11 +85,26 @@ func runShell(inv logshell.Invocation) int {
 	// allocates a pty; keying off "-c" would classify it as non-interactive and
 	// hand the user a fully interactive, entirely unrecorded shell.
 	ctx := context.Background()
+
+	// The command log is independent of recording: its own toggle, local syslog
+	// rather than the log server, and it runs whether the session is recorded,
+	// journalled, or not recorded at all.
+	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg, shellPath)
+	if cmdLogErr != nil {
+		if cfg.CommandLog.Required {
+			return refuse(cfg, inv, shellPath, fmt.Sprintf("command log unavailable: %v", cmdLogErr))
+		}
+		logshell.Alertf(syslog.LOG_WARNING, "command log unavailable, continuing without it: %v", cmdLogErr)
+	}
+	defer func() { _ = cmdLog.Close() }()
+
 	var outcome logshell.Outcome
 	if logshell.IsTerminal(os.Stdin.Fd()) {
-		outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath, logshell.StdTerminal())
+		outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
+			logshell.StdTerminal(), cmdLog)
 	} else {
-		outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath, logshell.StdStreams())
+		outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath,
+			logshell.StdStreams(), cmdLog)
 	}
 	if err != nil {
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {

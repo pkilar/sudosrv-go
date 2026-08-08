@@ -78,6 +78,13 @@ func shortTTY(tty string) string {
 // escapeControl renders control characters as C does, in octal #0nn form
 // (LBUF_ESC_CNTRL). Without this a command name containing a newline could
 // forge additional log lines, which is the whole reason C escapes here.
+// EscapeControl is exported because logsh writes its own command-log records to
+// syslog and must escape them identically. Duplicating this would risk the two
+// drifting, and the consequence of getting it wrong is not cosmetic: an
+// unescaped newline in a command lets a caller forge what reads as a second,
+// entirely fabricated audit record.
+func EscapeControl(s string) string { return escapeControl(s) }
+
 func escapeControl(s string) string {
 	var b strings.Builder
 	for _, r := range s {

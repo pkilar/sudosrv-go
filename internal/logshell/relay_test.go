@@ -154,7 +154,7 @@ func TestRunRecordedCapturesOutputAndExitStatus(t *testing.T) {
 		Args: []string{"-c", "printf 'HELLO-FROM-SHELL\\n'; exit 7"}}
 
 	outcome, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw})
+		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRunRecordedCapturesInput(t *testing.T) {
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'got:%s\\n' \"$line\""}}
 
 	if _, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}); err != nil {
+		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestRunRecordedRespectsStreamToggles(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'ok\\n'"}}
 	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}); err != nil {
+		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -257,7 +257,7 @@ func TestRunRecordedReportsSignalDeath(t *testing.T) {
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "kill -TERM $$"}}
 
 	outcome, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw})
+		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestRunRecordedFailsBeforeSpawningShell(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	_, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw})
+		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err == nil {
 		t.Fatal("RunRecorded succeeded although the server never acknowledged the session")
 	}

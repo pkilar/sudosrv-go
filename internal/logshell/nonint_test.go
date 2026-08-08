@@ -80,7 +80,7 @@ func TestNonInteractiveDoesNotWaitForAnAcknowledgement(t *testing.T) {
 	go func() {
 		defer close(ran)
 		out, _ := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
-			StdIO{In: rIn, Out: wOut, Err: wOut})
+			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 		done <- out
 	}()
 	t.Cleanup(func() { <-ran })
@@ -118,7 +118,7 @@ func TestNonInteractiveRecordsTheCommandLine(t *testing.T) {
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "scp -t /tmp/incoming"}}
 	if _, err := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
-		StdIO{In: rIn, Out: wOut, Err: wOut}); err != nil {
+		StdIO{In: rIn, Out: wOut, Err: wOut}, nil); err != nil {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestNonInteractivePassesStreamsThroughUntouched(t *testing.T) {
 	go func() {
 		defer close(ran)
 		_, _ = RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
-			StdIO{In: rIn, Out: wOut, Err: wOut})
+			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 		_ = wOut.Close()
 	}()
 	t.Cleanup(func() { <-ran })
@@ -202,7 +202,7 @@ func TestNonInteractiveStreamTogglesPromoteToAnIOSession(t *testing.T) {
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'CAPTURED-STDOUT\\n'"}}
 	if _, err := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
-		StdIO{In: rIn, Out: wOut, Err: wOut}); err != nil {
+		StdIO{In: rIn, Out: wOut, Err: wOut}, nil); err != nil {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestNonInteractiveReportsExitStatus(t *testing.T) {
 
 	outcome, err := RunNonInteractive(context.Background(), cfg,
 		Invocation{Name: "lsh", Args: []string{"-c", "exit 42"}}, "/bin/sh",
-		StdIO{In: rIn, Out: wOut, Err: wOut})
+		StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 	if err != nil {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
