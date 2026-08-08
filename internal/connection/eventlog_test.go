@@ -58,7 +58,14 @@ func eventTestAccept(command string) *pb.AcceptMessage {
 func newEventTestHandler(t *testing.T) (*Handler, func()) {
 	t.Helper()
 	clientConn, serverConn := net.Pipe()
-	cfg := &config.Config{Server: config.ServerConfig{Mode: "local", ServerID: "TestSrv"}}
+	// LogDirectory must be set even for tests that never expect to touch disk.
+	// handleReject creates a UUID-hierarchy directory under it directly, and an
+	// empty value makes that path relative -- so the session tree lands in the
+	// package source directory instead of anywhere temporary.
+	cfg := &config.Config{
+		Server:       config.ServerConfig{Mode: "local", ServerID: "TestSrv"},
+		LocalStorage: config.LocalStorageConfig{LogDirectory: t.TempDir()},
+	}
 	h := NewHandler(serverConn, cfg)
 	h.sessionFactories.newLocalStorageSession = func(uuid.UUID, *pb.AcceptMessage, *config.LocalStorageConfig) (SessionHandler, error) {
 		return &mockSessionHandler{

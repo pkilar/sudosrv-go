@@ -49,7 +49,11 @@ func TestConnectionHandler(t *testing.T) {
 			IdleTimeout: 1 * time.Second,
 			ServerID:    "TestSrv",
 		},
-		LocalStorage: config.LocalStorageConfig{}, // Needed for function signature
+		// Anchored at a temp directory rather than left zero: several handler
+		// paths (handleReject in particular) write under LogDirectory without
+		// checking it, and an empty value is a relative path into the package
+		// source tree.
+		LocalStorage: config.LocalStorageConfig{LogDirectory: t.TempDir()},
 	}
 
 	t.Run("ClientHelloFlow", func(t *testing.T) {
