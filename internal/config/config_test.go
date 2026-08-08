@@ -235,6 +235,9 @@ func TestValidate(t *testing.T) {
 				ListenAddress: "127.0.0.1:30343",
 			},
 			LocalStorage: LocalStorageConfig{
+				// Absolute, as every real local-mode config is: a relative one
+				// resolves against the daemon's working directory.
+				LogDirectory:    "/var/log/gosudo-io",
 				DirPermissions:  0750,
 				FilePermissions: 0640,
 			},
@@ -246,6 +249,30 @@ func TestValidate(t *testing.T) {
 		mutate  func(t *testing.T, c *Config)
 		wantErr string // substring match; "" means expect no error
 	}{
+		{
+			// An explicit `log_directory: ""` survives the defaults merge, and
+			// every session path would then be relative to wherever the daemon
+			// happened to be started from.
+			name:    "local mode with an empty log_directory rejects",
+			mutate:  func(_ *testing.T, c *Config) { c.LocalStorage.LogDirectory = "" },
+			wantErr: "log_directory must be set",
+		},
+		{
+			name:    "local mode with a relative log_directory rejects",
+			mutate:  func(_ *testing.T, c *Config) { c.LocalStorage.LogDirectory = "logs/sessions" },
+			wantErr: "must be an absolute path",
+		},
+		{
+			// Relay mode never touches local storage, so the same value is fine.
+			name: "relay mode ignores log_directory",
+			mutate: func(_ *testing.T, c *Config) {
+				c.Server.Mode = "relay"
+				c.Relay.UpstreamHost = "logsrv.example.com:30344"
+				c.Relay.RelayCacheDirectory = "/var/spool/gosudo-relay"
+				c.LocalStorage.LogDirectory = ""
+			},
+			wantErr: "",
+		},
 		{
 			name: "valid local mode",
 		},

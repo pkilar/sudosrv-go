@@ -679,6 +679,19 @@ func Validate(cfg *Config) error {
 			cfg.Server.Mode)
 	}
 	if cfg.Server.Mode == "local" {
+		// An empty or relative log_directory makes every session path relative to
+		// the daemon's working directory, so transcripts land wherever it happened
+		// to be started from -- and move if it is ever restarted from elsewhere.
+		// The default is absolute, so this only bites a config that sets the key
+		// explicitly, which is exactly the case worth catching.
+		if cfg.LocalStorage.LogDirectory == "" {
+			return fmt.Errorf("local_storage.log_directory must be set in local mode")
+		}
+		if !filepath.IsAbs(cfg.LocalStorage.LogDirectory) {
+			return fmt.Errorf("local_storage.log_directory %q must be an absolute path; "+
+				"a relative one resolves against the daemon's working directory",
+				cfg.LocalStorage.LogDirectory)
+		}
 		if err := ValidatePermissions(&cfg.LocalStorage); err != nil {
 			return err
 		}

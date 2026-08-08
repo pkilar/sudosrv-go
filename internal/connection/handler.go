@@ -785,11 +785,13 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 		return nil, nil
 	}
 
-	// Generate a UUID-based path for the reject event log
+	// A reject record uses the same UUID hierarchy a session would, so the two
+	// land side by side. It deliberately does NOT go through
+	// storage.buildSessionPath: an iolog_dir template can reference %{command}
+	// and %{runuser}, and a rejected command has no run identity to expand them
+	// from. Sharing the layout while not sharing the templating is the point.
 	rejectUUID := uuid.New()
-	uuidStr := rejectUUID.String()
-	sessID := uuidStr[:6]
-	rejectDir := filepath.Join(h.config.LocalStorage.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6])
+	rejectDir := storage.UUIDHierarchyPath(h.config.LocalStorage.LogDirectory, rejectUUID)
 
 	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.EffectiveDirMode())); err != nil {
 		slog.Error("Failed to create reject event directory", "error", err, "path", rejectDir)
