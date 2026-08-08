@@ -44,8 +44,19 @@ log_ttyout: true # session output (on by default)
 log_ttyin: false # session input  (off by default)
 
 # Non-interactive (no PTY) sessions -- scp, rsync, git-over-ssh, `ssh host cmd`.
-# All off by default: such sessions are recorded as a metadata-only record naming
-# the command, so a 10GB transfer does not produce a 10GB transcript.
+#
+# All off by default. Such a session is then recorded as a METADATA-ONLY record
+# — who ran what, when, how it exited — and the three streams are passed through
+# untouched, so a 10GB transfer stays byte-exact and full speed instead of
+# producing a 10GB transcript.
+#
+# Setting ANY of these promotes the session to a full I/O recording of the
+# streams you enable, and gives up that pass-through: every byte then takes a
+# detour through logsh. Turning on log_stdin or log_stdout will slow file
+# transfer down measurably and grow the log store by the size of the data moved.
+#
+# Note that interactive sessions are unaffected by these three — a PTY session
+# is governed by log_ttyin/log_ttyout above.
 log_stdin: false
 log_stdout: false
 log_stderr: false

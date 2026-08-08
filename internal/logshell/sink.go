@@ -88,13 +88,25 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 type streamSink struct {
 	proc protocol.Processor
 	cfg  logsrvclient.Config
+	// expectAck records whether this session will be acknowledged at all. An
+	// I/O session gets a log id and, at the end, a commit point. An event-only
+	// session gets NEITHER: the server's EventSession returns no ServerMessage
+	// for either message. Reading for a reply that is never coming would hang
+	// the session forever -- for logsh that means every scp and rsync on the
+	// host.
+	expectAck bool
 }
 
 func (s *streamSink) Start(ctx context.Context, accept *pb.ClientMessage) (string, error) {
+	s.expectAck = accept.GetAcceptMsg().GetExpectIobufs()
+
 	if err := s.cfg.WithTimeout(ctx, func(c context.Context) error {
 		return s.proc.WriteClientMessageContext(c, accept)
 	}); err != nil {
 		return "", fmt.Errorf("send AcceptMessage: %w", err)
+	}
+	if !s.expectAck {
+		return "", nil
 	}
 
 	var logID string
@@ -128,6 +140,10 @@ func (s *streamSink) Send(msg *pb.ClientMessage) error { return s.proc.WriteClie
 // sshd tear the connection down -- while the session was still only in the
 // server's memory.
 func (s *streamSink) Finish(ctx context.Context) error {
+	if !s.expectAck {
+		// Transmission IS completion for an event-only session. See expectAck.
+		return nil
+	}
 	return logsrvclient.ReadAck(ctx, s.proc, s.cfg, true)
 }
 
@@ -246,11 +262,20 @@ func replayJournal(ctx context.Context, path string, cfg *Config) error {
 	}
 	defer func() { _ = proc.Close() }()
 
-	sawExit := false
+	// A journal is self-describing on purpose: a sweeper replaying one hours
+	// later has no other way to know whether the session it holds will ever be
+	// acknowledged.
+	expectAck, sawExit, first := false, false, true
 	for {
 		msg, readErr := logsrvclient.ReadMessage(f)
 		if readErr != nil {
 			break // EOF, or a truncated tail; either way there is no more to send
+		}
+		if first {
+			if a, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
+				expectAck = a.AcceptMsg.GetExpectIobufs()
+			}
+			first = false
 		}
 		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
 			sawExit = true
@@ -264,6 +289,9 @@ func replayJournal(ctx context.Context, path string, cfg *Config) error {
 
 	// Only an I/O session that reached its ExitMessage is ever acknowledged.
 	// Waiting for a commit point that is not coming would hang the logout.
+	if !expectAck {
+		return nil
+	}
 	if !sawExit {
 		return errors.New("journal has no ExitMessage; it cannot be acknowledged")
 	}

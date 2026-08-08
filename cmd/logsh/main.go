@@ -84,13 +84,13 @@ func runShell(inv logshell.Invocation) int {
 	// whether "-c" was passed. `ssh -t host /bin/bash` supplies a command AND
 	// allocates a pty; keying off "-c" would classify it as non-interactive and
 	// hand the user a fully interactive, entirely unrecorded shell.
-	if !logshell.IsTerminal(os.Stdin.Fd()) {
-		// M4 replaces this with a metadata-only session.
-		return refuse(cfg, inv, shellPath,
-			"non-interactive session recording is not implemented in this build")
+	ctx := context.Background()
+	var outcome logshell.Outcome
+	if logshell.IsTerminal(os.Stdin.Fd()) {
+		outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath, logshell.StdTerminal())
+	} else {
+		outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath, logshell.StdStreams())
 	}
-
-	outcome, err := logshell.RunRecorded(context.Background(), cfg, inv, shellPath, logshell.StdTerminal())
 	if err != nil {
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {
 			// No shell was ever started, so the failure policy still has a
