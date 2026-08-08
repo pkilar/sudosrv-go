@@ -741,13 +741,24 @@ func createSessionDir(path string, perm os.FileMode) (string, error) {
 	return "", fmt.Errorf("failed to create unique directory for template %s after %d attempts", path, mkdtempAttempts)
 }
 
+// UUIDHierarchyPath is the default session directory for a UUID: the aa/bb/cc
+// fan-out used when no iolog_dir template is configured, which keeps any single
+// directory from accumulating every session on the host.
+//
+// Exported because internal/connection needs the same layout for reject records
+// and previously open-coded it. Two copies of a directory layout is the kind of
+// duplication that stays correct right up until one of them is changed, at which
+// point reject records quietly stop landing beside the sessions they relate to.
+func UUIDHierarchyPath(logDirectory string, sessionUUID uuid.UUID) string {
+	sessID := sessionUUID.String()[:6]
+	return filepath.Join(logDirectory, sessID[:2], sessID[2:4], sessID[4:6])
+}
+
 // buildSessionPath constructs the full path to the log directory based on config settings.
 func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acceptMsg *pb.AcceptMessage) (string, error) {
 	// If iolog_dir is not configured, use a simple default behavior.
 	if cfg.IologDir == "" || cfg.IologFile == "" {
-		uuidStr := sessionUUID.String()
-		sessID := uuidStr[:6] // Use the UUID string for uniqueness
-		return filepath.Join(cfg.LogDirectory, sessID[:2], sessID[2:4], sessID[4:6]), nil
+		return UUIDHierarchyPath(cfg.LogDirectory, sessionUUID), nil
 	}
 
 	// Create a map of info messages for easy lookup.
