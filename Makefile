@@ -42,7 +42,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: lint all build build-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
+.PHONY: lint all build build-logsh install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
@@ -58,6 +58,21 @@ build-logsh:
 	@echo "Building logsh (static) for local architecture..."
 	$(LOGSH_ENV) $(GOBUILD) -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
 	@echo "Build complete: ./$(LOGSH_BINARY_NAME)"
+
+# Install logsh on THIS host: binary, symlinks, /etc/shells, then verify.
+# Switches no account -- see docs/logsh-deployment.md for the rollout sequence
+# and the mandatory break-glass drill.
+install-logsh: build-logsh
+	install -D -m 0755 $(LOGSH_BINARY_NAME) $(DESTDIR)/usr/sbin/$(LOGSH_BINARY_NAME)
+	install -d -m 0755 $(DESTDIR)/etc/logsh
+	@if [ ! -f $(DESTDIR)/etc/logsh/logsh.yaml ]; then \
+		install -m 0644 examples/logsh.yaml $(DESTDIR)/etc/logsh/logsh.yaml; \
+		echo "Installed a starter config at /etc/logsh/logsh.yaml -- review it before enabling."; \
+	fi
+	ROOT=$(DESTDIR) ./packaging/logsh/logsh-install.sh install
+	@echo
+	@echo "Installed. NO account has been switched."
+	@echo "Next: logsh-install.sh verify, then read docs/logsh-deployment.md."
 
 # Build a stripped release binary for the local architecture
 build-release: proto deps
