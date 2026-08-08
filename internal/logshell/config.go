@@ -79,12 +79,21 @@ type Config struct {
 	//
 	// Under sudo it IS a judgement call, and logsh cannot make it: sudo records
 	// I/O only when the matched sudoers rule carries log_output, and nothing
-	// visible from inside the session says whether it did. Choosing `skip` on a
-	// host whose sudoers lacks log_output produces a root session recorded by
-	// nobody -- an audit gap manufactured by a de-duplication feature, which is
-	// worse than the duplication it removes. `metadata` is the default because it
-	// drops the duplicate transcript while still leaving a record that the
-	// session happened and who escalated.
+	// visible from inside the session says whether it did.
+	//
+	// So the default is `record`, and it is deliberately the WASTEFUL option.
+	// `metadata` was the default first, on the reasoning that it drops the
+	// duplicate transcript while still recording that the session happened. That
+	// reasoning was wrong in one specific and important case: on a host whose
+	// sudoers rule lacks log_output, `ordinary shell -> sudo -i -> root logsh`
+	// leaves the root session's commands and output captured by NOTHING. A
+	// de-duplication feature that produces an unrecorded privileged session in
+	// its default configuration has made things worse, not better.
+	//
+	// Duplication is recoverable -- both copies carry the same session UUID, so a
+	// SIEM can drop one. A transcript nobody took is gone. Choose `metadata` or
+	// `skip` once you can state that every sudoers rule reaching a shell carries
+	// log_output; until then the cost of the default is disk.
 	NestedSessions string `yaml:"nested_sessions"`
 
 	// CommandLog logs each executed command to LOCAL syslog, keyed by a session
@@ -186,7 +195,7 @@ func DefaultConfig() *Config {
 			MaxLen:         DefaultCommandLogMaxLen,
 			Required:       false,
 		},
-		NestedSessions:   NestedModeMetadata,
+		NestedSessions:   NestedModeRecord,
 		FailClosed:       true,
 		BreakGlassMarker: "/etc/logsh/bypass",
 	}
@@ -359,10 +368,16 @@ func (c *Config) Warnings() []string {
 				"Prefer a local sudosrv relay on loopback that holds the credentials as root.",
 			c.Server.TLSCertFile))
 	}
-	if c.NestedSessions == NestedModeSkip {
-		w = append(w, "nested_sessions is \"skip\": a session under sudo will not be recorded "+
-			"here at all. That is only safe if every sudoers rule reaching a shell carries "+
-			"log_output, because logsh cannot tell whether sudo actually recorded.")
+	// Both non-default values depend on a claim logsh cannot verify.
+	switch c.NestedSessions {
+	case NestedModeSkip:
+		w = append(w, "nested_sessions is \"skip\": a session under sudo is not recorded here at "+
+			"all, and no record of it is kept either. Only safe if every sudoers rule reaching "+
+			"a shell carries log_output, which logsh cannot check.")
+	case NestedModeMetadata:
+		w = append(w, "nested_sessions is \"metadata\": a session under sudo keeps a record but no "+
+			"transcript. If the matched sudoers rule lacks log_output, nothing anywhere captures "+
+			"what was run. Only safe if every such rule carries log_output.")
 	}
 	if c.CommandLog.Enabled {
 		w = append(w, "command_log is enabled: it traces execve with ptrace, so strace and gdb "+

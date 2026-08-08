@@ -127,16 +127,18 @@ server:
 # only when the matched sudoers rule carries log_output, and nothing visible from
 # inside the session says whether it did:
 #
-#   metadata  (default) No second pty and no transcript, but a record is still
-#             kept — who escalated, what shell, when, exit status, and both
-#             session UUIDs so it joins to sudo's transcript. If sudo turns out
-#             not to have been logging you still know the session happened.
+#   record    (default) A full second transcript. Deliberately the wasteful
+#             option: duplication is recoverable — both copies carry the same
+#             session UUID, so a SIEM can drop one — whereas a transcript nobody
+#             took is gone. Costs disk and one extra pty layer.
+#   metadata  No second pty and no transcript, but a record is still kept: who
+#             escalated, what shell, when, exit status, and both session UUIDs.
 #   skip      Plain exec straight through. Nothing recorded, nothing emitted.
-#             Only safe if EVERY sudoers rule reaching a shell has log_output —
-#             otherwise a root session goes unrecorded and nothing says so.
-#   record    Today's behaviour: a full second transcript. Never a gap, at the
-#             cost of duplicate storage and the extra pty layer. De-duplicate
-#             downstream on the shared UUID.
+#
+# BOTH metadata and skip depend on a claim logsh cannot verify: that every
+# sudoers rule reaching a shell carries log_output. Where one does not, `shell ->
+# sudo -i -> root logsh` leaves the root session captured by NOTHING. Set them
+# once you can state that claim; -validate warns about either.
 #
 # Note that under sudo, logsh records submituser as the account that ESCALATED
 # (alice) and runuser as the account the session runs as (root), matching sudo's

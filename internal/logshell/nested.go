@@ -206,7 +206,7 @@ func (c *Config) NestedMode(n Nesting) string {
 		return NestedModeSkip
 	default:
 		if c.NestedSessions == "" {
-			return NestedModeMetadata
+			return NestedModeRecord
 		}
 		return c.NestedSessions
 	}

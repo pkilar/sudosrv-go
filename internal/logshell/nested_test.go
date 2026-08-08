@@ -31,7 +31,7 @@ func TestNestedModeSkipsInsideAnotherLogsh(t *testing.T) {
 // visible from here reveals whether it did.
 func TestNestedModeUnderSudoFollowsTheSetting(t *testing.T) {
 	tests := []struct{ set, want string }{
-		{"", NestedModeMetadata}, // the shipped default
+		{"", NestedModeRecord}, // the shipped default
 		{NestedModeMetadata, NestedModeMetadata},
 		{NestedModeSkip, NestedModeSkip},
 		{NestedModeRecord, NestedModeRecord},
@@ -53,15 +53,54 @@ func TestNestedModeUnderSudoFollowsTheSetting(t *testing.T) {
 	}
 }
 
-// TestDefaultIsMetadataNotSkip guards the choice that keeps a mis-set sudoers
-// from becoming a silent audit gap.
+// TestDefaultKeepsTheTranscriptRatherThanRiskingAGap pins the default at the
+// deliberately wasteful option.
 //
-// Defaulting to skip would mean a host whose sudoers lacks log_output records a
-// root session NOWHERE -- a gap manufactured by the de-duplication feature,
-// which is worse than the duplication it removes.
-func TestDefaultIsMetadataNotSkip(t *testing.T) {
-	if got := DefaultConfig().NestedSessions; got != NestedModeMetadata {
-		t.Errorf("the shipped nested_sessions default is %q, want %q", got, NestedModeMetadata)
+// Neither `metadata` nor `skip` is safe by default, and the reason is the same
+// for both: on a host whose sudoers rule lacks log_output, `shell -> sudo -i ->
+// root logsh` leaves the root session captured by NOTHING. A de-duplication
+// feature that produces an unrecorded privileged session out of the box has made
+// things worse.
+//
+// Duplication is recoverable -- both copies carry the same session UUID, so one
+// can be dropped downstream. A transcript nobody took is gone.
+func TestDefaultKeepsTheTranscriptRatherThanRiskingAGap(t *testing.T) {
+	got := DefaultConfig().NestedSessions
+	if got != NestedModeRecord {
+		t.Errorf("the shipped nested_sessions default is %q, want %q", got, NestedModeRecord)
+	}
+	if got == NestedModeMetadata || got == NestedModeSkip {
+		t.Error("the default leaves a session under a non-logging sudoers rule unrecorded")
+	}
+
+	// An unset value must resolve the same way, or a config that omits the key
+	// gets different behaviour from one that spells out the default.
+	cfg := DefaultConfig()
+	cfg.NestedSessions = ""
+	if m := cfg.NestedMode(Nesting{Kind: NestedSudo}); m != NestedModeRecord {
+		t.Errorf("an unset nested_sessions resolves to %q, want %q", m, NestedModeRecord)
+	}
+}
+
+// TestBothOptOutValuesAreWarnedAbout keeps the cost visible at deploy time.
+// Each depends on a claim -- that every sudoers rule reaching a shell carries
+// log_output -- that logsh has no way to verify.
+func TestBothOptOutValuesAreWarnedAbout(t *testing.T) {
+	for _, mode := range []string{NestedModeMetadata, NestedModeSkip} {
+		cfg := DefaultConfig()
+		cfg.RecordUsers = []string{"root"}
+		cfg.NestedSessions = mode
+
+		var found bool
+		for _, w := range cfg.Warnings() {
+			if strings.Contains(w, "nested_sessions") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("nested_sessions=%q produced no warning, though it can leave a session "+
+				"under a non-logging sudoers rule unrecorded", mode)
+		}
 	}
 }
 

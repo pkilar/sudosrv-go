@@ -231,9 +231,21 @@ refusable session. The audit gap has happened and cannot be undone by refusing;
 logsh parks the journal, alerts at `crit`, and returns the user's real exit
 status.
 
-Undelivered journals become `*.journal.undelivered` and are **never pruned** —
-each is the only copy of a session that never reached a server. Sweep them with a
-timer. **Never point logrotate at the spool directory.**
+### Parked journals
+
+A journal is never deleted on failure — it is frequently the only copy of a
+privileged session. Each failure gets its own terminal name so an operator can
+tell them apart:
+
+| Suffix | Meaning |
+|---|---|
+| `.undelivered` | Definitely not delivered; the retry budget ran out. Safe for a sweeper to replay. |
+| `.indeterminate` | Transmitted, but no acknowledgement came back. **Do not blindly replay.** The server may already hold it, and the protocol carries no idempotency key, so a second attempt can store the same transcript under a different log id. Reconcile against the server first. |
+| `.corrupt` | Failed to parse — truncated, bad framing, or no opening AcceptMessage. Never replayable; kept because whatever survived is still evidence. |
+| `.rejected` | The server parsed it and refused. It stored nothing, so there is no duplication risk and no point retrying. |
+
+None of these is ever pruned. Sweep `.undelivered` with a timer; the rest want a
+human. **Never point logrotate at the spool directory.**
 
 ---
 

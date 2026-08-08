@@ -10,8 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sudosrv/internal/logsrvclient"
+	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -355,5 +358,230 @@ func TestBufferedSinkBlocksRatherThanDropping(t *testing.T) {
 	if got := inner.seen(); got != total {
 		t.Errorf("the inner sink saw %d of %d messages; %d were dropped when the queue filled",
 			got, total, total-got)
+	}
+}
+
+// writeJournal builds a spool file from raw frames and returns its path.
+func writeJournal(t *testing.T, dir string, body []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, JournalPrefix+"test"+JournalSuffix)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// framed renders messages in the on-disk wire framing.
+func framed(t *testing.T, msgs ...*pb.ClientMessage) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, m := range msgs {
+		if err := logsrvclient.WriteMessage(&buf, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return buf.Bytes()
+}
+
+func exitMsg() *pb.ClientMessage {
+	return &pb.ClientMessage{Type: &pb.ClientMessage_ExitMsg{ExitMsg: &pb.ExitMessage{}}}
+}
+
+// TestCorruptJournalIsKeptNotDeleted is the one that used to destroy evidence.
+//
+// Every ReadMessage error was treated as a clean end of file. A malformed FIRST
+// record therefore left expectAck false, the replay reported success, and the
+// caller deleted the journal -- so a corrupt spool file was reported as
+// delivered and removed having sent nothing at all.
+func TestCorruptJournalIsKeptNotDeleted(t *testing.T) {
+	srv := newMockServer(t)
+	cfg := testConfig(srv.addr)
+	dir := t.TempDir()
+
+	// A plausible length prefix followed by bytes that are not a protobuf.
+	path := writeJournal(t, dir, []byte{0, 0, 0, 8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+
+	err := FlushJournal(context.Background(), path, cfg)
+	if err == nil {
+		t.Fatal("a corrupt journal was reported as delivered")
+	}
+	if !errors.Is(err, ErrJournalCorrupt) {
+		t.Errorf("error = %v, want ErrJournalCorrupt", err)
+	}
+	if _, statErr := os.Stat(path + journalCorrupt); statErr != nil {
+		t.Errorf("the corrupt journal was not parked: %v; spool holds %v",
+			statErr, journalFiles(t, dir))
+	}
+	// Nothing may have been sent: the journal is parsed before anything opens a
+	// connection, so a corrupt one never half-lands on the server.
+	if _, _, _, _, acc := srv.snapshot(); acc != nil {
+		t.Error("a corrupt journal was partially transmitted before being rejected")
+	}
+}
+
+// TestTruncatedJournalIsKeptNotDeleted covers the other corruption shape: a
+// record cut in half by a crash mid-write.
+func TestTruncatedJournalIsKeptNotDeleted(t *testing.T) {
+	cfg := testConfig(newMockServer(t).addr)
+	dir := t.TempDir()
+
+	full := framed(t, acceptFor(t), exitMsg())
+	path := writeJournal(t, dir, full[:len(full)-5]) // chop the tail
+
+	err := FlushJournal(context.Background(), path, cfg)
+	if !errors.Is(err, ErrJournalCorrupt) {
+		t.Fatalf("error = %v, want ErrJournalCorrupt for a truncated journal", err)
+	}
+	if _, statErr := os.Stat(path + journalCorrupt); statErr != nil {
+		t.Errorf("the truncated journal was not kept: %v", statErr)
+	}
+}
+
+// TestMetadataJournalWithoutAnAcceptIsRejected pins the first-record rule.
+// Without it, a journal whose opening frame is anything else parses as
+// event-only, reports success on transmission, and gets deleted.
+func TestMetadataJournalWithoutAnAcceptIsRejected(t *testing.T) {
+	cfg := testConfig(newMockServer(t).addr)
+	dir := t.TempDir()
+	path := writeJournal(t, dir, framed(t, exitMsg())) // no AcceptMessage at all
+
+	err := FlushJournal(context.Background(), path, cfg)
+	if !errors.Is(err, ErrJournalCorrupt) {
+		t.Fatalf("error = %v, want ErrJournalCorrupt for a journal with no AcceptMessage", err)
+	}
+	if _, statErr := os.Stat(path + journalCorrupt); statErr != nil {
+		t.Errorf("the journal was deleted rather than kept: %v", statErr)
+	}
+}
+
+// TestLostAcknowledgementDoesNotReplay is the duplicate-audit-record guard.
+//
+// If the server durably commits a session but its final acknowledgement is lost
+// or times out, a retry would send the whole transcript again -- and the
+// protocol carries no idempotency key, so the server stores it a second time
+// under a different log id. The delivery is genuinely INDETERMINATE from here,
+// and the only honest outcome is to park it for a human rather than guess.
+func TestLostAcknowledgementDoesNotReplay(t *testing.T) {
+	var accepts atomic.Int32
+
+	// A server that takes the whole session and then goes silent, exactly as one
+	// that committed and then lost its reply would look.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			wg.Go(func() {
+				defer func() { _ = conn.Close() }()
+				proc := protocol.NewProcessorWithCloser(conn, conn, conn)
+				for {
+					msg, rerr := proc.ReadClientMessage()
+					if rerr != nil {
+						return
+					}
+					switch msg.Type.(type) {
+					case *pb.ClientMessage_HelloMsg:
+						_ = proc.WriteServerMessage(&pb.ServerMessage{
+							Type: &pb.ServerMessage_Hello{Hello: &pb.ServerHello{ServerId: "silent"}}})
+					case *pb.ClientMessage_AcceptMsg:
+						accepts.Add(1)
+					case *pb.ClientMessage_ExitMsg:
+						<-stop // committed, but the acknowledgement never arrives
+						return
+					}
+				}
+			})
+		}
+	})
+	t.Cleanup(func() { close(stop); _ = ln.Close(); wg.Wait() })
+
+	cfg := testConfig(ln.Addr().String())
+	cfg.Server.ResponseTimeout = 500 * time.Millisecond
+
+	old := journalRetryBudget
+	journalRetryBudget = 5 * time.Second // ample room for a retry, if one happened
+	t.Cleanup(func() { journalRetryBudget = old })
+
+	dir := t.TempDir()
+	path := writeJournal(t, dir, framed(t, acceptFor(t), exitMsg()))
+
+	err = flushWithBudget(context.Background(), path, cfg, journalRetryBudget)
+	if err == nil {
+		t.Fatal("a session that was never acknowledged was reported as delivered")
+	}
+	if !errors.Is(err, ErrJournalIndeterminate) {
+		t.Errorf("error = %v, want ErrJournalIndeterminate", err)
+	}
+	if got := accepts.Load(); got != 1 {
+		t.Errorf("the session was sent %d times; a lost acknowledgement must NOT be retried, "+
+			"or the server stores the same transcript under two log ids", got)
+	}
+	if _, statErr := os.Stat(path + journalIndeterminate); statErr != nil {
+		t.Errorf("the indeterminate journal was not parked for review: %v; spool holds %v",
+			statErr, journalFiles(t, dir))
+	}
+}
+
+// TestConnectFailureIsRetried keeps the classification honest in the other
+// direction: a failure before anything is sent is safe to retry, and must not be
+// parked as if it were ambiguous.
+func TestConnectFailureIsRetried(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server.UpstreamHost = deadAddr(t)
+	cfg.Server.UseTLS = false
+	cfg.Server.ConnectTimeout = 100 * time.Millisecond
+
+	dir := t.TempDir()
+	path := writeJournal(t, dir, framed(t, acceptFor(t), exitMsg()))
+
+	err := flushWithBudget(context.Background(), path, cfg, 300*time.Millisecond)
+	if err == nil {
+		t.Fatal("flush succeeded with no server")
+	}
+	if errors.Is(err, ErrJournalIndeterminate) || errors.Is(err, ErrJournalCorrupt) {
+		t.Errorf("a connect failure was classed as terminal (%v); nothing was sent, so it is "+
+			"safe to try again", err)
+	}
+	// Still under its original name, ready for the next attempt.
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("the journal was not left in place for a retry: %v; spool holds %v",
+			statErr, journalFiles(t, dir))
+	}
+}
+
+// TestGarbageAfterAValidExitIsNotSilentlyDropped isolates the read-error
+// classification.
+//
+// The other corruption tests are also caught by the empty-journal and
+// missing-exit checks, so they would still fail if read errors were treated as a
+// clean end of file. This one is not: the journal holds a complete, acknowledged
+// I/O session followed by trailing garbage. Under the old behaviour the garbage
+// was read as EOF, the session was delivered, and the file was DELETED -- taking
+// with it whatever those bytes were, which is either a partially written record
+// or evidence that something overwrote the spool.
+func TestGarbageAfterAValidExitIsNotSilentlyDropped(t *testing.T) {
+	cfg := testConfig(newMockServer(t).addr)
+	dir := t.TempDir()
+
+	body := framed(t, acceptFor(t), exitMsg())        // acceptFor sets expect_iobufs
+	body = append(body, 0, 0, 0, 4, 0xff, 0xff, 0xff) // a length prefix and a short, invalid tail
+	path := writeJournal(t, dir, body)
+
+	err := FlushJournal(context.Background(), path, cfg)
+	if err == nil {
+		t.Fatal("a journal with a corrupt tail was reported as delivered and removed")
+	}
+	if !errors.Is(err, ErrJournalCorrupt) {
+		t.Errorf("error = %v, want ErrJournalCorrupt", err)
+	}
+	if _, statErr := os.Stat(path + journalCorrupt); statErr != nil {
+		t.Errorf("the journal was not kept: %v; spool holds %v", statErr, journalFiles(t, dir))
 	}
 }

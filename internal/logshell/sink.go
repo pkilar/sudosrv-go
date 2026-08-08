@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -42,6 +43,32 @@ const (
 	JournalSuffix      = ".journal"
 	journalFlushing    = ".flushing"
 	journalUndelivered = ".undelivered"
+	// journalCorrupt marks a journal that cannot be parsed. Retrying it is
+	// futile and deleting it would destroy whatever of the session survived.
+	journalCorrupt = ".corrupt"
+	// journalIndeterminate marks a journal whose bytes reached the server with
+	// no acknowledgement coming back. Replaying it might store the session a
+	// second time under a different log id, so it waits for a human.
+	journalIndeterminate = ".indeterminate"
+	// journalRejected marks a journal the server definitively refused. Distinct
+	// from indeterminate: a refusal means it stored nothing, so there is no
+	// duplication risk, just no point retrying.
+	journalRejected = ".rejected"
+)
+
+// Terminal outcomes a journal can reach. None of them is retryable, and all of
+// them keep the bytes.
+var (
+	// ErrJournalCorrupt reports a journal that failed to parse.
+	ErrJournalCorrupt = errors.New("journal is corrupt")
+	// ErrJournalIndeterminate reports that delivery may or may not have
+	// happened: the session was transmitted but never acknowledged.
+	//
+	// The sudo_logsrv protocol carries no idempotency key, so there is no way to
+	// ask the server whether it already has this session, and no way to replay
+	// it such that a duplicate would be recognised. Guessing "not delivered" and
+	// retrying is what produces the same transcript under two log ids.
+	ErrJournalIndeterminate = errors.New("journal delivery is indeterminate")
 )
 
 // OpenSink chooses how this session will be recorded.
@@ -204,6 +231,16 @@ func (j *journalSink) Finish(ctx context.Context) error {
 		return nil
 	}
 
+	// A terminal outcome has already been parked under its own name by
+	// FlushJournal; the file is no longer at j.path and renaming it again would
+	// fail and bury the real error.
+	if errors.Is(err, ErrJournalCorrupt) ||
+		errors.Is(err, ErrJournalIndeterminate) ||
+		errors.Is(err, logsrvclient.ErrUpstreamRejected) {
+		return err
+	}
+
+	// Retryable, but the budget ran out while the user waits to log out.
 	dead := j.path + journalUndelivered
 	if rnErr := os.Rename(j.path, dead); rnErr != nil {
 		return fmt.Errorf("journal %s could not be delivered (%w) and could not be parked (%w)", j.path, err, rnErr)
@@ -226,18 +263,52 @@ func (j *journalSink) Close() error {
 // itself deliberately does NOT sweep at login: a login shell that scanned a
 // spool before handing over would add the cost of every undelivered session in
 // the directory to somebody's ssh latency.
+//
+// Failures are not interchangeable, and treating them as if they were is how a
+// spool loses or duplicates audit records:
+//
+//	corrupt        -> parked .corrupt.        Never replayable; retrying is futile.
+//	indeterminate  -> parked .indeterminate.  Bytes reached the server but no
+//	                                          acknowledgement came back, so a retry
+//	                                          might store the session twice.
+//	anything else  -> un-claimed.             Nothing was sent; safe to try again.
 func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	flushing := path + journalFlushing
 	if err := os.Rename(path, flushing); err != nil {
 		return fmt.Errorf("claim journal %s: %w", path, err)
 	}
 
-	if err := replayJournal(ctx, flushing, cfg); err != nil {
-		// Put the name back so the next attempt can find it.
+	// Validated BEFORE anything is sent. A journal is parsed end to end first so
+	// a corrupt one is never half-transmitted, and -- more importantly -- never
+	// mistaken for a delivered one and deleted.
+	expectAck, err := validateJournal(flushing)
+	if err != nil {
+		return park(flushing, path+journalCorrupt, ErrJournalCorrupt, err)
+	}
+
+	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
+	if err != nil {
+		// Nothing was sent, so the journal is exactly as it was.
 		if rnErr := os.Rename(flushing, path); rnErr != nil {
-			return fmt.Errorf("replay failed (%w) and the journal could not be un-claimed (%w)", err, rnErr)
+			return fmt.Errorf("connect failed (%w) and the journal could not be un-claimed (%w)", err, rnErr)
 		}
 		return err
+	}
+	defer func() { _ = proc.Close() }()
+
+	if err := transmitJournal(ctx, flushing, cfg, proc, expectAck); err != nil {
+		if errors.Is(err, logsrvclient.ErrUpstreamRejected) {
+			// A definitive refusal: the server parsed the session and said no,
+			// so it stored nothing and every retry gets the same answer.
+			return park(flushing, path+journalRejected, err, nil)
+		}
+		// Bytes went out and no acknowledgement came back. Whether the server
+		// committed the session is genuinely unknown from here, and the protocol
+		// offers no way to ask -- there is no idempotency key to replay against,
+		// so a retry that guesses wrong stores the same transcript twice under
+		// two log ids. Parking makes the ambiguity an operator's decision
+		// instead of silently picking the answer that corrupts audit counts.
+		return park(flushing, path+journalIndeterminate, ErrJournalIndeterminate, err)
 	}
 
 	if err := os.Remove(flushing); err != nil {
@@ -249,36 +320,93 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	return nil
 }
 
-func replayJournal(ctx context.Context, path string, cfg *Config) error {
+// park moves a journal aside under a terminal name and reports why.
+//
+// The bytes are always kept. A journal is frequently the only copy of a
+// privileged session, so every failure path here ends in a rename rather than a
+// delete.
+func park(from, to string, sentinel, cause error) error {
+	if rnErr := os.Rename(from, to); rnErr != nil {
+		return fmt.Errorf("%w and the journal could not be parked: %w", errors.Join(sentinel, cause), rnErr)
+	}
+	if cause == nil {
+		return fmt.Errorf("%w; journal kept at %s", sentinel, to)
+	}
+	// Joined rather than formatted so errors.Is matches BOTH the terminal
+	// sentinel the caller switches on and whatever underlying failure caused it.
+	return fmt.Errorf("%w; journal kept at %s", errors.Join(sentinel, cause), to)
+}
+
+// validateJournal parses a journal end to end without sending anything, and
+// reports whether the session it holds will be acknowledged.
+//
+// Everything here used to be inferred while transmitting, with every read error
+// -- truncation, a bad length prefix, unparseable protobuf -- treated as a clean
+// end of file. That made a corrupt journal indistinguishable from a complete
+// one, and because a malformed FIRST record also left expectAck false, the
+// replay reported success and the caller deleted the only copy of the session.
+func validateJournal(path string) (expectAck bool, err error) {
+	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var count int
+	var sawExit bool
+	for {
+		msg, readErr := logsrvclient.ReadMessage(f)
+		if errors.Is(readErr, io.EOF) {
+			break // a clean end, exactly at a record boundary
+		}
+		if readErr != nil {
+			// io.ErrUnexpectedEOF is a record cut in half; anything else is a
+			// bad length prefix or unparseable protobuf. Neither is an end.
+			return false, fmt.Errorf("record %d: %w", count+1, readErr)
+		}
+
+		if count == 0 {
+			a, ok := msg.Type.(*pb.ClientMessage_AcceptMsg)
+			if !ok {
+				return false, fmt.Errorf("first record is %T, not an AcceptMessage", msg.Type)
+			}
+			expectAck = a.AcceptMsg.GetExpectIobufs()
+		}
+		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
+			sawExit = true
+		}
+		count++
+	}
+
+	if count == 0 {
+		return false, errors.New("journal is empty")
+	}
+	// An I/O session is acknowledged only after its ExitMessage. Sending one
+	// that has none and then waiting for a commit point hangs the logout
+	// forever, so it is refused here rather than discovered later.
+	if expectAck && !sawExit {
+		return false, errors.New("I/O journal has no ExitMessage; it can never be acknowledged")
+	}
+	return expectAck, nil
+}
+
+// transmitJournal sends a validated journal and waits for acknowledgement.
+func transmitJournal(ctx context.Context, path string, cfg *Config, proc protocol.Processor, expectAck bool) error {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = proc.Close() }()
-
-	// A journal is self-describing on purpose: a sweeper replaying one hours
-	// later has no other way to know whether the session it holds will ever be
-	// acknowledged.
-	expectAck, sawExit, first := false, false, true
 	for {
 		msg, readErr := logsrvclient.ReadMessage(f)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
 		if readErr != nil {
-			break // EOF, or a truncated tail; either way there is no more to send
-		}
-		if first {
-			if a, ok := msg.Type.(*pb.ClientMessage_AcceptMsg); ok {
-				expectAck = a.AcceptMsg.GetExpectIobufs()
-			}
-			first = false
-		}
-		if _, ok := msg.Type.(*pb.ClientMessage_ExitMsg); ok {
-			sawExit = true
+			// validateJournal just read this same file cleanly, so a failure
+			// here means it changed underneath us.
+			return fmt.Errorf("journal changed while being sent: %w", readErr)
 		}
 		if err := cfg.ClientConfig().WithTimeout(ctx, func(c context.Context) error {
 			return proc.WriteClientMessageContext(c, msg)
@@ -287,13 +415,9 @@ func replayJournal(ctx context.Context, path string, cfg *Config) error {
 		}
 	}
 
-	// Only an I/O session that reached its ExitMessage is ever acknowledged.
-	// Waiting for a commit point that is not coming would hang the logout.
+	// An event-only session is never acknowledged: transmission IS completion.
 	if !expectAck {
 		return nil
-	}
-	if !sawExit {
-		return errors.New("journal has no ExitMessage; it cannot be acknowledged")
 	}
 	return logsrvclient.ReadAck(ctx, proc, cfg.ClientConfig(), true)
 }
@@ -412,10 +536,13 @@ func flushWithBudget(ctx context.Context, path string, cfg *Config, budget time.
 		if err = FlushJournal(ctx, path, cfg); err == nil {
 			return nil
 		}
-		if errors.Is(err, logsrvclient.ErrUpstreamRejected) {
-			// The server parsed this session and refused it. Every retry gets the
-			// same answer, so spending the rest of the budget on it only delays
-			// the logout. Conformance: the same reasoning as RELAY-049.
+		// Terminal outcomes. Retrying a refusal only delays the logout (the same
+		// reasoning as RELAY-049); retrying a corrupt journal cannot work; and
+		// retrying an indeterminate one is the specific mistake that duplicates
+		// audit records. FlushJournal has already parked all three.
+		if errors.Is(err, logsrvclient.ErrUpstreamRejected) ||
+			errors.Is(err, ErrJournalCorrupt) ||
+			errors.Is(err, ErrJournalIndeterminate) {
 			return err
 		}
 		wait := logsrvclient.Backoff(attempt, time.Second)
