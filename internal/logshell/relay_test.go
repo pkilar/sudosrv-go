@@ -135,6 +135,10 @@ func outerTerminal(t *testing.T) (*PTY, *os.File) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Give it a real size. A pty reports 0x0 until something sets one, and a
+	// session recorded with no dimensions replays into a terminal sudoreplay
+	// cannot size -- worth having the tests look like the sshd case.
+	_ = SetWinSize(outer.Master.Fd(), WinSize{Rows: 24, Cols: 80})
 	t.Cleanup(func() { _ = slave.Close(); _ = outer.Close() })
 	return outer, slave
 }
