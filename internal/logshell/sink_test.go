@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	pb "sudosrv/pkg/sudosrv_proto"
+	"sync"
 	"testing"
 	"time"
 )
@@ -299,5 +300,60 @@ func TestFlushJournalRefusesAJournalWithNoExit(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("FlushJournal hung waiting for a commit point that was never coming")
+	}
+}
+
+// slowSink is an inner Sink that consumes deliberately slowly, so a producer
+// running at full speed fills the buffered queue and has to wait.
+type slowSink struct {
+	mu    sync.Mutex
+	count int
+	delay time.Duration
+}
+
+func (s *slowSink) Start(context.Context, *pb.ClientMessage) (string, error) { return "slow", nil }
+func (s *slowSink) Send(*pb.ClientMessage) error {
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	s.count++
+	s.mu.Unlock()
+	return nil
+}
+func (s *slowSink) Finish(context.Context) error { return nil }
+func (s *slowSink) Close() error                 { return nil }
+
+func (s *slowSink) seen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}
+
+// TestBufferedSinkBlocksRatherThanDropping is the backpressure test.
+//
+// When the queue fills, Send must WAIT. Dropping would punch silent holes in an
+// audit record -- the transcript would still look complete, just missing
+// whatever happened while the server was slow, which is exactly when something
+// interesting is usually happening.
+//
+// The producer here outruns the consumer by design, so the 1024-deep queue is
+// guaranteed to fill. Verified to fail when Send is changed to a non-blocking
+// select with a default branch.
+func TestBufferedSinkBlocksRatherThanDropping(t *testing.T) {
+	inner := &slowSink{delay: 20 * time.Microsecond}
+	b := newBufferedSink(inner)
+
+	const total = sinkBufferDepth * 3
+	for range total {
+		if err := b.Send(&pb.ClientMessage{}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	if err := b.Finish(context.Background()); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	if got := inner.seen(); got != total {
+		t.Errorf("the inner sink saw %d of %d messages; %d were dropped when the queue filled",
+			got, total, total-got)
 	}
 }

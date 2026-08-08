@@ -29,6 +29,7 @@ type mockServer struct {
 	ttyout   bytes.Buffer
 	ttyin    bytes.Buffer
 	winsizes []*pb.ChangeWindowSize
+	suspend  []string
 	exit     *pb.ExitMessage
 
 	done chan struct{}
@@ -84,6 +85,10 @@ func (s *mockServer) serve() {
 			s.mu.Lock()
 			s.winsizes = append(s.winsizes, m.WinsizeEvent)
 			s.mu.Unlock()
+		case *pb.ClientMessage_SuspendEvent:
+			s.mu.Lock()
+			s.suspend = append(s.suspend, m.SuspendEvent.GetSignal())
+			s.mu.Unlock()
 		case *pb.ClientMessage_ExitMsg:
 			s.mu.Lock()
 			s.exit = m.ExitMsg
@@ -93,6 +98,12 @@ func (s *mockServer) serve() {
 			return
 		}
 	}
+}
+
+func (s *mockServer) suspends() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.suspend...)
 }
 
 func (s *mockServer) snapshot() (out, in string, ws []*pb.ChangeWindowSize, exit *pb.ExitMessage, acc *pb.AcceptMessage) {

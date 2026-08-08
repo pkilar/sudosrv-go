@@ -140,13 +140,22 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	// would block forever after the shell exits and the session would never end.
 	_ = slave.Close()
 
-	restore, err := MakeRaw(stdin.Fd())
+	// Capture BOTH termios states: the saved one to hand back on suspend or at
+	// exit, and the raw one to re-apply on resume. Re-deriving raw later would
+	// mean recomputing it from whatever the terminal happened to look like at
+	// that moment, which after a suspend is not the same thing.
+	saved, err := MakeRaw(stdin.Fd())
+	var rawState *syscall.Termios
 	if err == nil {
-		defer func() { _ = SetTermios(stdin.Fd(), restore) }()
+		defer func() { _ = SetTermios(stdin.Fd(), saved) }()
+		rawState, _ = GetTermios(stdin.Fd())
 	}
 
 	stopWinch := watchWindowSize(stdin, pty, rec)
 	defer stopWinch()
+
+	stopSuspend := watchSuspend(stdin.Fd(), saved, rawState, rec)
+	defer stopSuspend()
 
 	relayInput(stdin, pty.Master, rec)
 	relayOutput(pty.Master, tio.Out, rec)
