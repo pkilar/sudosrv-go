@@ -303,3 +303,99 @@ func TestFlushEventOnlySessionNeedsNoAcknowledgement(t *testing.T) {
 		t.Error("event-only cache file was not retired; it would be re-delivered upstream on every retry")
 	}
 }
+
+// TestInterimCommitPointDoesNotRetireTheCache is the gap the durability barrier
+// had, despite its own comment claiming otherwise.
+//
+// flushFile said it would "read past any periodic commit points the upstream
+// emitted during the replay until the session is acknowledged", but
+// readUpstreamAck returned on the FIRST commit point it saw. An upstream emits
+// one on the first I/O event of a session and every ACK_FREQUENCY thereafter
+// (internal/storage writeIoEntry), so by the end of a replay one is very likely
+// already queued -- and accepting it meant treating a fraction of a session as
+// acknowledged and then unlinking the only copy of the rest.
+//
+// The upstream here sends an interim commit point covering nothing, then goes
+// quiet. The cache file must survive.
+func TestInterimCommitPointDoesNotRetireTheCache(t *testing.T) {
+	addr := startAckServer(t, func(proc protocol.Processor) {
+		for {
+			msg, err := proc.ReadClientMessage()
+			if err != nil {
+				return
+			}
+			switch msg.Type.(type) {
+			case *pb.ClientMessage_AcceptMsg:
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_LogId{LogId: "id"}})
+			case *pb.ClientMessage_TtyoutBuf:
+				// Covers nothing: the elapsed clock so far is zero.
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{}}})
+			}
+			// The final commit point never comes.
+		}
+	})
+
+	cfg := durabilityConfig(addr)
+	cfg.ResponseTimeout = 700 * time.Millisecond
+
+	path := writeCacheFile(t,
+		ioAccept(),
+		&pb.ClientMessage{Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 2}, Data: []byte("output\n"),
+		}}},
+		exitMsg(),
+	)
+
+	if err := flushCache(t, path, cfg); err == nil {
+		t.Error("flush reported success on an interim commit point that covered none of the " +
+			"session; the cache file would be unlinked with the session possibly unstored")
+	}
+	requireExists(t, path, "the upstream never sent a commit point covering the session")
+}
+
+// TestFinalCommitPointRetiresTheCache is the other half: a commit point that
+// DOES cover the replayed session must be accepted, or every flush would fail
+// and no journal would ever be retired.
+func TestFinalCommitPointRetiresTheCache(t *testing.T) {
+	addr := startAckServer(t, func(proc protocol.Processor) {
+		for {
+			msg, err := proc.ReadClientMessage()
+			if err != nil {
+				return
+			}
+			switch msg.Type.(type) {
+			case *pb.ClientMessage_AcceptMsg:
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_LogId{LogId: "id"}})
+			case *pb.ClientMessage_TtyoutBuf:
+				// An interim one first, exactly as a real upstream sends.
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{}}})
+			case *pb.ClientMessage_ExitMsg:
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_CommitPoint{CommitPoint: &pb.TimeSpec{TvSec: 2}}})
+			}
+		}
+	})
+
+	cfg := durabilityConfig(addr)
+	cfg.ResponseTimeout = 5 * time.Second
+
+	path := writeCacheFile(t,
+		ioAccept(),
+		&pb.ClientMessage{Type: &pb.ClientMessage_TtyoutBuf{TtyoutBuf: &pb.IoBuffer{
+			Delay: &pb.TimeSpec{TvSec: 2}, Data: []byte("output\n"),
+		}}},
+		exitMsg(),
+	)
+
+	if err := flushCache(t, path, cfg); err != nil {
+		t.Fatalf("flush failed against an upstream that did acknowledge the session: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a fully acknowledged session left its cache file behind; the next sweep would "+
+			"replay it and the upstream would store it twice (stat err: %v)", err)
+	}
+}

@@ -1635,8 +1635,8 @@
    "id": "RELAY-017",
    "status": "MATCH",
    "severity": "none",
-   "go_source": "internal/relay/session.go:903-908,930-957",
-   "notes": ""
+   "go_source": "internal/relay/session.go (flushFile durability barrier, readUpstreamCommit)",
+   "notes": "Same outcome as C, reached differently, and the difference was a bug until now. C's relay is event-driven: it consumes each commit_point as it arrives, so by the time it sends the ExitMessage none are queued and 'the first commit_point after EXITED' is unambiguously the final one. This relay replays a whole journal and only then reads, so interim commit points pile up on the socket and taking the first finalized on one that could predate most of the session -- then unlinked the journal. readUpstreamCommit identifies the final one by value instead: committed >= the elapsed clock the journal carried, the test C's client applies in handle_commit_point."
   },
   {
    "id": "RELAY-018",
