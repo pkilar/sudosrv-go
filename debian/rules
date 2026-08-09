@@ -18,6 +18,10 @@ override_dh_auto_configure:
 override_dh_auto_build:
 	# Build the application
 	go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+	# logsh is always CGO-free (set globally above): it is a login shell, so a
+	# dynamic linker that cannot resolve it prevents login rather than degrading
+	# it. See LOGSH_ENV in the Makefile.
+	go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
 
 override_dh_auto_install:
 	# Install binary
@@ -33,11 +37,31 @@ override_dh_auto_install:
 	install -d -m 0755 $(CURDIR)/debian/sudosrv/var/log/sudosrv
 	install -d -m 0755 $(CURDIR)/debian/sudosrv/var/spool/sudosrv-cache
 
+	# --- logsh -------------------------------------------------------------
+	install -D -m 0755 logsh $(CURDIR)/debian/logsh/usr/sbin/logsh
+	# The install script the maintainer scripts drive. Not in PATH: it is
+	# packaging machinery, and an operator reaches it through the documented
+	# path in the runbook.
+	install -D -m 0755 packaging/logsh/logsh-install.sh \
+		$(CURDIR)/debian/logsh/usr/libexec/logsh/logsh-install.sh
+	# 0644, not 0600: logsh runs as the logging-in user and must be able to read
+	# this. Root-owned and not group- or world-writable is what matters.
+	install -D -m 0644 examples/logsh.yaml \
+		$(CURDIR)/debian/logsh/etc/logsh/logsh.yaml
+	install -D -m 0644 docs/logsh-deployment.md \
+		$(CURDIR)/debian/logsh/usr/share/doc/logsh/logsh-deployment.md
+
+	# The symlinks and the /etc/shells entries are deliberately NOT shipped as
+	# package files. /etc/shells is a shared file no package owns, so it has to
+	# be edited by script either way, and splitting ownership -- dpkg for the
+	# symlinks, a script for the registration -- means removal has two masters.
+	# logsh-install.sh owns both, and its uninstall path is tested.
+
 override_dh_auto_test:
 	# Run tests
 	go test -timeout 30s -v ./...
 
 override_dh_auto_clean:
 	# Clean build artifacts
-	rm -f sudosrv
+	rm -f sudosrv logsh
 	dh_auto_clean

@@ -143,7 +143,7 @@ server:
 # Note that under sudo, logsh records submituser as the account that ESCALATED
 # (alice) and runuser as the account the session runs as (root), matching sudo's
 # own convention.
-nested_sessions: metadata
+nested_sessions: record
 
 # Command log: one syslog record per command executed in the session.
 #

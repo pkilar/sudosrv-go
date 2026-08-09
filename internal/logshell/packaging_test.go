@@ -266,3 +266,150 @@ func TestDisableWorksWithoutTheBinary(t *testing.T) {
 		t.Errorf("alice's shell = %q, want /bin/bash", got)
 	}
 }
+
+// The distribution maintainer scripts are guarded here because the two mistakes
+// available in them are both fleet-wide and both silent until it is too late:
+// restoring accounts from the wrong hook (by which time the symlinks are gone
+// and nobody can log in), and restoring them on UPGRADE (which switches
+// recording off on every package update and nobody notices until they go
+// looking for a transcript).
+
+const (
+	debPostinst = "../../debian/logsh.postinst"
+	debPrerm    = "../../debian/logsh.prerm"
+	rpmSpec     = "../../rpm/SPECS/sudosrv.spec"
+	archInstall = "../../archlinux/logsh.install"
+	installVerb = "logsh-install.sh uninstall"
+	enableVerb  = "logsh-install.sh enable"
+)
+
+func readPackaging(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// section returns the text between start and the first occurrence of end after
+// it, so a single case arm or spec scriptlet can be examined on its own.
+func section(t *testing.T, body, start, end string) string {
+	t.Helper()
+	i := strings.Index(body, start)
+	if i < 0 {
+		t.Fatalf("could not find %q", start)
+	}
+	rest := body[i+len(start):]
+	if head, _, ok := strings.Cut(rest, end); ok {
+		return head
+	}
+	return rest
+}
+
+// TestRemovalRestoresAccountsFromThePreRemovalHook is the lockout guard.
+//
+// By the time a post-removal hook runs, the binary and the symlinks are gone,
+// so any account still pointing at /usr/sbin/lbash has a login shell that does
+// not exist -- on every host the package was removed from, at once.
+func TestRemovalRestoresAccountsFromThePreRemovalHook(t *testing.T) {
+	// Debian: prerm, and only for `remove`.
+	prerm := readPackaging(t, debPrerm)
+	if !strings.Contains(section(t, prerm, "remove)", ";;"), installVerb) {
+		t.Errorf("%s: the remove) arm does not restore accounts", debPrerm)
+	}
+	if strings.Contains(readPackaging(t, debPostinst), installVerb) {
+		t.Errorf("%s: postinst restores accounts; that belongs in prerm", debPostinst)
+	}
+
+	// RPM: %preun, not %postun.
+	spec := readPackaging(t, rpmSpec)
+	if !strings.Contains(section(t, spec, "%preun -n logsh", "\n%files"), installVerb) {
+		t.Errorf("%s: the logsh %%preun does not restore accounts", rpmSpec)
+	}
+	if strings.Contains(section(t, spec, "%post -n logsh", "\n%preun"), installVerb) {
+		t.Errorf("%s: the logsh %%post restores accounts; that belongs in %%preun", rpmSpec)
+	}
+
+	// Arch: pre_remove.
+	arch := readPackaging(t, archInstall)
+	if !strings.Contains(section(t, arch, "pre_remove()", "\n}"), installVerb) {
+		t.Errorf("%s: pre_remove does not restore accounts", archInstall)
+	}
+}
+
+// TestUpgradeDoesNotRestoreAccounts is the other half. An upgrade that restored
+// accounts would silently switch recording off on every package update.
+func TestUpgradeDoesNotRestoreAccounts(t *testing.T) {
+	// Debian: prerm runs on `upgrade` too, so the arm must be a no-op.
+	prerm := readPackaging(t, debPrerm)
+	if strings.Contains(section(t, prerm, "upgrade|deconfigure|failed-upgrade)", ";;"), installVerb) {
+		t.Errorf("%s: the upgrade arm restores accounts; every apt upgrade would disable "+
+			"recording", debPrerm)
+	}
+
+	// RPM: %preun runs on upgrade with $1 == 1, so the call must be guarded.
+	preun := section(t, readPackaging(t, rpmSpec), "%preun -n logsh", "\n%files")
+	if !strings.Contains(preun, `[ "$1" = 0 ]`) {
+		t.Errorf("%s: the logsh %%preun is not guarded on $1 == 0, so a yum update would "+
+			"restore every account and disable recording", rpmSpec)
+	}
+
+	// Arch: pacman routes upgrades to pre_upgrade, so pre_remove is not called.
+	// What must hold is that post_upgrade does not undo anything.
+	arch := readPackaging(t, archInstall)
+	if strings.Contains(section(t, arch, "post_upgrade()", "\n}"), installVerb) {
+		t.Errorf("%s: post_upgrade restores accounts", archInstall)
+	}
+}
+
+// executable strips the lines of a shell script that do not run anything:
+// comments, and echoes that merely tell an operator what to type next.
+//
+// Both of those legitimately mention `logsh-install.sh enable`, and a plain
+// substring search over the whole file flags them -- which it did, on the first
+// version of the test below. What matters is whether a script CALLS enable, not
+// whether it names it.
+func executable(body string) string {
+	var kept []string
+	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "echo ") {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// TestNoMaintainerScriptEnablesAnAccount pins the property that keeps package
+// installation safe: the machinery goes in, and switching an account to it stays
+// a deliberate per-host decision. A package that enabled itself would turn the
+// first bad config into a fleet-wide lockout at upgrade time.
+func TestNoMaintainerScriptEnablesAnAccount(t *testing.T) {
+	for _, path := range []string{debPostinst, debPrerm, archInstall} {
+		if strings.Contains(executable(readPackaging(t, path)), enableVerb) {
+			t.Errorf("%s enables an account; installation must switch nobody", path)
+		}
+	}
+	spec := readPackaging(t, rpmSpec)
+	for _, scriptlet := range []string{"%post -n logsh", "%preun -n logsh"} {
+		if strings.Contains(executable(section(t, spec, scriptlet, "\n%files")), enableVerb) {
+			t.Errorf("%s: %s enables an account", rpmSpec, scriptlet)
+		}
+	}
+}
+
+// TestPackagedConfigIsTheShippedExample keeps the three packages from drifting
+// apart, and from drifting away from the file the test suite validates.
+func TestPackagedConfigIsTheShippedExample(t *testing.T) {
+	for _, spec := range []struct{ path, want string }{
+		{"../../debian/rules", "examples/logsh.yaml"},
+		{rpmSpec, "examples/logsh.yaml"},
+		{"../../archlinux/PKGBUILD", "examples/logsh.yaml"},
+	} {
+		if !strings.Contains(readPackaging(t, spec.path), spec.want) {
+			t.Errorf("%s does not install %s as the packaged config", spec.path, spec.want)
+		}
+	}
+}

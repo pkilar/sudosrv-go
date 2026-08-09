@@ -284,10 +284,44 @@ Config and spooled journals are left in place deliberately.
 
 ---
 
-## Remaining packaging work
+## Packaging
 
-The install script and this runbook are distribution-independent. Wiring them
-into the `deb/`, `rpm/` and `archlinux/` trees as a separate `logsh` package —
-logsh belongs on every managed host, the daemon does not — is not done yet.
-Whatever does it must call `install` + `verify` from postinst and `uninstall`
-from **prerm**, never postrm: by postrm time the files are already gone.
+logsh ships as its own package, separate from `sudosrv`: it belongs on every
+managed host, the daemon usually does not.
+
+| Distribution | Package | Maintainer scripts |
+|---|---|---|
+| Debian/Ubuntu | `logsh` binary package from the same source | `debian/logsh.postinst`, `debian/logsh.prerm` |
+| RHEL/Fedora | `logsh` subpackage of the `sudosrv` spec | `%post -n logsh`, `%preun -n logsh` |
+| Arch | `logsh` in a split PKGBUILD | `archlinux/logsh.install` |
+
+Each installs the static binary at `/usr/sbin/logsh`, the install script under
+the distribution's libexec directory, `examples/logsh.yaml` as
+`/etc/logsh/logsh.yaml` (a conffile, so upgrades never clobber it), and this
+runbook under `/usr/share/doc/logsh/`.
+
+**Installation switches no account.** The maintainer scripts run `install` and
+`verify` only. Enabling an account stays a deliberate per-host decision, because
+a package that enabled itself would turn the first bad config into a fleet-wide
+lockout at upgrade time with no operator in the loop. A test asserts none of the
+scripts calls `enable`.
+
+**Removal restores accounts from the PRE-removal hook**, before any file is
+deleted — by post-removal time the binary and symlinks are gone, and an account
+still pointing at `/usr/sbin/lbash` has a login shell that does not exist. The
+Debian and RPM hooks also run on upgrade, so both guard on it: restoring accounts
+during an update would silently switch recording off. Arch routes upgrades to
+`pre_upgrade` and needs no guard. Tests cover all of it.
+
+**`verify` failing does not fail the install.** Nothing has been switched at that
+point, so a bad config leaves no account worse off, whereas a failed postinst
+leaves the package manager half-configured. It warns loudly instead; do not
+enable an account until it passes.
+
+### What the packages deliberately do not own
+
+The `l*` symlinks and the `/etc/shells` entries are created by
+`logsh-install.sh`, not shipped as package files. `/etc/shells` is a shared file
+no package owns, so it has to be edited by script either way, and splitting
+ownership — the package manager for the symlinks, a script for the registration —
+would give removal two masters. One owner, with a tested uninstall path.

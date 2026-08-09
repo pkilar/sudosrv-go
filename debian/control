@@ -10,6 +10,21 @@ Homepage: https://github.com/pkilar/sudosrv
 Vcs-Git: https://github.com/pkilar/sudosrv.git
 Rules-Requires-Root: no
 
+Package: logsh
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: sudosrv
+Description: recording login shell for sudo I/O log servers
+ logsh is a multi-call login shell that records a user's terminal session to a
+ sudosrv log server, in the same sudoreplay-compatible format sudo produces.
+ /usr/sbin/lbash and /usr/sbin/lzsh are symlinks to it; the name it is invoked
+ under selects the real shell to run.
+ .
+ It belongs on every managed host, whereas the sudosrv daemon usually does not,
+ which is why it is packaged separately. Installing it switches no account: see
+ /usr/share/doc/logsh/logsh-deployment.md for the rollout and the mandatory
+ break-glass drill before deploying anywhere you cannot walk up to.
+
 Package: sudosrv
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}

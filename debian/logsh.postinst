@@ -1,0 +1,36 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+# logsh install: put the machinery in place and switch NOBODY.
+#
+# A package that enabled itself would turn the first bad config into a
+# fleet-wide lockout at `apt upgrade` time, with no operator in the loop. Which
+# accounts get recorded is a deliberate, per-host decision made afterwards with
+#   logsh-install.sh enable <user> <name>
+# See /usr/share/doc/logsh/logsh-deployment.md.
+
+case "$1" in
+	configure)
+		/usr/libexec/logsh/logsh-install.sh install
+
+		# Verify, but do not fail the installation on it. A configuration that
+		# does not validate leaves no account worse off than before -- nothing
+		# has been switched -- whereas a failed postinst leaves dpkg in a
+		# half-configured state that an administrator then has to dig out of.
+		# The warning is what they act on.
+		if ! /usr/libexec/logsh/logsh-install.sh verify; then
+			echo "logsh: verification FAILED -- do not enable any account until this is fixed." >&2
+			echo "logsh: run 'logsh -validate' and 'logsh -selftest' for detail." >&2
+		fi
+		;;
+	abort-upgrade|abort-remove|abort-deconfigure) ;;
+	*)
+		echo "postinst called with unknown argument '$1'" >&2
+		exit 1
+		;;
+esac
+
+#DEBHELPER#
+
+exit 0
