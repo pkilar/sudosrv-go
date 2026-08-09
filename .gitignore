@@ -3,6 +3,8 @@
 # Compiled binary
 /sudosrv*
 /sudosrv.exe
+/logsh
+/logsh-linux-*
 
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.

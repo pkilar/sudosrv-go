@@ -44,6 +44,13 @@ linters:
         - G402
         # G404 — math/rand/v2 is used only for jitter, never security.
         - G404
+        # G204 — one site: logshell/exec.go execs the real shell, which is the
+        # entire purpose of logsh. The path is never attacker-supplied: it comes
+        # from the shells map in a root-owned, non-group-writable config file
+        # (CheckPerms) and must survive ResolveShell's allowlist lookup before it
+        # can be reached. The user-supplied argv is passed as arguments to execve,
+        # not through a shell, so there is no interpretation step to inject into.
+        - G204
     staticcheck:
       checks:
         - all
@@ -63,6 +70,21 @@ linters:
         - -QF1003
   exclusions:
     rules:
+      # G103 — the ioctl wrappers in logsh's pty layer. Scoped to the one file
+      # and the one rule rather than excluded globally, because unsafe appears
+      # nowhere else in this tree and a repo-wide exclusion would stop flagging
+      # it if it ever did.
+      #
+      # Every conversion here is unsafe.Pointer -> uintptr inside the
+      # syscall.Syscall call expression, which is the single form the
+      # unsafe.Pointer rules permit; anywhere else the GC could move the pointee
+      # between the conversion and the call. The alternative is a dependency on
+      # golang.org/x/sys, which this module deliberately does without —
+      # syscall carries every constant needed on both architectures it ships.
+      - path: internal/logshell/pty\.go
+        text: "G103"
+        linters:
+          - gosec
       - path: pkg/sudosrv_proto/
         linters:
           - errcheck

@@ -25,6 +25,16 @@ PROTO_GO_OUT_DIR=$(PROTO_SRC_DIR)/
 BINARY_NAME=sudosrv
 CMD_PATH=./cmd/sudosrv
 
+# logsh, the recording login shell. Built with CGO_ENABLED=0 ALWAYS, not just
+# for release: logsh is set as an account's shell in /etc/passwd, so a dynamic
+# linker that cannot resolve it does not degrade the login, it prevents the login
+# entirely. A static binary removes that whole failure mode. The cost is that
+# os/user can no longer consult NSS, which is why record_users accepts numeric
+# uids -- see Config.ShouldRecord.
+LOGSH_BINARY_NAME=logsh
+LOGSH_CMD_PATH=./cmd/logsh
+LOGSH_ENV=CGO_ENABLED=0
+
 # Build flags for stripped release binary
 LDFLAGS_STRIP = -ldflags="-s -w"
 
@@ -32,15 +42,37 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: lint all build build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
+.PHONY: lint all build build-logsh install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
 
-build: proto deps
+build: proto deps build-logsh
 	@echo "Building the application for local architecture..."
 	$(GOBUILD) -o $(BINARY_NAME) $(CMD_PATH)
 	@echo "Build complete: ./$(BINARY_NAME)"
+
+# Build logsh, the recording login shell. See LOGSH_ENV for why this is always
+# a static build.
+build-logsh:
+	@echo "Building logsh (static) for local architecture..."
+	$(LOGSH_ENV) $(GOBUILD) -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
+	@echo "Build complete: ./$(LOGSH_BINARY_NAME)"
+
+# Install logsh on THIS host: binary, symlinks, /etc/shells, then verify.
+# Switches no account -- see docs/logsh-deployment.md for the rollout sequence
+# and the mandatory break-glass drill.
+install-logsh: build-logsh
+	install -D -m 0755 $(LOGSH_BINARY_NAME) $(DESTDIR)/usr/sbin/$(LOGSH_BINARY_NAME)
+	install -d -m 0755 $(DESTDIR)/etc/logsh
+	@if [ ! -f $(DESTDIR)/etc/logsh/logsh.yaml ]; then \
+		install -m 0644 examples/logsh.yaml $(DESTDIR)/etc/logsh/logsh.yaml; \
+		echo "Installed a starter config at /etc/logsh/logsh.yaml -- review it before enabling."; \
+	fi
+	ROOT=$(DESTDIR) ./packaging/logsh/logsh-install.sh install
+	@echo
+	@echo "Installed. NO account has been switched."
+	@echo "Next: logsh-install.sh verify, then read docs/logsh-deployment.md."
 
 # Build a stripped release binary for the local architecture
 build-release: proto deps

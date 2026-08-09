@@ -1,0 +1,204 @@
+# Example configuration for logsh, the recording login shell.
+#
+# Install at /etc/logsh/logsh.yaml, owned by root, mode 0644.
+#
+# 0644 and not 0600: logsh runs as the LOGGING-IN USER, not as root -- it is that
+# account's login shell, exec'd by sshd after privileges have already been
+# dropped. It must be able to read this file. Root-owned and not group- or
+# world-writable is what matters; /etc/logsh itself must satisfy the same rule,
+# or the file could be swapped by rename(2) without ever being written to.
+#
+# Validate before deploying:   logsh -validate -config /etc/logsh/logsh.yaml
+# Check the host can run it:   logsh -selftest -config /etc/logsh/logsh.yaml
+
+# Which invocation name stands for which real shell. logsh is a multi-call
+# binary: install /usr/sbin/lbash as a symlink to it and set that as an account's
+# shell in /etc/passwd.
+#
+# This map is an ALLOWLIST, not a naming convention. logsh does not infer a
+# target by stripping the leading "l"; only what appears here can be exec'd.
+shells:
+  lsh: /bin/sh
+  lbash: /bin/bash
+  lzsh: /bin/zsh
+  ldash: /bin/dash
+
+# Accounts whose sessions are recorded. Anything not listed here gets the real
+# shell with no recording and no log entry, which is what makes it safe to
+# install logsh fleet-wide before deciding whose sessions to record.
+#
+# An entry matches either the account name or its numeric uid. Use the uid form
+# for LDAP/SSSD accounts: logsh is a static binary, so os/user cannot consult NSS
+# and would never match such an account by name.
+record_users:
+  - root
+
+# Stream capture.
+#
+# READ THIS BEFORE RELYING ON log_ttyin: false. It does NOT mean "we do not
+# record what the user types". Terminal echo puts nearly every keystroke into the
+# ttyout stream regardless. Turning ttyin off only protects the moments when echo
+# is disabled -- which is to say, password prompts. Any notice shown to users
+# must say so.
+log_ttyout: true # session output (on by default)
+log_ttyin: false # session input  (off by default)
+
+# Non-interactive (no PTY) sessions -- scp, rsync, git-over-ssh, `ssh host cmd`.
+#
+# All off by default. Such a session is then recorded as a METADATA-ONLY record
+# — who ran what, when, how it exited — and the three streams are passed through
+# untouched, so a 10GB transfer stays byte-exact and full speed instead of
+# producing a 10GB transcript.
+#
+# Setting ANY of these promotes the session to a full I/O recording of the
+# streams you enable, and gives up that pass-through: every byte then takes a
+# detour through logsh. Turning on log_stdin or log_stdout will slow file
+# transfer down measurably and grow the log store by the size of the data moved.
+#
+# Note that interactive sessions are unaffected by these three — a PTY session
+# is governed by log_ttyin/log_ttyout above.
+log_stdin: false
+log_stdout: false
+log_stderr: false
+
+# Push each buffer as it is produced rather than batching. Matches sudo's
+# iolog_flush.
+iolog_flush: true
+
+server:
+  # RECOMMENDED TOPOLOGY: point logsh at a sudosrv running locally in relay mode.
+  #
+  #   logsh (as user) --loopback--> sudosrv relay (as root) --mTLS--> central
+  #
+  # logsh cannot safely hold a TLS client key: it runs as the logging-in user, so
+  # any key it can read, that user can steal and use to forge or suppress audit
+  # records at the central server. The local relay owns the host credentials and
+  # the spool directory, both staying root-only.
+  upstream_host: "127.0.0.1:30343"
+  use_tls: false
+
+  # Only for a host whose credentials are genuinely user-readable anyway (a
+  # single-admin box, a lab). -validate warns when these are set.
+  # use_tls: true
+  # tls_cacert_file: /etc/logsh/ca.pem
+  # tls_cert_file: /etc/logsh/client.pem
+  # tls_key_file: /etc/logsh/client.key
+  # tls_min_version: "1.3"
+
+  connect_timeout: 5s
+  response_timeout: 30s
+
+  # Local spool. When set and writable, it becomes the PRIMARY path: the session
+  # is journalled to disk and forwarded at logout. That keeps the network out of
+  # the keystroke path entirely and makes a server outage cost nothing — the
+  # session records normally and is delivered afterwards.
+  #
+  # When empty (or unwritable), logsh streams straight to the server instead.
+  # Leave it empty with the loopback topology above: the local relay already
+  # spools, as root, and adding a second spool here only duplicates the job.
+  #
+  # A shared spool needs mode 1777 — every recorded user writes to it, and the
+  # sticky bit stops them removing each other's files. Journals themselves are
+  # created 0600, so one user cannot read another's transcript; only the
+  # filenames are visible.
+  #
+  # Undelivered journals are parked as *.journal.undelivered and NEVER pruned:
+  # each is the only copy of a session that never reached the server. Sweep them
+  # with a timer, and never point logrotate at this directory.
+  journal_directory: ""
+
+# What to do when logsh finds itself inside something that may already be
+# recording. Values: metadata | skip | record.
+#
+# THE PROBLEM. `sudo -i` runs the TARGET account's passwd shell, so once logsh is
+# root's shell the same session gets captured twice — three times when the
+# invoking account also uses logsh:
+#
+#   sshd pty -> logsh(alice) -> bash -> sudo -i -> logsh(root) -> bash
+#               ^^ transcript 1          ^^ transcript 2  ^^ transcript 3
+#
+# Four pseudo-terminals for one session, and the raw-mode keystroke-timing
+# regression stacked at every layer.
+#
+# Inside another logsh this ALWAYS skips regardless of the setting: the outer
+# logsh is certainly recording, the bytes pass through its pty to get here.
+#
+# Under sudo it is a judgement call and logsh cannot make it. sudo records I/O
+# only when the matched sudoers rule carries log_output, and nothing visible from
+# inside the session says whether it did:
+#
+#   record    (default) A full second transcript. Deliberately the wasteful
+#             option: duplication is recoverable — both copies carry the same
+#             session UUID, so a SIEM can drop one — whereas a transcript nobody
+#             took is gone. Costs disk and one extra pty layer.
+#   metadata  No second pty and no transcript, but a record is still kept: who
+#             escalated, what shell, when, exit status, and both session UUIDs.
+#   skip      Plain exec straight through. Nothing recorded, nothing emitted.
+#
+# BOTH metadata and skip depend on a claim logsh cannot verify: that every
+# sudoers rule reaching a shell carries log_output. Where one does not, `shell ->
+# sudo -i -> root logsh` leaves the root session captured by NOTHING. Set them
+# once you can state that claim; -validate warns about either.
+#
+# Note that under sudo, logsh records submituser as the account that ESCALATED
+# (alice) and runuser as the account the session runs as (root), matching sudo's
+# own convention.
+nested_sessions: metadata
+
+# Command log: one syslog record per command executed in the session.
+#
+# INDEPENDENT of session recording in every direction — its own toggle, it goes
+# to LOCAL syslog rather than the log server, and it works whether the session
+# is recorded, journalled, or not recorded at all. The transcript shows what a
+# session looked like; this shows what it ran, and this is the one a SIEM can
+# grep. Every record carries SESSION=<uuid>, and the same uuid is attached to the
+# recorded session as `logsh_session` in log.json, so the two join on it.
+#
+# Records look like:
+#   SESSION=<uuid> ; USER=root ; UID=0 ; TTY=pts/3 ; PID=4711 ; CMD=/usr/bin/vi /etc/passwd
+#
+# READ THIS BEFORE ENABLING. It is implemented with ptrace on the session's whole
+# process tree, which buys a property no shell hook can offer — it catches
+# commands run from scripts, from subshells and from inside editors, and cannot
+# be switched off from within the session — at three real costs:
+#
+#   * strace and gdb DO NOT WORK inside a recorded session. A process can have
+#     only one tracer. For an admin shell that is a genuine loss.
+#   * Every exec stops the process briefly. Unmeasurable interactively;
+#     noticeable in a build that spawns 100k processes.
+#   * It is blocked outright where kernel.yama.ptrace_scope is 2 or 3, which
+#     logsh cannot work around because it runs unprivileged. It warns and carries
+#     on with session recording intact.
+#
+# It logs EXECUTIONS, not commands as typed: a pipeline is three records, and
+# `ls` is one record for /usr/bin/ls.
+command_log:
+  enabled: false
+  syslog_facility: authpriv
+  syslog_priority: info
+  max_len: 960
+  # Refuse the session when tracing cannot start. Off by default: a kernel
+  # setting logsh has no influence over can veto ptrace, and locking every
+  # account out of a host over an audit add-on is a poor trade.
+  required: false
+
+# Refuse a session that cannot be recorded.
+#
+# This fires only when the local journal cannot be opened AND the server is
+# unreachable -- never on a transient network failure, which the store-and-
+# forward journal absorbs. A blip must not lock out a fleet.
+fail_closed: true
+
+# Break-glass: while this root-owned file exists, sessions proceed UNRECORDED
+# with a crit-priority syslog alert and a banner on the terminal.
+#
+# It is honoured only if root owns it and no one else can write it; otherwise any
+# user could switch off their own recording. A marker that fails those checks is
+# ignored and alerted about rather than silently treated as absent.
+#
+# This covers "the box is reachable but recording is broken". The complementary
+# path for "the box is not reachable" is a second uid-0 account with a plain
+# shell, key-only, gated to a bastion, alerting on every use -- that lives in
+# sshd_config, not here. Both must be drilled before rollout; untested
+# break-glass is not break-glass.
+break_glass_marker: /etc/logsh/bypass
