@@ -953,9 +953,14 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 	defer f.Close()
 
 	var (
-		sawAccept  bool // first AcceptMessage seen; later ones are sub-commands
-		expectAck  bool // this session is an I/O session, so it will be acknowledged
-		sentExit   bool // an ExitMessage was replayed, so a final commit is due
+		sawAccept bool // first AcceptMessage seen; later ones are sub-commands
+		expectAck bool // this session is an I/O session, so it will be acknowledged
+		sentExit  bool // an ExitMessage was replayed, so a final commit is due
+		// elapsed is the running sum of the delays the journal carried, which is
+		// exactly the clock the upstream accumulates and reports back in commit
+		// points. It is what tells the final commit point apart from the interim
+		// ones emitted during the replay.
+		elapsed    time.Duration
 		incomplete bool // cache file was truncated; no Exit will ever be sent
 	)
 
@@ -1001,13 +1006,14 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 		if msg.GetExitMsg() != nil {
 			sentExit = true
 		}
+		elapsed += durationFromTimeSpec(messageDelay(msg))
 	}
 
 	switch {
 	case expectAck && sentExit:
 		// The durability barrier. Read past any periodic commit points the
 		// upstream emitted during the replay until the session is acknowledged.
-		if err := readUpstreamAck(ctx, proc, cfg, true); err != nil {
+		if err := readUpstreamCommit(ctx, proc, cfg, elapsed); err != nil {
 			return fmt.Errorf("upstream did not acknowledge the session; keeping cache file: %w", err)
 		}
 
@@ -1072,6 +1078,24 @@ func flushFile(ctx context.Context, proc protocol.Processor, filePath string, cf
 // flushFile does not call this function for them.
 //
 // An error or abort from the upstream is always a failure.
+// readUpstreamCommit waits for a commit point covering the WHOLE replayed
+// session, rather than the first one to arrive.
+//
+// That distinction is the difference between retiring a delivered journal and
+// deleting an undelivered one. An upstream emits a commit point on the FIRST I/O
+// event of a session and every ACK_FREQUENCY after (internal/storage
+// writeIoEntry), so by the end of a replay there are almost always interim
+// commit points already queued on the socket. readUpstreamAck returns on the
+// first of them -- so flushFile could treat a fraction of a session as
+// acknowledged and then retireCacheFile the only copy of the rest.
+//
+// elapsed is the sum of the delays the journal itself carried, which is exactly
+// the clock the upstream accumulates, so committed >= elapsed identifies the
+// final commit point. It is the rule C's client uses.
+func readUpstreamCommit(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, elapsed time.Duration) error {
+	return logsrvclient.ReadCommitAtLeast(ctx, proc, clientConfig(cfg), elapsed)
+}
+
 func readUpstreamAck(ctx context.Context, proc protocol.Processor, cfg *config.RelayConfig, waitCommit bool) error {
 	return logsrvclient.ReadAck(ctx, proc, clientConfig(cfg), waitCommit)
 }
