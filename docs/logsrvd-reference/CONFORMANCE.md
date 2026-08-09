@@ -297,7 +297,7 @@ Spec: [`05-relay.md`](05-relay.md)
 | `RELAY-014` | In real-time relay mode the server never generates a `commi… | NA | none | `internal/relay/session.go:556-586; README.md:145-157` | none |
 | `RELAY-015` | Upstream `commit_point` values are forwarded verbatim | NA | none | `internal/relay/session.go:903-957` | none |
 | `RELAY-016` | A `commit_point` received before `RUNNING` is a protocol er… | NA | none | `internal/relay/session.go:930-957` | No downstream forwarding of upstream commit points exists, and the flush has no connection state machine to violate, so 'commit_point received before RUNNING' has no meaning. readUpstreamAc… |
-| `RELAY-017` | The first `commit_point` after `EXITED` finalizes the sessi… | MATCH | none | `internal/relay/session.go:903-908,930-957` | — |
+| `RELAY-017` | The first `commit_point` after `EXITED` finalizes the sessi… | MATCH | none | `internal/relay/session.go (flushFile durability barrier, re…` | — |
 | `RELAY-018` | Upstream `log_id` is forwarded unmodified | NA | none | `internal/relay/session.go:883-896; internal/relay/session.g…` | none |
 | `RELAY-019` | `log_id` handling is skipped when there is no downstream cl… | MATCH | none | `internal/relay/session.go:886-894,930-957` | — |
 | `RELAY-020` | Upstream `error` messages are relayed and stop relay I/O | MATCH | none | `internal/relay/session.go:945-949,903-917` | — |
