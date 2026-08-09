@@ -209,3 +209,65 @@ func TestPrepareEnvAddsSHELLWhenAbsent(t *testing.T) {
 		t.Errorf("PrepareEnv did not add SHELL: %q", got)
 	}
 }
+
+// TestNamesInUseMatchesOnTheBasename underpins the selftest rule that decides
+// whether an unresolvable shell mapping is fatal.
+//
+// Failing on any absent shell would make -selftest unusable as a package
+// postinst check: the shipped map lists ldash, and /bin/dash is not present on
+// a great many hosts. Only a mapping some account is ACTUALLY using can break a
+// login, so only that one is fatal.
+func TestNamesInUseMatchesOnTheBasename(t *testing.T) {
+	dir := t.TempDir()
+	passwd := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwd, []byte(
+		"root:x:0:0::/root:/usr/sbin/lbash\n"+
+			"alice:x:1000:1000::/home/alice:/bin/bash\n"+
+			"bob:x:1001:1001::/home/bob:/opt/custom/sbin/lzsh\n"+ // a different install prefix
+			"carol:x:1002:1002::/home/carol:-lsh\n"+ // a login-dash form
+			"broken:x:1003:1003::/home/broken\n"), 0o644); err != nil { // too few fields
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Shells: map[string]string{
+		"lsh": "/bin/sh", "lbash": "/bin/bash", "lzsh": "/bin/zsh", "ldash": "/bin/dash",
+	}}
+	inUse, err := cfg.NamesInUse(passwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"lbash", "lzsh", "lsh"} {
+		if !inUse[want] {
+			t.Errorf("%s is some account's login shell but was not reported in use", want)
+		}
+	}
+	// lzsh proves the match does not depend on the install prefix, which logsh
+	// has no way to learn.
+	if inUse["ldash"] {
+		t.Error("ldash is nobody's login shell but was reported in use; an absent /bin/dash " +
+			"would then fail a package postinst on every host that lacks it")
+	}
+	if len(inUse) != 3 {
+		t.Errorf("in-use set = %v, want exactly lsh, lbash, lzsh", inUse)
+	}
+}
+
+// TestNamesInUseIgnoresShellsOutsideTheMap keeps ordinary accounts from being
+// mistaken for logsh users.
+func TestNamesInUseIgnoresShellsOutsideTheMap(t *testing.T) {
+	dir := t.TempDir()
+	passwd := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwd, []byte(
+		"a:x:1:1::/:/bin/bash\nb:x:2:2::/:/usr/bin/less\nc:x:3:3::/:/sbin/nologin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{Shells: map[string]string{"lbash": "/bin/bash", "lsh": "/bin/sh"}}
+	inUse, err := cfg.NamesInUse(passwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inUse) != 0 {
+		t.Errorf("in-use set = %v, want empty; no account uses a logsh symlink here", inUse)
+	}
+}

@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Maintainer scripts for the logsh package.
+
+_verify() {
+	if ! /usr/lib/logsh/logsh-install.sh verify; then
+		echo ":: logsh: verification FAILED -- do not enable any account until this is fixed."
+		echo ":: logsh: run 'logsh -validate' and 'logsh -selftest' for detail."
+	fi
+}
+
+post_install() {
+	# Puts the machinery in place and switches NOBODY. A package that enabled
+	# itself would turn the first bad config into a fleet-wide lockout at
+	# upgrade time, with no operator in the loop.
+	/usr/lib/logsh/logsh-install.sh install
+	_verify
+	echo ":: logsh is installed but no account is recorded yet."
+	echo ":: Read /usr/share/doc/logsh/logsh-deployment.md, then:"
+	echo "::   /usr/lib/logsh/logsh-install.sh enable <user> lbash"
+	echo ":: Keep an open root session until a fresh login is confirmed working."
+}
+
+post_upgrade() {
+	# Re-runs install so a new symlink name added upstream is registered, and
+	# re-verifies. Deliberately does NOT touch any account: upgrades must not
+	# change who is recorded.
+	/usr/lib/logsh/logsh-install.sh install
+	_verify
+}
+
+pre_remove() {
+	# Restore every account logsh switched BEFORE pacman deletes anything.
+	#
+	# pacman calls pre_remove only on real removal -- upgrades go through
+	# pre_upgrade -- so there is no upgrade guard needed here, unlike dpkg and
+	# rpm. By post_remove the binary and symlinks would already be gone, and any
+	# account still pointing at /usr/sbin/lbash would have a login shell that
+	# does not exist.
+	if ! /usr/lib/logsh/logsh-install.sh uninstall; then
+		echo ":: logsh: FAILED to restore account shells."
+		echo ":: logsh: check /etc/passwd for accounts still pointing at /usr/sbin/l*"
+		echo ":: logsh: before this host is rebooted or those users log out."
+		return 1
+	fi
+}

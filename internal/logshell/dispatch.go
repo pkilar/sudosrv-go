@@ -98,3 +98,33 @@ func ChildArgv0(shellPath string, login bool) string {
 	}
 	return base
 }
+
+// PasswdPath is where login shells are read from when deciding which of the
+// configured names are actually in use.
+const PasswdPath = "/etc/passwd"
+
+// NamesInUse reports which invocation names are currently some account's login
+// shell, matched on the basename of the shell field.
+//
+// Matching on the basename rather than a full path means this does not need to
+// know where the symlinks were installed, which logsh has no way to learn: the
+// shells map holds names, and the passwd entry holds whatever path the operator
+// pointed at.
+func (c *Config) NamesInUse(passwdPath string) (map[string]bool, error) {
+	raw, err := os.ReadFile(passwdPath) // #nosec G304 -- caller-supplied, root-owned system file
+	if err != nil {
+		return nil, err
+	}
+	inUse := make(map[string]bool)
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) != 7 {
+			continue
+		}
+		name := strings.TrimPrefix(filepath.Base(fields[6]), "-")
+		if _, ok := c.Shells[name]; ok {
+			inUse[name] = true
+		}
+	}
+	return inUse, nil
+}

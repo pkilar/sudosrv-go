@@ -288,16 +288,33 @@ func runSelftest(path string) int {
 		fmt.Fprintf(os.Stderr, "warn  %s\n", w)
 	}
 
-	// Every name in the map must resolve to something exec'able, because each
-	// one may already be some account's login shell.
+	// A mapping that does not resolve is only FATAL when an account is actually
+	// using it. Failing on any absent shell would make this unusable as a
+	// package postinst check: the shipped map lists lsh, lbash, lzsh and ldash,
+	// and /bin/dash is simply not present on a lot of hosts. An unused mapping
+	// to a missing shell harms nobody -- nothing can be exec'd through it -- and
+	// enable refuses it separately, before any account is switched.
+	inUse, err := cfg.NamesInUse(logshell.PasswdPath)
+	if err != nil {
+		// Conservative: unable to tell which are in use, so treat all as in use.
+		fmt.Fprintf(os.Stderr, "warn  cannot read %s (%v); treating every mapping as in use\n",
+			logshell.PasswdPath, err)
+		inUse = nil
+	}
 	for name := range cfg.Shells {
-		shell, err := cfg.ResolveShell(name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "FAIL  shells[%s]: %v\n", name, err)
+		shell, resolveErr := cfg.ResolveShell(name)
+		if resolveErr == nil {
+			fmt.Printf("ok    shells[%s]: %s -> %s\n", name, logshell.ChildArgv0(shell, true), shell)
+			continue
+		}
+		if inUse == nil || inUse[name] {
+			fmt.Fprintf(os.Stderr, "FAIL  shells[%s]: %v (an account is using this shell)\n",
+				name, resolveErr)
 			failed = true
 			continue
 		}
-		fmt.Printf("ok    shells[%s]: %s -> %s\n", name, logshell.ChildArgv0(shell, true), shell)
+		fmt.Fprintf(os.Stderr, "warn  shells[%s]: %v (no account uses it, so not fatal)\n",
+			name, resolveErr)
 	}
 
 	if len(cfg.RecordUsers) == 0 {

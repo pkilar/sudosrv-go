@@ -33,6 +33,8 @@ CMD_PATH=./cmd/sudosrv
 # uids -- see Config.ShouldRecord.
 LOGSH_BINARY_NAME=logsh
 LOGSH_CMD_PATH=./cmd/logsh
+# -trimpath strips the build directory from the binary: reproducible output, and
+# it stops packaging tools flagging a reference to the build sandbox.
 LOGSH_ENV=CGO_ENABLED=0
 
 # Build flags for stripped release binary
@@ -56,7 +58,7 @@ build: proto deps build-logsh
 # a static build.
 build-logsh:
 	@echo "Building logsh (static) for local architecture..."
-	$(LOGSH_ENV) $(GOBUILD) -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
+	$(LOGSH_ENV) $(GOBUILD) -trimpath -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
 	@echo "Build complete: ./$(LOGSH_BINARY_NAME)"
 
 # Install logsh on THIS host: binary, symlinks, /etc/shells, then verify.
@@ -152,12 +154,12 @@ clean:
 #	rm -rf deb/
 	$(GOCLEAN)
 
-# Build RPM package
+# Build RPM package (builds both sudosrv and the logsh subpackage)
 rpm:
 	@echo "Building RPM package..."
 	./rpm/build-rpm.sh "$(PKG_VERSION)"
 
-# Build Debian package
+# Build Debian packages (sudosrv and logsh, from the one source)
 deb:
 	@echo "Building Debian package for $(BINARY_NAME) version $(PKG_VERSION)"
 	@# Check if required tools are installed

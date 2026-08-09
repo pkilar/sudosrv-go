@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+# Restore every account logsh switched, BEFORE dpkg removes anything.
+#
+# This has to be prerm and not postrm. By postrm time the binary and the
+# symlinks are already gone, so any account still pointing at /usr/sbin/lbash
+# has a login shell that does not exist -- on every host the package was removed
+# from, at once, with no way back in over ssh.
+#
+# `remove` only. On `upgrade` dpkg calls prerm before unpacking the new version,
+# and restoring accounts there would silently disable recording on every package
+# update -- the failure nobody notices until they go looking for a transcript.
+
+case "$1" in
+	remove)
+		/usr/libexec/logsh/logsh-install.sh uninstall || {
+			echo "logsh: FAILED to restore account shells." >&2
+			echo "logsh: check /etc/passwd for accounts still pointing at /usr/sbin/l*" >&2
+			echo "logsh: before this host is rebooted or those users log out." >&2
+			exit 1
+		}
+		;;
+	upgrade|deconfigure|failed-upgrade) ;;
+	*)
+		echo "prerm called with unknown argument '$1'" >&2
+		exit 1
+		;;
+esac
+
+#DEBHELPER#
+
+exit 0

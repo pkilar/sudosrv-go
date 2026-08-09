@@ -1,5 +1,8 @@
 # Maintainer: Paul Kilar <pkilar@gmail.com>
-pkgname=sudosrv
+# A split package. logsh belongs on every managed host; the sudosrv daemon
+# usually does not, so they install independently.
+pkgbase=sudosrv
+pkgname=('sudosrv' 'logsh')
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
@@ -9,14 +12,11 @@ license=('MIT')
 depends=('glibc')
 makedepends=('go>=1.26' 'protobuf')
 optdepends=('sudo: sudo client (>= 1.9.0)')
-backup=('etc/sudosrv/config.yaml'
-        'etc/logrotate.d/sudosrv')
-install=sudosrv.install
-source=("${pkgname}-${pkgver}.tar.gz")
+source=("${pkgbase}-${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgbase}-${pkgver}"
 
     # Generate protobuf code
     protoc \
@@ -28,18 +28,29 @@ build() {
     # Tidy dependencies
     go mod tidy
 
-    # Build with stripped symbols
+    # Build with stripped symbols. CGO stays off for logsh in particular: it is
+    # a login shell, so a dynamic linker that cannot resolve it prevents login
+    # rather than degrading it.
     export CGO_ENABLED=0
     go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+    go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
 }
 
 check() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgbase}-${pkgver}"
     go test -timeout 30s ./...
 }
 
-package() {
-    cd "${pkgname}-${pkgver}"
+package_sudosrv() {
+    pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
+    depends=('glibc')
+    optdepends=('sudo: sudo client (>= 1.9.0)'
+                'logsh: recording login shell that reports to this server')
+    backup=('etc/sudosrv/config.yaml'
+            'etc/logrotate.d/sudosrv')
+    install=sudosrv.install
+
+    cd "${pkgbase}-${pkgver}"
 
     # Binary
     install -Dm0755 sudosrv "${pkgdir}/usr/bin/sudosrv"
@@ -58,4 +69,33 @@ package() {
 
     # Logrotate
     install -Dm0644 archlinux/sudosrv.logrotate "${pkgdir}/etc/logrotate.d/sudosrv"
+}
+
+package_logsh() {
+    pkgdesc='Recording login shell that reports terminal sessions to a sudosrv log server'
+    depends=('coreutils')
+    optdepends=('sudosrv: the log server these sessions are recorded to')
+    backup=('etc/logsh/logsh.yaml')
+    install=logsh.install
+
+    cd "${pkgbase}-${pkgver}"
+
+    install -Dm0755 logsh "${pkgdir}/usr/sbin/logsh"
+
+    # Packaging machinery, driven by the maintainer scripts. Not in PATH; an
+    # operator reaches it through the documented path in the runbook.
+    install -Dm0755 packaging/logsh/logsh-install.sh \
+        "${pkgdir}/usr/lib/logsh/logsh-install.sh"
+
+    # 0644, not 0600: logsh runs as the logging-in user and must be able to read
+    # this. Root-owned and not group- or world-writable is what matters.
+    install -Dm0644 examples/logsh.yaml "${pkgdir}/etc/logsh/logsh.yaml"
+
+    install -Dm0644 docs/logsh-deployment.md \
+        "${pkgdir}/usr/share/doc/logsh/logsh-deployment.md"
+
+    # The symlinks and /etc/shells entries are NOT shipped as package files.
+    # /etc/shells is a shared file no package owns, so it must be edited by
+    # script either way; splitting ownership would give removal two masters.
+    # logsh-install.sh owns both, and its uninstall path is tested.
 }
