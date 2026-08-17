@@ -2,7 +2,7 @@
 # Maintainer scripts for the logsh package.
 
 _verify() {
-	if ! /usr/lib/logsh/logsh-install.sh verify; then
+	if ! SBINDIR=/usr/bin /usr/lib/logsh/logsh-install.sh verify; then
 		echo ":: logsh: verification FAILED -- do not enable any account until this is fixed."
 		echo ":: logsh: run 'logsh -validate' and 'logsh -selftest' for detail."
 	fi
@@ -12,7 +12,7 @@ post_install() {
 	# Puts the machinery in place and switches NOBODY. A package that enabled
 	# itself would turn the first bad config into a fleet-wide lockout at
 	# upgrade time, with no operator in the loop.
-	/usr/lib/logsh/logsh-install.sh install
+	SBINDIR=/usr/bin /usr/lib/logsh/logsh-install.sh install
 	_verify
 	echo ":: logsh is installed but no account is recorded yet."
 	echo ":: Read /usr/share/doc/logsh/logsh-deployment.md, then:"
@@ -24,7 +24,7 @@ post_upgrade() {
 	# Re-runs install so a new symlink name added upstream is registered, and
 	# re-verifies. Deliberately does NOT touch any account: upgrades must not
 	# change who is recorded.
-	/usr/lib/logsh/logsh-install.sh install
+	SBINDIR=/usr/bin /usr/lib/logsh/logsh-install.sh install
 	_verify
 }
 
@@ -36,7 +36,7 @@ pre_remove() {
 	# rpm. By post_remove the binary and symlinks would already be gone, and any
 	# account still pointing at /usr/sbin/lbash would have a login shell that
 	# does not exist.
-	if ! /usr/lib/logsh/logsh-install.sh uninstall; then
+	if ! SBINDIR=/usr/bin /usr/lib/logsh/logsh-install.sh uninstall; then
 		echo ":: logsh: FAILED to restore account shells."
 		echo ":: logsh: check /etc/passwd for accounts still pointing at /usr/sbin/l*"
 		echo ":: logsh: before this host is rebooted or those users log out."

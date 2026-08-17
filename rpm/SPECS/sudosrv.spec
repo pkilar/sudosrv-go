@@ -5,7 +5,7 @@ Version:        %{_version}
 Release:        1%{?dist}
 Summary:        Go-based sudo I/O log server
 
-License:        MIT
+License:        Apache-2.0
 URL:            https://github.com/example/sudosrv
 Source0:        %{name}-%{version}.tar.gz
 
@@ -27,7 +27,14 @@ from any sudo client (version 1.9.0 and newer).
 
 %package -n logsh
 Summary:        Recording login shell for sudo I/O log servers
+# logsh-install.sh drives every install and removal step, so what IT needs is a
+# hard runtime requirement of this package: awk and grep as well as coreutils.
+# coreutils alone was wrong -- on a minimal image without gawk the %post would
+# fail and the symlinks would never be created.
 Requires:       coreutils
+Requires:       gawk
+Requires:       grep
+Requires:       /bin/sh
 Recommends:     sudosrv
 
 %description -n logsh
@@ -58,15 +65,15 @@ install -m 0755 sudosrv %{buildroot}%{_bindir}/sudosrv
 
 # Install configuration file
 install -d %{buildroot}%{_sysconfdir}/sudosrv
-install -m 0644 rpm/sudosrv.conf %{buildroot}%{_sysconfdir}/sudosrv/config.yaml
+install -m 0644 rpm/SOURCES/sudosrv.conf %{buildroot}%{_sysconfdir}/sudosrv/config.yaml
 
 # Install systemd service file
 install -d %{buildroot}%{_unitdir}
-install -m 0644 rpm/sudosrv.service %{buildroot}%{_unitdir}/sudosrv.service
+install -m 0644 rpm/SOURCES/sudosrv.service %{buildroot}%{_unitdir}/sudosrv.service
 
 # Install logrotate configuration
 install -d %{buildroot}%{_sysconfdir}/logrotate.d
-install -m 0644 rpm/sudosrv.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/sudosrv
+install -m 0644 rpm/SOURCES/sudosrv.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/sudosrv
 
 # Create directories for logs and cache
 install -d %{buildroot}%{_localstatedir}/log/sudosrv

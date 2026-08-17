@@ -1,0 +1,12 @@
+# logsh is deliberately statically linked, and this is not a packaging
+# oversight to be tidied away later.
+#
+# It is set as an account's login shell in /etc/passwd. A dynamic linker that
+# cannot resolve it therefore does not degrade the login, it PREVENTS the login
+# -- for every recorded account on the host, at once, with no way back in over
+# ssh. Static linking removes that entire failure mode. The cost is accepted
+# knowingly: os/user can no longer consult NSS, which is why record_users
+# accepts numeric uids (see Config.ShouldRecord).
+#
+# no-manual-page is deliberately NOT overridden here. It is a real gap.
+logsh: statically-linked-binary [usr/sbin/logsh]
