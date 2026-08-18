@@ -170,7 +170,6 @@ func DefaultConfig() *Config {
 			"lsh":   "/bin/sh",
 			"lbash": "/bin/bash",
 			"lzsh":  "/bin/zsh",
-			"ldash": "/bin/dash",
 			"lksh":  "/bin/ksh",
 			"lfish": "/usr/bin/fish",
 		},

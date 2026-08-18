@@ -214,8 +214,8 @@ func TestPrepareEnvAddsSHELLWhenAbsent(t *testing.T) {
 // whether an unresolvable shell mapping is fatal.
 //
 // Failing on any absent shell would make -selftest unusable as a package
-// postinst check: the shipped map lists ldash, and /bin/dash is not present on
-// a great many hosts. Only a mapping some account is ACTUALLY using can break a
+// postinst check: the shipped map lists lksh, and /bin/ksh is not present on a
+// great many hosts. Only a mapping some account is ACTUALLY using can break a
 // login, so only that one is fatal.
 func TestNamesInUseMatchesOnTheBasename(t *testing.T) {
 	dir := t.TempDir()
@@ -230,7 +230,7 @@ func TestNamesInUseMatchesOnTheBasename(t *testing.T) {
 	}
 
 	cfg := &Config{Shells: map[string]string{
-		"lsh": "/bin/sh", "lbash": "/bin/bash", "lzsh": "/bin/zsh", "ldash": "/bin/dash",
+		"lsh": "/bin/sh", "lbash": "/bin/bash", "lzsh": "/bin/zsh", "lksh": "/bin/ksh",
 	}}
 	inUse, err := cfg.NamesInUse(passwd)
 	if err != nil {
@@ -244,8 +244,8 @@ func TestNamesInUseMatchesOnTheBasename(t *testing.T) {
 	}
 	// lzsh proves the match does not depend on the install prefix, which logsh
 	// has no way to learn.
-	if inUse["ldash"] {
-		t.Error("ldash is nobody's login shell but was reported in use; an absent /bin/dash " +
+	if inUse["lksh"] {
+		t.Error("lksh is nobody's login shell but was reported in use; an absent /bin/ksh " +
 			"would then fail a package postinst on every host that lacks it")
 	}
 	if len(inUse) != 3 {

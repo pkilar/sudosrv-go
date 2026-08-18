@@ -290,8 +290,8 @@ func runSelftest(path string) int {
 
 	// A mapping that does not resolve is only FATAL when an account is actually
 	// using it. Failing on any absent shell would make this unusable as a
-	// package postinst check: the shipped map lists lsh, lbash, lzsh and ldash,
-	// and /bin/dash is simply not present on a lot of hosts. An unused mapping
+	// package postinst check: the shipped map lists lksh and lfish among others,
+	// and neither ksh nor fish is present on most hosts. An unused mapping
 	// to a missing shell harms nobody -- nothing can be exec'd through it -- and
 	// enable refuses it separately, before any account is switched.
 	inUse, err := cfg.NamesInUse(logshell.PasswdPath)

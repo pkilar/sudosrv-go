@@ -146,8 +146,15 @@ func walkAncestry() NestingKind {
 // A login shell's comm also carries the leading dash sshd prepends.
 func isShellSymlinkName(name string) bool {
 	name = strings.TrimPrefix(name, "-")
-	// Deliberately conservative: only the names this build installs. Matching
-	// any "l*" would call every user's `less` a nested logsh.
+	// Deliberately conservative: a fixed set rather than any "l*", which would
+	// call every user's `less` a nested logsh.
+	//
+	// Broader than the names this build installs symlinks for, and deliberately
+	// so. It covers every name the default map has ever carried, including
+	// operator-configured ones (lksh, lfish) and ldash, which was dropped from
+	// the defaults but may still be an account's shell on a host that upgraded.
+	// Failing to recognise one of those would not be a cosmetic miss: the outer
+	// logsh would go undetected and the session would be recorded twice.
 	return slices.Contains([]string{"lsh", "lbash", "lzsh", "ldash", "lksh", "lfish"}, name)
 }
 
