@@ -37,8 +37,8 @@ func infoOf(msgs []*pb.InfoMessage, key string) *pb.InfoMessage {
 func TestTimezoneNamePassesTZThroughVerbatim(t *testing.T) {
 	for _, tz := range []string{"Europe/Berlin", "UTC", "EST5EDT", ""} {
 		t.Setenv("TZ", tz)
-		if got := TimezoneName("/nonexistent", "/nonexistent"); got != tz {
-			t.Errorf("TimezoneName() = %q, want %q passed through unchanged", got, tz)
+		if got := timezoneName("/nonexistent", "/nonexistent"); got != tz {
+			t.Errorf("timezoneName() = %q, want %q passed through unchanged", got, tz)
 		}
 	}
 }
@@ -52,8 +52,8 @@ func TestTimezoneNameDerivesFromLocaltimeSymlink(t *testing.T) {
 	if err := os.Symlink("/usr/share/zoneinfo/Asia/Tokyo", link); err != nil {
 		t.Fatal(err)
 	}
-	if got := TimezoneName(link, "/nonexistent"); got != "Asia/Tokyo" {
-		t.Errorf("TimezoneName() = %q, want Asia/Tokyo derived from the symlink", got)
+	if got := timezoneName(link, "/nonexistent"); got != "Asia/Tokyo" {
+		t.Errorf("timezoneName() = %q, want Asia/Tokyo derived from the symlink", got)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestTimezoneNameIgnoresALocaltimeThatIsNotAZoneinfoPath(t *testing.T) {
 	if err := os.WriteFile(tzfile, []byte("Australia/Perth\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := TimezoneName(link, tzfile); got != "Australia/Perth" {
-		t.Errorf("TimezoneName() = %q, want the /etc/timezone value", got)
+	if got := timezoneName(link, tzfile); got != "Australia/Perth" {
+		t.Errorf("timezoneName() = %q, want the /etc/timezone value", got)
 	}
 }
 
@@ -82,8 +82,8 @@ func TestTimezoneNameIgnoresALocaltimeThatIsNotAZoneinfoPath(t *testing.T) {
 // not say".
 func TestTimezoneNameNeverReturnsEmpty(t *testing.T) {
 	unsetTZ(t)
-	if got := TimezoneName("/nonexistent", "/nonexistent"); got == "" {
-		t.Error("TimezoneName() = \"\" with no source available; want a fallback")
+	if got := timezoneName("/nonexistent", "/nonexistent"); got == "" {
+		t.Error("timezoneName() = \"\" with no source available; want a fallback")
 	}
 }
 

@@ -133,18 +133,20 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 	if exe, err := os.Executable(); err == nil {
 		meta.Source = exe
 	}
-	meta.RunEnv = []string{"TZ=" + TimezoneName(localtimePath, timezoneFilePath)}
+	meta.RunEnv = []string{"TZ=" + timezoneName(localtimePath, timezoneFilePath)}
 	return meta
 }
 
-// Paths consulted to resolve the system timezone when $TZ is unset. Variables
-// rather than constants so the tests can point them at a fixture.
-var (
+// Paths consulted to resolve the system timezone when $TZ is unset. They are
+// constants because nothing reassigns them: timezoneName takes the paths as
+// arguments, which is what lets the tests point it at a fixture without
+// mutating package state.
+const (
 	localtimePath    = "/etc/localtime"
 	timezoneFilePath = "/etc/timezone"
 )
 
-// TimezoneName reports the timezone to record with the session.
+// timezoneName reports the timezone to record with the session.
 //
 // $TZ wins and is passed through VERBATIM, including an empty value, which
 // POSIX defines as UTC -- rewriting that would misreport the session.
@@ -155,7 +157,7 @@ var (
 // placed in one is materially harder to use as evidence. The derivation order
 // is the one every distribution agrees on before it disagrees: the /etc/localtime
 // symlink target, then Debian's /etc/timezone, then the zone abbreviation.
-func TimezoneName(localtime, timezoneFile string) string {
+func timezoneName(localtime, timezoneFile string) string {
 	if tz, ok := os.LookupEnv("TZ"); ok {
 		return tz
 	}
