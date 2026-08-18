@@ -37,8 +37,8 @@ func infoOf(msgs []*pb.InfoMessage, key string) *pb.InfoMessage {
 func TestTimezoneNamePassesTZThroughVerbatim(t *testing.T) {
 	for _, tz := range []string{"Europe/Berlin", "UTC", "EST5EDT", ""} {
 		t.Setenv("TZ", tz)
-		if got := TimezoneName("/nonexistent", "/nonexistent"); got != tz {
-			t.Errorf("TimezoneName() = %q, want %q passed through unchanged", got, tz)
+		if got := timezoneName("/nonexistent", "/nonexistent"); got != tz {
+			t.Errorf("timezoneName() = %q, want %q passed through unchanged", got, tz)
 		}
 	}
 }
@@ -52,8 +52,8 @@ func TestTimezoneNameDerivesFromLocaltimeSymlink(t *testing.T) {
 	if err := os.Symlink("/usr/share/zoneinfo/Asia/Tokyo", link); err != nil {
 		t.Fatal(err)
 	}
-	if got := TimezoneName(link, "/nonexistent"); got != "Asia/Tokyo" {
-		t.Errorf("TimezoneName() = %q, want Asia/Tokyo derived from the symlink", got)
+	if got := timezoneName(link, "/nonexistent"); got != "Asia/Tokyo" {
+		t.Errorf("timezoneName() = %q, want Asia/Tokyo derived from the symlink", got)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestTimezoneNameIgnoresALocaltimeThatIsNotAZoneinfoPath(t *testing.T) {
 	if err := os.WriteFile(tzfile, []byte("Australia/Perth\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := TimezoneName(link, tzfile); got != "Australia/Perth" {
-		t.Errorf("TimezoneName() = %q, want the /etc/timezone value", got)
+	if got := timezoneName(link, tzfile); got != "Australia/Perth" {
+		t.Errorf("timezoneName() = %q, want the /etc/timezone value", got)
 	}
 }
 
@@ -82,8 +82,8 @@ func TestTimezoneNameIgnoresALocaltimeThatIsNotAZoneinfoPath(t *testing.T) {
 // not say".
 func TestTimezoneNameNeverReturnsEmpty(t *testing.T) {
 	unsetTZ(t)
-	if got := TimezoneName("/nonexistent", "/nonexistent"); got == "" {
-		t.Error("TimezoneName() = \"\" with no source available; want a fallback")
+	if got := timezoneName("/nonexistent", "/nonexistent"); got == "" {
+		t.Error("timezoneName() = \"\" with no source available; want a fallback")
 	}
 }
 
@@ -131,6 +131,31 @@ func TestInfoMessagesCarrySourceAndRunenv(t *testing.T) {
 	}
 	if len(list.Strings) != 1 || list.Strings[0] != "TZ=Asia/Tokyo" {
 		t.Errorf("runenv = %v, want [TZ=Asia/Tokyo]", list.Strings)
+	}
+}
+
+// TestInfoMessagesAlwaysSendAnEmptySubmitenv pins the rule that is the opposite
+// of the one below: source and runenv are omitted when unknown, submitenv is
+// always present and always empty. It is a positive statement that no submit
+// environment was recorded, so a consumer walking C's log.json field set finds
+// it rather than having to guess whether an absent key means "empty" or "this
+// recorder does not send it".
+func TestInfoMessagesAlwaysSendAnEmptySubmitenv(t *testing.T) {
+	for _, meta := range []SessionMeta{
+		{},
+		{Source: "/usr/sbin/logsh", RunEnv: []string{"TZ=UTC"}},
+	} {
+		env := infoOf(meta.InfoMessages(), "submitenv")
+		if env == nil {
+			t.Fatalf("no submitenv info key for %+v", meta)
+		}
+		list := env.GetStrlistval()
+		if list == nil {
+			t.Fatalf("submitenv is %T, want a string list", env.Value)
+		}
+		if len(list.Strings) != 0 {
+			t.Errorf("submitenv = %v, want empty", list.Strings)
+		}
 	}
 }
 

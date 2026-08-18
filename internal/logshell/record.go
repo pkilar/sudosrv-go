@@ -133,18 +133,20 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 	if exe, err := os.Executable(); err == nil {
 		meta.Source = exe
 	}
-	meta.RunEnv = []string{"TZ=" + TimezoneName(localtimePath, timezoneFilePath)}
+	meta.RunEnv = []string{"TZ=" + timezoneName(localtimePath, timezoneFilePath)}
 	return meta
 }
 
-// Paths consulted to resolve the system timezone when $TZ is unset. Variables
-// rather than constants so the tests can point them at a fixture.
-var (
+// Paths consulted to resolve the system timezone when $TZ is unset. They are
+// constants because nothing reassigns them: timezoneName takes the paths as
+// arguments, which is what lets the tests point it at a fixture without
+// mutating package state.
+const (
 	localtimePath    = "/etc/localtime"
 	timezoneFilePath = "/etc/timezone"
 )
 
-// TimezoneName reports the timezone to record with the session.
+// timezoneName reports the timezone to record with the session.
 //
 // $TZ wins and is passed through VERBATIM, including an empty value, which
 // POSIX defines as UTC -- rewriting that would misreport the session.
@@ -155,7 +157,7 @@ var (
 // placed in one is materially harder to use as evidence. The derivation order
 // is the one every distribution agrees on before it disagrees: the /etc/localtime
 // symlink target, then Debian's /etc/timezone, then the zone abbreviation.
-func TimezoneName(localtime, timezoneFile string) string {
+func timezoneName(localtime, timezoneFile string) string {
 	if tz, ok := os.LookupEnv("TZ"); ok {
 		return tz
 	}
@@ -262,6 +264,22 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.RunEnv},
 		}})
 	}
+
+	// submitenv is sent ALWAYS, and always empty. That is the opposite rule to
+	// the two above, deliberately: they are omitted when unknown, whereas this
+	// is a positive statement that no submit environment was recorded. C writes
+	// all three arrays into log.json (IOLOG-023), so a consumer walking that
+	// field set finds submitenv present and empty rather than having to guess
+	// whether an absent key means "empty" or "this recorder does not send it".
+	//
+	// logsh has no separate submit environment to record in any case: it is the
+	// login shell, so the environment it is exec'd with IS the session's. Under
+	// sudo the submitter's environment belonged to a process that has already
+	// been replaced, and sudo's own env_reset means what survives is not that
+	// environment anyway.
+	msgs = append(msgs, &pb.InfoMessage{Key: "submitenv", Value: &pb.InfoMessage_Strlistval{
+		Strlistval: &pb.InfoMessage_StringList{Strings: []string{}},
+	}})
 	return msgs
 }
 

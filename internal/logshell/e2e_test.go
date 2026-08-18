@@ -262,6 +262,15 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 				"timestamp in the replay renders in the replayer's timezone", env)
 		}
 	}
+	// submitenv must be an EMPTY ARRAY, not null and not absent. A nil slice
+	// anywhere on the path renders as null, which claims the value is unknown
+	// rather than deliberately empty; the type assertion below fails for null
+	// and for a missing key alike, which is exactly the distinction wanted.
+	if sub, ok := meta["submitenv"].([]any); !ok {
+		t.Errorf("log.json submitenv = %#v, want an empty JSON array", meta["submitenv"])
+	} else if len(sub) != 0 {
+		t.Errorf("log.json submitenv = %v, want it empty", sub)
+	}
 	if got, _ := meta["exit_value"].(float64); int(got) != 9 {
 		t.Errorf("log.json exit_value = %v, want 9", meta["exit_value"])
 	}
