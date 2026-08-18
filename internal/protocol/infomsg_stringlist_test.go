@@ -52,6 +52,32 @@ func TestEmptyStringListSurvivesAsAnEmptyArray(t *testing.T) {
 	}
 }
 
+// TestStringListDoesNotAliasTheMessage pins the ownership half of the contract.
+//
+// The results outlive the message: storage.Session holds them in logMeta for
+// the whole session and re-marshals them on every log.json update. If the
+// returned slice aliased the protobuf message, a caller that reused or mutated
+// that message would silently rewrite a session's recorded metadata -- a class
+// of bug that shows up as a corrupted audit record and nothing else.
+func TestStringListDoesNotAliasTheMessage(t *testing.T) {
+	msg := &pb.InfoMessage_StringList{Strings: []string{"bash", "-c", "id"}}
+
+	got := StringList(msg)
+	got[0] = "rewritten by the caller"
+	if msg.Strings[0] != "bash" {
+		t.Errorf("mutating the result changed the message: Strings[0] = %q, want bash",
+			msg.Strings[0])
+	}
+
+	// And the other direction: what a caller stored must not move underneath it.
+	kept := StringList(msg)
+	msg.Strings[0] = "rewritten by the message owner"
+	if kept[0] != "bash" {
+		t.Errorf("mutating the message changed a previously returned list: got %q, want bash",
+			kept[0])
+	}
+}
+
 // TestPopulatedStringListIsUnchanged keeps the coercion from touching real data.
 func TestPopulatedStringListIsUnchanged(t *testing.T) {
 	m := InfoMsgsToMap([]*pb.InfoMessage{{
