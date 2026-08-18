@@ -327,34 +327,45 @@ enable an account until it passes.
 
 ### Verified
 
-Recipes that parse prove almost nothing, so each format was built and then
+Recipes that parse prove almost nothing, so each format is built and then
 **installed and upgraded in a clean container**:
 
 | Format | Image | Tiers run |
 |---|---|---|
-| RPM | `fedora:43` | build, rpmlint, install, upgrade 0.1.0 → 0.1.1, remove |
-| deb | `debian:trixie` | build, lintian, install, upgrade 0.1.0 → 0.1.1, remove |
+| RPM | `fedora:43` | build (build-deps satisfiable, no `--nodeps`), rpmlint, install, upgrade 0.1.0 → 0.1.1, remove |
+| deb | `debian:trixie` | build **from a clean `git archive` export**, lintian, install, upgrade, remove |
 | Arch | `archlinux:latest` | build **with `check()`**, namcap, install, upgrade, remove |
 
-The upgrade tier is the one that matters, and each run asserts the three things
-that would hurt a real deployment: a site edit to `/etc/logsh/logsh.yaml`
-survives, an account that was switched to logsh **stays** switched, and removal
-puts every switched account back on a real shell.
+Each run asserts the things that would hurt a real deployment: the service
+account exists, `/var/log/sudosrv` and `/var/spool/sudosrv-cache` are
+`sudosrv:sudosrv` mode 0700, the shipped config is the packaged one rather than
+a maintainer's, both man pages are present, a site edit to
+`/etc/logsh/logsh.yaml` survives the upgrade, an account switched to logsh
+**stays** switched across it, and removal puts every switched account back on a
+real shell.
+
+The Debian build runs from `git archive HEAD` specifically, because the defect
+it replaces — installing an untracked `config.yaml` — was invisible to any test
+that built from a working tree.
 
 Not covered: a live systemd, non-x86_64 architectures, and SELinux enforcing.
 
 ### Known linter findings, and why they stand
 
 - **`statically-linked-binary`** (rpmlint, lintian) and **`lacks PIE` / `lacks
-  FULL RELRO`** (namcap) — deliberate. logsh is an account's login shell, so a
-  dynamic linker that cannot resolve it prevents login entirely rather than
-  degrading it. `debian/logsh.lintian-overrides` records this next to the
-  suppression; the RPM and Arch findings are left visible.
-- **`Dependency included, but may not be needed`** (namcap, for coreutils, gawk,
-  grep, bash) — wrong. namcap infers dependencies from ELF linkage and cannot
-  see inside a shell script; `logsh-install.sh` uses all four, and it drives
-  every install and removal step.
-- **`no-manual-page`** — a real gap, deliberately **not** suppressed.
+  FULL RELRO`** (namcap) — deliberate. Both binaries are built CGO-free; for
+  logsh in particular that is load-bearing, since it is an account's login
+  shell and a dynamic linker that cannot resolve it prevents login entirely
+  rather than degrading it. `packaging/debian/logsh.lintian-overrides` and
+  `sudosrv.lintian-overrides` record the reasoning next to the suppression; the
+  RPM and Arch findings are left visible.
+- **`Dependency included, but may not be needed`** (namcap, for coreutils,
+  gawk, grep, bash) — wrong. namcap infers dependencies from ELF linkage and
+  cannot see inside a shell script; `logsh-install.sh` uses all four, and it
+  drives every install and removal step.
+- **`initial-upload-closes-no-bugs`** (lintian) and rpmlint's spelling
+  complaints about "sudoreplay", "lbash" and friends — artefacts of targeting
+  a distribution archive, which these packages do not.
 
 ### What the packages deliberately do not own
 
