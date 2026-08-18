@@ -21,11 +21,24 @@ import (
 // magnitude while leaving a slow CI machine plenty of room.
 const minBurstMsgsPerSec = 1000.0
 
+// minBurstMessages is the point below which the throughput figure stops meaning
+// anything, because a session that short is dominated by connect and handshake
+// rather than by delivery.
+//
+// How many messages a given volume of output turns into is NOT a property of
+// this code: it depends on how the kernel coalesces the shell's writes before
+// our read drains them, which varies with machine speed and load. The same
+// command measured 3426 messages on a developer laptop and 418 on a CI runner,
+// an eight-fold spread. That is why the burst below is sized so that even
+// heavy coalescing clears this bar by an order of magnitude, rather than the
+// bar being tuned to whatever one machine happened to produce.
+const minBurstMessages = 300
+
 // TestBurstOfOutputIsNotThrottled guards the defect that made recordings lie.
 //
-// `seq 1 20000` is 130KB and is over in a fraction of a second, but it reaches
-// the server as ~1700 separate ttyout buffers. Throttled to 100/sec that took
-// 17 seconds, and the cost was not merely slowness:
+// `seq 1 200000` is ~1.3MB and is over in about a second, but it reaches the
+// server as thousands of separate ttyout buffers. Throttled to 100/sec that
+// took minutes, and the cost was not merely slowness:
 //
 //   - logsh writes the user's terminal BEFORE recording, so the session still
 //     looked instant to the person being recorded while delivery fell behind.
@@ -52,7 +65,7 @@ func TestBurstOfOutputIsNotThrottled(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lbash", LoginShell: true,
-		Args: []string{"-c", "seq 1 20000"}}
+		Args: []string{"-c", "seq 1 200000"}}
 
 	started := time.Now()
 	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
@@ -78,9 +91,10 @@ func TestBurstOfOutputIsNotThrottled(t *testing.T) {
 	// If the burst ever stops arriving as many small buffers this test still
 	// passes, but it would no longer be testing throttling -- so say so rather
 	// than reporting a silent success.
-	if messages < 500 {
-		t.Fatalf("the burst produced only %d messages; this no longer exercises "+
-			"per-message throttling and the floor below proves nothing", messages)
+	if messages < minBurstMessages {
+		t.Fatalf("the burst produced only %d messages, below the %d needed for the "+
+			"throughput figure to mean anything; this no longer exercises per-message "+
+			"throttling and the floor below would prove nothing", messages, minBurstMessages)
 	}
 
 	rate := float64(messages) / elapsed.Seconds()
