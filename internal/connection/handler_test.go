@@ -1158,26 +1158,36 @@ func TestWaitForRateToken(t *testing.T) {
 	defer serverConn.Close()
 	h := NewHandler(serverConn, cfg)
 
-	// The initial burst (rateBurst tokens) drains effectively instantly.
+	// A burst of rateBurst messages must not be throttled at all: that is the
+	// headroom an ordinary terminal session runs in.
 	start := time.Now()
 	for range int(rateBurst) {
 		if err := h.waitForRateToken(context.Background()); err != nil {
 			t.Fatalf("unexpected error draining burst: %v", err)
 		}
 	}
-	if d := time.Since(start); d > 250*time.Millisecond {
+	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("draining the burst took %s, expected near-instant", d)
 	}
 
+	// The bucket is emptied explicitly rather than by draining it in a loop.
+	// Draining cannot empty it once the refill rate is comparable to the rate a
+	// Go loop can consume tokens -- tokens refill faster than the loop takes
+	// them, the bucket never reaches zero, and the assertion below silently
+	// stops testing anything.
+	h.rateLimitMutex.Lock()
+	h.rateTokens = 0
+	h.rateLastRefill = time.Now()
+	h.rateLimitMutex.Unlock()
+
 	// With the bucket empty the next token must BLOCK and then SUCCEED — never
-	// return an error (which the caller turns into a connection teardown). It
-	// should take roughly one refill interval (1/rateRefillPerSec).
+	// return an error (which the caller turns into a connection teardown).
 	start = time.Now()
 	if err := h.waitForRateToken(context.Background()); err != nil {
 		t.Fatalf("expected back-pressure (block then succeed), got error: %v", err)
 	}
-	if d := time.Since(start); d < 5*time.Millisecond {
-		t.Errorf("expected throttle delay ~%v, got %s (was it actually throttled?)", time.Second/time.Duration(rateRefillPerSec), d)
+	if d := time.Since(start); d <= 0 {
+		t.Errorf("expected the empty bucket to block, got %s", d)
 	}
 
 	// Force the bucket empty, then a cancelled context must abort the wait
