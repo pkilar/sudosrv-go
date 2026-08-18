@@ -51,7 +51,7 @@ make test
 
 ### Running the Server
 
-1. Copy `config-example.yaml` to `config.yaml` and edit to suit your environment.
+1. Copy `examples/config.yaml` to `config.yaml` and edit to suit your environment.
 2. Run:
 
 ```bash

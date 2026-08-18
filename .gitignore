@@ -9,7 +9,7 @@
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
 # A template or example file (e.g., config.example.yaml) should be committed instead.
-config.yaml
+/config.yaml
 *.key
 *.crt
 *.pem
