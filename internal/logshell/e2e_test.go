@@ -238,9 +238,28 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	for _, key := range []string{"submituser", "runuser", "command", "ttyname"} {
+	for _, key := range []string{"submituser", "runuser", "command", "ttyname", "source"} {
 		if v, ok := meta[key]; !ok || v == "" {
 			t.Errorf("log.json is missing %s; the audit record cannot say who ran what", key)
+		}
+	}
+	// runenv is checked separately because it is an ARRAY. The loop above tests
+	// `v == ""`, which any non-string satisfies, so a missing or malformed
+	// runenv would sail through it -- and a check that cannot fail is worse than
+	// no check at all.
+	env, ok := meta["runenv"].([]any)
+	if !ok {
+		t.Errorf("log.json runenv = %#v, want a JSON array", meta["runenv"])
+	} else {
+		var sawTZ bool
+		for _, e := range env {
+			if v, _ := e.(string); strings.HasPrefix(v, "TZ=") {
+				sawTZ = true
+			}
+		}
+		if !sawTZ {
+			t.Errorf("log.json runenv = %v, want a TZ entry; without it every "+
+				"timestamp in the replay renders in the replayer's timezone", env)
 		}
 	}
 	if got, _ := meta["exit_value"].(float64); int(got) != 9 {
