@@ -64,14 +64,25 @@ recording which formats install it fails the suite.
 |---|---|---|---|
 | logsh binary | `/usr/sbin` | `/usr/sbin` | **`/usr/bin`** — usr-merged, `/usr/sbin` is owned by `filesystem` |
 | logsh helper dir | `/usr/libexec/logsh` | `/usr/libexec/logsh` | `/usr/lib/logsh` |
-| Service account | `%pre` + `useradd` | `sysusers.d` | `sysusers.d` |
-| State directories | `%attr` in `%files` | `tmpfiles.d` | `tmpfiles.d` |
+| Service account | `sysusers.d` via `%sysusers_create_compat` | `sysusers.d` via `dh_installsysusers` | `sysusers.d` via a pacman hook |
+| State directories | `%attr` in `%files`, plus `tmpfiles.d` | `tmpfiles.d` | `tmpfiles.d` |
 | `/bin/kill` for `ExecReload` | `util-linux` | `procps` | `procps-ng` |
 
-The RPM creates its account with `useradd` rather than `sysusers.d` because the
-sysusers macro is not available on every RPM distribution this targets. Both
-produce the same account, and the `-` shell field in the shared sysusers file
-lets systemd substitute each distribution's own nologin path.
+All three create the account from the same `sysusers.d` file; the `-` shell
+field lets systemd substitute each distribution's own nologin path, which is at
+`/usr/sbin/nologin` on Debian and `/usr/bin/nologin` on Arch. The RPM must ship
+that file for a second reason: rpm generates `Requires: user(sudosrv)` from the
+`%attr` entries in `%files`, and without a `sysusers.d` file nothing provides
+it, so dnf refuses the transaction outright. The hand-written `groupadd`/
+`useradd` this replaces created the same account but generated no such Provides.
+
+Each format needs its own opt-in to get there, and none of them is the default:
+the RPM needs `%{?sysusers_requires_compat}` and `%sysusers_create_compat`
+(`%tmpfiles_create_compat` does not exist -- `%tmpfiles_create` is the macro),
+Debian needs `dh $@ --with installsysusers` because `dh_installsysusers` only
+joins the default sequence at compat 14, and its input file must exist before
+`dpkg-buildpackage` starts, since `dh` decides which commands to skip before
+`debian/rules` ever runs.
 
 ## Verification
 
