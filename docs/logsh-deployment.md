@@ -45,6 +45,35 @@ recording is up when it happens, and relay mode makes after-the-fact log
 tampering hard, but this is an accountability control, not containment — the same
 property sudo has.
 
+### What the session record carries
+
+Alongside the identity, tty and command fields sudo also sends, each session's
+`log.json` gets:
+
+| Key | Value |
+|---|---|
+| `source` | Path to the logsh binary that recorded the session. A host can hold sessions written by both sudo and logsh; this is what tells them apart. It is the resolved binary, not the `lbash` symlink — that name is a property of the account. |
+| `runenv` | `TZ=<zone>` only. |
+| `logsh_session` | logsh's own session UUID, which the command log stamps on every line. |
+| `logsh_nested`, `logsh_parent_session` | The enclosing recorder, if any. |
+
+**`runenv` is deliberately not the whole environment.** sudo can be configured
+to log it, and doing so here would be a privacy regression rather than a
+feature: an interactive login environment routinely carries API tokens, agent
+sockets and proxy credentials, and the transcript is written to a log store with
+a wider audience than the session had. TZ is there because without it every
+timestamp in a replay renders in whatever timezone the person replaying it
+happens to be in, which is a real problem when reconstructing an incident across
+sites.
+
+`TZ` is passed through verbatim when the session has it set, including the empty
+value POSIX defines as UTC. When it is unset the value is *derived* — the
+`/etc/localtime` symlink target, then `/etc/timezone`, then the zone
+abbreviation — so the entry is not strictly a copy of the environment. That is
+intentional: the session still ran in a definite timezone, and a transcript
+whose timestamps cannot be placed in one is materially harder to use as
+evidence.
+
 ---
 
 ## Topology

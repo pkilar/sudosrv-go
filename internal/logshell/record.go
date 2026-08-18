@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	pb "sudosrv/pkg/sudosrv_proto"
 	"sync"
 	"time"
@@ -65,6 +66,24 @@ type SessionMeta struct {
 	Command string
 	Argv    []string
 
+	// Source is the path to the logsh binary that recorded this session, and
+	// answers "what produced this record?" A host can have sessions written by
+	// sudo and by logsh in the same log store, and until now nothing in a logsh
+	// record said which. It is the resolved binary, not the multi-call symlink
+	// the user invoked -- the symlink name is a property of the account, while
+	// this identifies the recorder.
+	Source string
+
+	// RunEnv is the environment recorded with the session, as KEY=VALUE.
+	//
+	// Deliberately NOT the whole environment. sudo can be configured to log it,
+	// but an interactive login environment routinely carries API tokens, agent
+	// sockets and proxy credentials, and this transcript is written to a log
+	// store with a wider audience than the session had. What a replay actually
+	// needs is TZ, without which every timestamp in the recording renders in
+	// whatever timezone the person replaying it happens to be in.
+	RunEnv []string
+
 	// SessionID is logsh's own per-session UUID, minted locally rather than
 	// taken from the server's log id -- that id does not exist for a journalled
 	// session and does not exist at all when recording is off. It is sent as an
@@ -108,7 +127,59 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 	if cwd, err := os.Getwd(); err == nil {
 		meta.Cwd = cwd
 	}
+	// os.Executable resolves /proc/self/exe on Linux, so an invocation through
+	// the lbash symlink still reports the real binary. An error here is not
+	// worth failing a login over; the key is simply omitted.
+	if exe, err := os.Executable(); err == nil {
+		meta.Source = exe
+	}
+	meta.RunEnv = []string{"TZ=" + TimezoneName(localtimePath, timezoneFilePath)}
 	return meta
+}
+
+// Paths consulted to resolve the system timezone when $TZ is unset. Variables
+// rather than constants so the tests can point them at a fixture.
+var (
+	localtimePath    = "/etc/localtime"
+	timezoneFilePath = "/etc/timezone"
+)
+
+// TimezoneName reports the timezone to record with the session.
+//
+// $TZ wins and is passed through VERBATIM, including an empty value, which
+// POSIX defines as UTC -- rewriting that would misreport the session.
+//
+// When $TZ is unset the value is DERIVED rather than omitted. That makes this
+// entry not strictly a copy of the environment, which is the point: the session
+// still ran in a definite timezone, and a transcript whose timestamps cannot be
+// placed in one is materially harder to use as evidence. The derivation order
+// is the one every distribution agrees on before it disagrees: the /etc/localtime
+// symlink target, then Debian's /etc/timezone, then the zone abbreviation.
+func TimezoneName(localtime, timezoneFile string) string {
+	if tz, ok := os.LookupEnv("TZ"); ok {
+		return tz
+	}
+	if target, err := os.Readlink(localtime); err == nil {
+		// .../zoneinfo/Europe/Berlin -> Europe/Berlin. The zoneinfo component is
+		// what makes this a name rather than a path; without it there is nothing
+		// to extract and the next source is tried.
+		if _, name, found := strings.Cut(target, "zoneinfo/"); found && name != "" {
+			return name
+		}
+	}
+	if b, err := os.ReadFile(timezoneFile); err == nil {
+		if name := strings.TrimSpace(string(b)); name != "" {
+			return name
+		}
+	}
+	// Last resort. An abbreviation like "CEST" is not a tzdata identifier and
+	// cannot be looked up, but it is not nothing, and reaching here means the
+	// host has no machine-readable answer to give.
+	name, _ := time.Now().Zone()
+	if name == "" {
+		return "UTC"
+	}
+	return name
 }
 
 // ApplyNesting records an enclosing recorder and, under sudo, corrects the
@@ -147,7 +218,7 @@ func numInfo(key string, val int64) *pb.InfoMessage {
 // coerces either scalar form to a string, but matching C keeps a transcript
 // recorded here byte-comparable with one recorded by sudo.
 func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
-	return []*pb.InfoMessage{
+	msgs := []*pb.InfoMessage{
 		strInfo("submituser", m.SubmitUser),
 		numInfo("submituid", int64(m.SubmitUID)),
 		strInfo("submitgroup", m.SubmitGroup),
@@ -176,6 +247,22 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.Argv},
 		}},
 	}
+
+	// Both are appended rather than listed above because an absent value must be
+	// OMITTED, not sent empty: the server copies every key it receives straight
+	// into log.json, so an empty string would write `"source": ""` and assert
+	// that the recorder is unknown rather than that it was not determined. C
+	// omits optional scalars whose struct member is NULL for the same reason
+	// (IOLOG-023).
+	if m.Source != "" {
+		msgs = append(msgs, strInfo("source", m.Source))
+	}
+	if len(m.RunEnv) > 0 {
+		msgs = append(msgs, &pb.InfoMessage{Key: "runenv", Value: &pb.InfoMessage_Strlistval{
+			Strlistval: &pb.InfoMessage_StringList{Strings: m.RunEnv},
+		}})
+	}
+	return msgs
 }
 
 // Recorder streams one session to the log server.
