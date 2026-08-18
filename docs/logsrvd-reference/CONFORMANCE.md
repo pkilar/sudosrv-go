@@ -151,7 +151,7 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-001` | Configuration file is INI-style with six recognized sections | INTENTIONAL | low | `internal/config/config.go:34-112,179-189; README.md:20` | An existing /etc/sudo_logsrvd.conf must be hand-translated; nothing a client can observe. |
 | `CONF-002` | Key/value lines require `=`, and a section must be open | MATCH | none | `internal/config/config.go` | — |
 | `CONF-003` | Whitespace around the key and value is stripped | INTENTIONAL | informational | `internal/config/config.go:179-189 (yaml.v3 scanner)` | None. |
-| `CONF-004` | `#` anywhere begins a comment; `;` only at start of line | INTENTIONAL | informational | `internal/config/config.go:179-189; config-example.yaml (use…` | None beyond a loud parse error if INI comment syntax is pasted in. |
+| `CONF-004` | `#` anywhere begins a comment; `;` only at start of line | INTENTIONAL | informational | `internal/config/config.go:179-189; examples/config.yaml (use…` | None beyond a loud parse error if INI comment syntax is pasted in. |
 | `CONF-005` | Backslash line continuation | INTENTIONAL | informational | `internal/config/config.go:179-189 (yaml.v3 scanner)` | A continued INI line must be rewritten during migration. Nothing observable at runtime. |
 | `CONF-006` | Boolean value grammar | PARTIAL | low | `internal/config/config.go:63-64,110-111 (bool fields); yaml…` | Migration friction only; a rejected value aborts the load loudly rather than being silently misread. |
 | `CONF-007` | Integer value grammar and range checking | PARTIAL | low | `internal/config/config.go:50-57,66-81,219-239; yaml.v3 deco…` | Operator-visible only: a nonsense max_connections silently becomes unlimited instead of being rejected. No client-facing effect. |

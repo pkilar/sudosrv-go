@@ -340,7 +340,7 @@
    "id": "CONF-004",
    "status": "INTENTIONAL",
    "severity": "informational",
-   "go_source": "internal/config/config.go:179-189; config-example.yaml (use…",
+   "go_source": "internal/config/config.go:179-189; examples/config.yaml (use…",
    "notes": "None beyond a loud parse error if INI comment syntax is pasted in."
   },
   {
