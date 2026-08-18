@@ -1,0 +1,115 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+# Go build flags
+export GOOS = linux
+export CGO_ENABLED = 0
+# The module needs Go 1.26.3 and trixie ships 1.24; see the Build-Depends
+# comment in debian/control. Needs network at build time.
+export GOTOOLCHAIN = auto
+
+# --with installsysusers, because dh_installsysusers is only in the default
+# sequence from compat 14 (debhelper's root_sequence.pm gates it on
+# $include_if_compat_X_or_newer->(14, ...)). Without the opt-in the sysusers
+# file is silently not installed and no service account is created -- which is
+# precisely the bug this package shipped, so it is asserted by the container
+# ladder rather than trusted.
+%:
+	dh $@ --with installsysusers
+
+override_dh_auto_configure:
+	# Use the Makefile's proto target rather than invoking protoc directly.
+	# protoc needs protoc-gen-go on PATH, and Debian's protobuf-compiler does not
+	# ship it, so the direct call failed with "protoc-gen-go: program not found"
+	# and the package could not be built at all. The Makefile resolves the plugin
+	# through `go tool`, pinned by the tool directive in go.mod, so the generator
+	# always matches the protobuf runtime this module compiles against.
+	$(MAKE) proto
+
+override_dh_auto_build:
+	# Build the application
+	go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+	# logsh is always CGO-free (set globally above): it is a login shell, so a
+	# dynamic linker that cannot resolve it prevents login rather than degrading
+	# it. See LOGSH_ENV in the Makefile.
+	go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
+
+override_dh_auto_install:
+	# Install binary
+	install -D -m 0755 sudosrv $(CURDIR)/debian/sudosrv/usr/bin/sudosrv
+	
+	# Install configuration.
+	#
+	# This used to install ./config.yaml, which is gitignored and untracked: the
+	# build failed outright from a clean checkout, and succeeded on a maintainer
+	# machine by shipping THAT MACHINE'S local config -- debug log level and all
+	# -- to every user, as a conffile they then had to fight on upgrade. The
+	# packaged default is a tracked file shared with the other two formats.
+	install -D -m 0644 packaging/config/sudosrv.yaml \
+		$(CURDIR)/debian/sudosrv/etc/sudosrv/config.yaml
+
+	# Install systemd service (the one shared copy, not the RPM's tree)
+	# /usr/lib, not /lib: Debian is merged-usr, so /lib is a symlink and lintian
+	# rejects shipping a path through it (aliased-location).
+	install -D -m 0644 packaging/systemd/sudosrv.service \
+		$(CURDIR)/debian/sudosrv/usr/lib/systemd/system/sudosrv.service
+
+	# Logrotate. Debian shipped none at all, so /var/log/sudosrv grew forever
+	# on Debian and Ubuntu only.
+	install -D -m 0644 packaging/logrotate/sudosrv.logrotate \
+		$(CURDIR)/debian/sudosrv/etc/logrotate.d/sudosrv
+
+	# The log and spool directories are NOT created here any more. They were
+	# made root-owned 0755, while the unit runs as User=sudosrv -- so even once
+	# the account existed the daemon could not write to either. They now come
+	# from tmpfiles.d, 0700 sudosrv:sudosrv, matching the RPM's %attr and Arch.
+
+	# --- logsh -------------------------------------------------------------
+	install -D -m 0755 logsh $(CURDIR)/debian/logsh/usr/sbin/logsh
+	# The install script the maintainer scripts drive. Not in PATH: it is
+	# packaging machinery, and an operator reaches it through the documented
+	# path in the runbook.
+	install -D -m 0755 packaging/logsh/logsh-install.sh \
+		$(CURDIR)/debian/logsh/usr/libexec/logsh/logsh-install.sh
+	# 0644, not 0600: logsh runs as the logging-in user and must be able to read
+	# this. Root-owned and not group- or world-writable is what matters.
+	install -D -m 0644 examples/logsh.yaml \
+		$(CURDIR)/debian/logsh/etc/logsh/logsh.yaml
+	install -D -m 0644 docs/logsh-deployment.md \
+		$(CURDIR)/debian/logsh/usr/share/doc/logsh/logsh-deployment.md
+
+	# The symlinks and the /etc/shells entries are deliberately NOT shipped as
+	# package files. /etc/shells is a shared file no package owns, so it has to
+	# be edited by script either way, and splitting ownership -- dpkg for the
+	# symlinks, a script for the registration -- means removal has two masters.
+	# logsh-install.sh owns both, and its uninstall path is tested.
+
+# debian/sudosrv.sysusers and debian/sudosrv.tmpfiles are NOT generated here.
+#
+# dh decides which commands its sequence will run BEFORE debian/rules executes,
+# and skips any whose input files do not exist at that moment. A hook target
+# that creates debian/sudosrv.sysusers therefore runs after dh_installsysusers
+# has already been skipped -- which is exactly what happened: the tmpfiles file
+# landed, the sysusers file did not, and the service account was missing again.
+# build-deb.sh copies both shared files into the staged debian/ directory before
+# dpkg-buildpackage is invoked, so they exist when dh plans.
+#
+# For the same reason they must NOT be removed in the clean target: dpkg-
+# buildpackage runs `debian/rules clean` first, so deleting them there would
+# put the sysusers file back out of scope before the binary target plans.
+
+override_dh_auto_test:
+	# Run tests
+	# 30s could not even finish internal/relay, so this target failed and the
+	# package could not be built at all. Build hosts are slower than laptops;
+	# skip tests entirely with DEB_BUILD_OPTIONS=nocheck where ptrace or a pty
+	# is unavailable (see the logshell suite).
+	go test -timeout 600s ./...
+
+override_dh_auto_clean:
+	# Clean build artifacts
+	rm -f sudosrv logsh
+	dh_auto_clean

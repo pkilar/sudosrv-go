@@ -1,0 +1,88 @@
+.TH LOGSH 8 "2026-08-17" "logsh" "System Manager's Manual"
+.SH NAME
+logsh \- recording login shell for sudo I/O log servers
+.SH SYNOPSIS
+.BR lbash ", " lzsh ", " lsh ", " ldash
+.RI [ shell-arguments ]
+.PP
+.B logsh
+.RB [ \-validate ]
+.RB [ \-selftest ]
+.RB [ \-config
+.IR path ]
+.RB [ \-version ]
+.SH DESCRIPTION
+.B logsh
+is a multi-call login shell that records a terminal session to a
+.BR sudosrv (8)
+log server, in the same sudoreplay-compatible format
+.BR sudo (8)
+produces. It is set as an account's shell in
+.BR passwd (5),
+and execs the real shell after putting a recording pseudo-terminal in front of
+it, so SSH logins, console logins,
+.B su -
+and
+.B sudo -i
+are all captured.
+.PP
+Which shell it runs is selected by the name it is invoked under, busybox style:
+.B lbash
+runs
+.IR /bin/bash ,
+.B lzsh
+runs
+.IR /bin/zsh ,
+and so on. The mapping is an allowlist in the configuration file, not a naming
+rule \(em a symlink whose name is not in the map is refused rather than
+resolved by stripping the leading letter.
+.PP
+An account that is not listed in
+.I record_users
+gets its real shell with no recording and no log entry, which is what makes it
+safe to install logsh fleet-wide before deciding whose sessions to record.
+Installing the package switches no account; see
+.I /usr/share/doc/logsh/logsh-deployment.md
+for the rollout and for the break-glass drill that must be rehearsed first.
+.SH OPTIONS
+These are accepted only when the binary is invoked under its own name.
+.TP
+.B \-validate
+Parse and validate the configuration and exit. Reports unsafe permissions,
+unresolvable shells, and settings that would leave a session unrecorded.
+.TP
+.B \-selftest
+Check that this host can actually run logsh: the configuration loads, the
+mapped shells resolve, and a pseudo-terminal can be allocated. Run by the
+package maintainer scripts after installation.
+.TP
+.BI \-config " path"
+Configuration file to read. Default:
+.IR /etc/logsh/logsh.yaml .
+.TP
+.B \-version
+Print the version and exit.
+.SH FILES
+.TP
+.I /etc/logsh/logsh.yaml
+Configuration file. Must be root-owned and not group- or world-writable.
+Mode 0644, not 0600: logsh runs as the logging-in user and must be able to read
+it.
+.TP
+.I /etc/logsh/bypass
+Break-glass marker. While this root-owned file exists, sessions proceed
+unrecorded with a critical-priority syslog alert and a banner on the terminal.
+Ignored, and alerted about, if it is not root-owned or is writable by anyone
+else.
+.SH NOTES
+.B log_ttyin: false
+does not mean keystrokes are not recorded. Terminal echo puts nearly every
+keystroke into the ttyout stream regardless; the setting protects only the
+moments when echo is off, which is to say password prompts. Any notice shown to
+users must say so.
+.SH SEE ALSO
+.BR sudosrv (8),
+.BR sudo (8),
+.BR sudoreplay (8),
+.BR passwd (5),
+.BR shells (5)

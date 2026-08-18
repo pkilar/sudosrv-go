@@ -3,15 +3,23 @@
 # usually does not, so they install independently.
 pkgbase=sudosrv
 pkgname=('sudosrv' 'logsh')
-pkgver=0.1.0
+# Rewritten by build-arch.sh from the top-level VERSION file, in the staged
+# copy only. The committed placeholder is deliberately not a plausible
+# release number, so a package built by calling makepkg directly here cannot
+# be mistaken for one.
+pkgver=0.0.0
 pkgrel=1
 pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
 arch=('x86_64' 'aarch64')
 url='https://github.com/pkilar/sudosrv'
 license=('Apache-2.0')
-depends=('glibc')
+depends=('procps-ng')
 makedepends=('go>=1.26' 'protobuf')
 optdepends=('sudo: sudo client (>= 1.9.0)')
+# !debug: makepkg otherwise emits a sudosrv-debug package, and there is nothing
+# in it -- both binaries are linked with -ldflags="-s -w", so the symbols it
+# would carry do not exist.
+options=('!debug')
 source=("${pkgbase}-${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
@@ -24,6 +32,7 @@ build() {
     # found" and build() aborted. The Makefile resolves the plugin via `go
     # tool`, pinned by the tool directive in go.mod. A build on a developer's
     # own machine hid this, because the plugin was already in their PATH.
+    export GOTOOLCHAIN=auto
     make proto
 
     # Tidy dependencies
@@ -47,7 +56,12 @@ check() {
 
 package_sudosrv() {
     pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
-    depends=('glibc')
+    # procps-ng provides /bin/kill, which the unit's ExecReload runs. It is in
+    # base, but an undeclared dependency is still an undeclared dependency, and
+    # without it `systemctl reload sudosrv` fails.
+    #
+    # No glibc: both binaries are built CGO-free and link nothing dynamically.
+    depends=('procps-ng')
     optdepends=('sudo: sudo client (>= 1.9.0)'
                 'logsh: recording login shell that reports to this server')
     backup=('etc/sudosrv/config.yaml'
@@ -60,19 +74,23 @@ package_sudosrv() {
     install -Dm0755 sudosrv "${pkgdir}/usr/bin/sudosrv"
 
     # Configuration
-    install -Dm0644 archlinux/sudosrv.conf "${pkgdir}/etc/sudosrv/config.yaml"
+    install -Dm0644 packaging/config/sudosrv.yaml "${pkgdir}/etc/sudosrv/config.yaml"
 
     # Systemd service
-    install -Dm0644 archlinux/sudosrv.service "${pkgdir}/usr/lib/systemd/system/sudosrv.service"
+    install -Dm0644 packaging/systemd/sudosrv.service "${pkgdir}/usr/lib/systemd/system/sudosrv.service"
 
     # Systemd sysusers (creates sudosrv user/group)
-    install -Dm0644 archlinux/sudosrv.sysusers "${pkgdir}/usr/lib/sysusers.d/sudosrv.conf"
+    install -Dm0644 packaging/sysusers/sudosrv.conf "${pkgdir}/usr/lib/sysusers.d/sudosrv.conf"
 
     # Systemd tmpfiles (creates log/cache directories)
-    install -Dm0644 archlinux/sudosrv.tmpfiles "${pkgdir}/usr/lib/tmpfiles.d/sudosrv.conf"
+    install -Dm0644 packaging/tmpfiles/sudosrv.conf "${pkgdir}/usr/lib/tmpfiles.d/sudosrv.conf"
 
     # Logrotate
-    install -Dm0644 archlinux/sudosrv.logrotate "${pkgdir}/etc/logrotate.d/sudosrv"
+    install -Dm0644 packaging/logrotate/sudosrv.logrotate "${pkgdir}/etc/logrotate.d/sudosrv"
+
+    # Manual page. The unit has always carried Documentation=man:sudosrv(8);
+    # nothing shipped one until now.
+    install -Dm0644 packaging/man/sudosrv.8 "${pkgdir}/usr/share/man/man8/sudosrv.8"
 }
 
 package_logsh() {
@@ -104,6 +122,8 @@ package_logsh() {
 
     install -Dm0644 docs/logsh-deployment.md \
         "${pkgdir}/usr/share/doc/logsh/logsh-deployment.md"
+
+    install -Dm0644 packaging/man/logsh.8 "${pkgdir}/usr/share/man/man8/logsh.8"
 
     # The symlinks and /etc/shells entries are NOT shipped as package files.
     # /etc/shells is a shared file no package owns, so it must be edited by

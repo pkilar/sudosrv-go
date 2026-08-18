@@ -275,10 +275,10 @@ func TestDisableWorksWithoutTheBinary(t *testing.T) {
 // looking for a transcript).
 
 const (
-	debPostinst = "../../debian/logsh.postinst"
-	debPrerm    = "../../debian/logsh.prerm"
-	rpmSpec     = "../../rpm/SPECS/sudosrv.spec"
-	archInstall = "../../archlinux/logsh.install"
+	debPostinst = "../../packaging/debian/logsh.postinst"
+	debPrerm    = "../../packaging/debian/logsh.prerm"
+	rpmSpec     = "../../packaging/rpm/sudosrv.spec"
+	archInstall = "../../packaging/arch/logsh.install"
 	installVerb = "logsh-install.sh uninstall"
 	enableVerb  = "logsh-install.sh enable"
 )
@@ -400,16 +400,112 @@ func TestNoMaintainerScriptEnablesAnAccount(t *testing.T) {
 	}
 }
 
-// TestPackagedConfigIsTheShippedExample keeps the three packages from drifting
-// apart, and from drifting away from the file the test suite validates.
-func TestPackagedConfigIsTheShippedExample(t *testing.T) {
-	for _, spec := range []struct{ path, want string }{
-		{"../../debian/rules", "examples/logsh.yaml"},
-		{rpmSpec, "examples/logsh.yaml"},
-		{"../../archlinux/PKGBUILD", "examples/logsh.yaml"},
-	} {
-		if !strings.Contains(readPackaging(t, spec.path), spec.want) {
-			t.Errorf("%s does not install %s as the packaged config", spec.path, spec.want)
+// The shared-asset tier: one copy of each file, installed by every format that
+// needs it. Everything below was a real divergence before it was a test.
+//
+// The Debian package used to install ./config.yaml -- untracked and gitignored
+// -- so it failed to build from a clean checkout and, on a maintainer machine,
+// shipped that machine's local config to every user. It shipped no logrotate
+// config at all. It created the sudosrv account nowhere, while installing a
+// unit with User=sudosrv, so the daemon could not start on Debian or Ubuntu.
+// None of those is visible in a diff of the format you happen to be editing,
+// which is why this is a test and not a review checklist.
+var recipeFiles = map[string][]string{
+	// Debian's recipe is several files: debhelper takes manpages from a
+	// per-package .manpages file rather than from rules, and the sysusers and
+	// tmpfiles files must be staged by build-deb.sh before dpkg-buildpackage
+	// runs, because dh skips commands whose inputs do not yet exist when it
+	// plans its sequence.
+	"deb": {
+		"../../packaging/debian/rules",
+		"../../packaging/debian/build-deb.sh",
+		"../../packaging/debian/sudosrv.manpages",
+		"../../packaging/debian/logsh.manpages",
+	},
+	"rpm":  {rpmSpec, "../../packaging/rpm/build-rpm.sh"},
+	"arch": {"../../packaging/arch/PKGBUILD"},
+}
+
+// sharedAssets maps each file in the shared tier to the formats that must
+// install it. Where a format is absent the reason is recorded, because an
+// unexplained absence is exactly what this test exists to catch.
+var sharedAssets = map[string][]string{
+	"packaging/config/sudosrv.yaml":         {"deb", "rpm", "arch"},
+	"packaging/systemd/sudosrv.service":     {"deb", "rpm", "arch"},
+	"packaging/logrotate/sudosrv.logrotate": {"deb", "rpm", "arch"},
+	"packaging/man/sudosrv.8":               {"deb", "rpm", "arch"},
+	"packaging/man/logsh.8":                 {"deb", "rpm", "arch"},
+	"packaging/logsh/logsh-install.sh":      {"deb", "rpm", "arch"},
+	"examples/logsh.yaml":                   {"deb", "rpm", "arch"},
+	"docs/logsh-deployment.md":              {"deb", "rpm", "arch"},
+	// All three, since the RPM stopped hand-rolling groupadd/useradd: without a
+	// shipped sysusers file rpm generates Requires: user(sudosrv) from the
+	// %attr entries and nothing provides it, so the package will not install.
+	"packaging/sysusers/sudosrv.conf": {"deb", "rpm", "arch"},
+	"packaging/tmpfiles/sudosrv.conf": {"deb", "rpm", "arch"},
+}
+
+func TestEveryFormatInstallsTheSharedAssets(t *testing.T) {
+	recipes := map[string]string{}
+	for format, files := range recipeFiles {
+		var joined strings.Builder
+		for _, f := range files {
+			joined.WriteString(readPackaging(t, f))
+		}
+		recipes[format] = joined.String()
+	}
+
+	for asset, formats := range sharedAssets {
+		for _, format := range formats {
+			if !strings.Contains(recipes[format], asset) {
+				t.Errorf("the %s recipe does not install %s; every format that "+
+					"ships it must reference the one shared copy", format, asset)
+			}
+		}
+	}
+}
+
+// TestNoSharedAssetIsOrphaned makes adding a file to the shared tier a
+// deliberate act. Without it, a new shared asset that no recipe installs looks
+// exactly like one that every recipe installs.
+func TestNoSharedAssetIsOrphaned(t *testing.T) {
+	for _, dir := range []string{"config", "logrotate", "systemd", "sysusers", "tmpfiles", "man", "logsh"} {
+		entries, err := os.ReadDir(filepath.Join("../../packaging", dir))
+		if err != nil {
+			t.Fatalf("reading shared asset dir %s: %v", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			rel := filepath.ToSlash(filepath.Join("packaging", dir, e.Name()))
+			if _, ok := sharedAssets[rel]; !ok {
+				t.Errorf("%s is in the shared tier but no format is recorded as "+
+					"installing it; add it to sharedAssets with the formats that do", rel)
+			}
+		}
+	}
+}
+
+// TestNoRecipeInstallsAnUntrackedConfig is the specific regression guard for
+// the defect above: a recipe reaching for a bare config.yaml at the repo root,
+// which is gitignored, so the package either fails to build or ships whoever
+// built it their own settings.
+func TestNoRecipeInstallsAnUntrackedConfig(t *testing.T) {
+	for format, files := range recipeFiles {
+		for _, f := range files {
+			for line := range strings.SplitSeq(readPackaging(t, f), "\n") {
+				code := strings.TrimSpace(line)
+				if strings.HasPrefix(code, "#") || !strings.Contains(code, "install ") {
+					continue
+				}
+				for _, bad := range []string{" config.yaml", "/config.yaml "} {
+					if strings.Contains(code, bad) && !strings.Contains(code, "packaging/config/") {
+						t.Errorf("%s (%s) installs a repo-root config.yaml, which is "+
+							"gitignored: %s", f, format, code)
+					}
+				}
+			}
 		}
 	}
 }

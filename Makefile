@@ -1,7 +1,9 @@
 # Makefile for the Go Sudo I/O Log Server
 
 # RPM package version
-PKG_VERSION=0.1.0
+# The single source of truth for the version. Every packaging format derives
+# its version field from this file; none of them restates it.
+PKG_VERSION=$(shell tr -d "[:space:]" < VERSION)
 
 # Go variables
 GOCMD=go
@@ -154,74 +156,17 @@ clean:
 #	rm -rf deb/
 	$(GOCLEAN)
 
-# Build RPM package (builds both sudosrv and the logsh subpackage)
+# Packaging. Each format has one entry point of the same shape under
+# packaging/<format>/; they stage a source snapshot into a gitignored build tree
+# and inject $(PKG_VERSION) into that format's version field.
 rpm:
-	@echo "Building RPM package..."
-	./rpm/build-rpm.sh "$(PKG_VERSION)"
+	./packaging/rpm/build-rpm.sh
 
-# Build Debian packages (sudosrv and logsh, from the one source)
 deb:
-	@echo "Building Debian package for $(BINARY_NAME) version $(PKG_VERSION)"
-	@# Check if required tools are installed
-	@if ! command -v dpkg-buildpackage >/dev/null 2>&1; then \
-		echo "Error: dpkg-buildpackage not found. Please install devscripts package:"; \
-		echo "  sudo apt-get install devscripts"; \
-		exit 1; \
-	fi
-	@if ! command -v protoc >/dev/null 2>&1; then \
-		echo "Error: protoc not found. Please install protobuf-compiler:"; \
-		echo "  sudo apt-get install protobuf-compiler"; \
-		exit 1; \
-	fi
-	@if ! command -v go >/dev/null 2>&1; then \
-		echo "Error: go not found. Please install golang:"; \
-		echo "  sudo apt-get install golang-go"; \
-		exit 1; \
-	fi
-	@# Update changelog with current version if different
-	@if ! grep -q "^$(BINARY_NAME) ($(PKG_VERSION)-1)" debian/changelog; then \
-		echo "Updating changelog for version $(PKG_VERSION)"; \
-		sed -i "1s/^$(BINARY_NAME) ([^)]*-1)/$(BINARY_NAME) ($(PKG_VERSION)-1)/" debian/changelog; \
-	fi
-	@# Clean any previous builds
-	@echo "Cleaning previous builds..."
-	@$(MAKE) clean || true
-	@rm -rf deb/* || true
-	@# Build the package
-	@# Create deb output directory
-	@pwd
-	@mkdir -p deb
-	@echo "Building package..."
-	@dpkg-buildpackage -us -uc -b
-	@# Move artifacts to deb folder
-	@echo "Moving build artifacts to deb/ folder..."
-	@mv ../$(BINARY_NAME)_*.deb deb/ 2>/dev/null || true
-	@mv ../$(BINARY_NAME)_*.tar.xz deb/ 2>/dev/null || true
-	@mv ../$(BINARY_NAME)_*.dsc deb/ 2>/dev/null || true
-	@mv ../$(BINARY_NAME)_*.changes deb/ 2>/dev/null || true
-	@mv ../$(BINARY_NAME)_*.buildinfo deb/ 2>/dev/null || true
-	@echo "Package build completed successfully!"
-	@# Show package info if deb file exists
-	@if ls deb/$(BINARY_NAME)_*.deb >/dev/null 2>&1; then \
-		DEB_FILE=$$(ls deb/$(BINARY_NAME)_*.deb | head -1); \
-		echo "Debian package created: $$DEB_FILE"; \
-		echo ""; \
-		echo "Package information:"; \
-		dpkg-deb -I "$$DEB_FILE"; \
-	else \
-		echo "Warning: No .deb files found in deb/ directory"; \
-		echo "Check if dpkg-buildpackage completed successfully"; \
-	fi
+	./packaging/debian/build-deb.sh
 
-# Build Arch Linux package
 arch:
-	@echo "Building Arch Linux package for $(BINARY_NAME) version $(PKG_VERSION)"
-	@if ! command -v makepkg >/dev/null 2>&1; then \
-		echo "Error: makepkg not found. This must be run on Arch Linux."; \
-		echo "  sudo pacman -S base-devel"; \
-		exit 1; \
-	fi
-	./archlinux/build-arch.sh "$(PKG_VERSION)"
+	./packaging/arch/build-arch.sh
 
 # Display help information
 help:

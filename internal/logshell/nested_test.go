@@ -179,6 +179,17 @@ func TestWithSessionEnvPublishesTheSessionID(t *testing.T) {
 // is the signal that survives sudo, but the env marker is what carries the
 // parent's UUID for correlation.
 func TestDetectNestingFindsTheEnclosingLogshFromEnv(t *testing.T) {
+	// This covers the DEFAULT branch of DetectNesting -- the one reached only
+	// when the ancestry walk finds nothing -- so it is meaningless if the test
+	// runner itself has a sudo or logsh ancestor. Clearing SUDO_USER is not
+	// enough: ancestry is deliberately the signal that cannot be lied to, and
+	// it reports sudo whatever the environment says. Packagers hit this,
+	// because makepkg's check() commonly runs under sudo and the suite then
+	// failed the build.
+	if walkAncestry() != NestedNone {
+		t.Skip("the test runner has a sudo or logsh ancestor; the env fallback " +
+			"under test applies only when ancestry finds nothing")
+	}
 	t.Setenv(LogshSessionEnv, "outer-uuid")
 	t.Setenv("SUDO_USER", "")
 
@@ -195,8 +206,10 @@ func TestDetectNestingFindsTheEnclosingLogshFromEnv(t *testing.T) {
 // nested paths. `go test` itself is the parent here, which is neither sudo nor
 // a logsh.
 func TestDetectNestingIsQuietWhenNotNested(t *testing.T) {
-	if os.Getenv("SUDO_USER") != "" {
-		t.Skip("the test runner is itself under sudo")
+	// Ancestry, not SUDO_USER: the walk is what DetectNesting actually
+	// consults, and it reports a sudo ancestor even when the variable is unset.
+	if walkAncestry() != NestedNone {
+		t.Skip("the test runner has a sudo or logsh ancestor")
 	}
 	t.Setenv(LogshSessionEnv, "")
 
