@@ -993,7 +993,7 @@ func TestShippedConfigsHaveNoUnknownKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}
-	paths = append(paths, "../../debian/sudosrv/etc/sudosrv/config.yaml")
+	paths = append(paths, "../../packaging/config/sudosrv.yaml")
 	if len(paths) < 2 {
 		t.Fatal("expected to find the shipped example configs")
 	}

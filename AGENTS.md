@@ -21,7 +21,7 @@ Guidance for automated coding agents working in this repository.
 - `internal/relay/` - relay mode and cache flush behavior
 - `internal/server/` - server lifecycle and listeners
 - `pkg/sudosrv_proto/` - protobuf schema and generated Go bindings
-- `rpm/`, `debian/` - packaging assets
+- `packaging/` - all packaging assets (rpm, debian, arch, shared)
 
 ## Build, test, and run
 
@@ -53,7 +53,7 @@ Direct Go fallback:
    - Add or update focused tests in the relevant `internal/*/*_test.go` files.
    - Preserve both `local` and `relay` mode behavior unless explicitly changing one mode.
 
-4. Packaging changes (`rpm/`, `debian/`, `Makefile`)
+4. Packaging changes (`packaging/`, `VERSION`, `Makefile`)
    - Validate the relevant packaging target (`make rpm` or `make deb`) when feasible.
 
 ## Code style and safety expectations

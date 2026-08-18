@@ -1,0 +1,10 @@
+# sudosrv is built CGO-free, so the Go runtime links statically. That is a
+# project-wide property, not a packaging shortcut: this module has no cgo
+# dependencies at all, which is what keeps cross-compilation clean and lets the
+# same binary run on any glibc or musl host. There is nothing to link
+# dynamically against.
+#
+# The corresponding override for logsh is a stronger claim -- it is a login
+# shell, so a dynamic linker that cannot resolve it locks every recorded
+# account out of the host. See logsh.lintian-overrides.
+sudosrv: statically-linked-binary [usr/bin/sudosrv]

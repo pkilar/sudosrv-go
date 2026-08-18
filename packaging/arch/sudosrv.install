@@ -1,0 +1,30 @@
+# Deliberately does NOT create the service account, create the state
+# directories, or reload the system manager.
+#
+# Arch does all three from pacman hooks whenever a package ships files in
+# sysusers.d, tmpfiles.d or systemd/system -- which this one does. Doing it here
+# as well is redundant, runs at the wrong point in the transaction, and namcap
+# flags it ("runs a command provided by hooks"). Note that namcap matches the
+# command NAMES anywhere in this file, comments included, so they are described
+# rather than spelled here.
+#
+# What is left is the part no hook can decide: whether a running daemon should
+# be restarted, and stopping it before removal.
+
+post_install() {
+    echo ":: Enable and start the service with: systemctl enable --now sudosrv.service"
+}
+
+post_upgrade() {
+    if systemctl is-active --quiet sudosrv.service; then
+        echo ":: Restarting sudosrv.service..."
+        systemctl restart sudosrv.service
+    fi
+}
+
+pre_remove() {
+    if systemctl is-active --quiet sudosrv.service; then
+        systemctl stop sudosrv.service
+    fi
+    systemctl disable sudosrv.service 2>/dev/null || true
+}

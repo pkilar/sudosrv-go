@@ -1,3 +1,14 @@
+# The single systemd unit, installed verbatim by all three packaging formats.
+#
+# It is shared rather than kept per-format because nothing in it differs by
+# distribution: there is no EnvironmentFile (the config path is a fixed
+# argument) and no reference to the one path that does differ between formats,
+# the logsh helper directory. Keeping one copy is what stops the hardening
+# stanzas below drifting apart, which is exactly what happened to the config
+# and unit files this replaces.
+#
+# ExecReload uses /bin/kill, which is not in every base image -- each format
+# declares the package that provides it (procps / util-linux / procps-ng).
 [Unit]
 Description=sudo I/O Log Server
 Documentation=man:sudosrv(8)

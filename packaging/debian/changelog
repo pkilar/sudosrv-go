@@ -1,4 +1,9 @@
-sudosrv (0.1.0-1) unstable; urgency=medium
+sudosrv (0.0.0-1) unstable; urgency=medium
+
+  * PLACEHOLDER VERSION. build-deb.sh rewrites this line in the staged copy
+    from the top-level VERSION file, so the two cannot disagree. 0.0.0 is
+    deliberately implausible: a package built by running dpkg-buildpackage
+    here directly must not look like a release.
 
   * Initial release of sudosrv
   * Implements sudo_logsrv.proto protocol

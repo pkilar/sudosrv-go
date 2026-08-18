@@ -1,0 +1,106 @@
+.TH SUDOSRV 8 "2026-08-17" "sudosrv" "System Manager's Manual"
+.SH NAME
+sudosrv \- sudo I/O log server
+.SH SYNOPSIS
+.B sudosrv
+.RB [ \-config
+.IR path ]
+.RB [ \-log-level
+.IR level ]
+.RB [ \-validate ]
+.RB [ \-dry-run ]
+.RB [ \-version ]
+.RB [ \-help ]
+.SH DESCRIPTION
+.B sudosrv
+receives I/O logs from
+.BR sudo (8)
+clients over the sudo_logsrv protocol and is a drop-in alternative to sudo's
+own
+.BR sudo_logsrvd (8).
+It accepts connections from sudo 1.9.0 and newer, over plain TCP, TLS, or both
+at once.
+.PP
+It runs in one of two modes, selected by
+.I server.mode
+in the configuration file.
+In
+.B local
+mode it writes sudoreplay-compatible session transcripts under
+.IR local_storage.log_directory .
+In
+.B relay
+mode it caches each session on disk and forwards it to an upstream server,
+retrying with exponential backoff, so an upstream outage costs no audit records.
+.SH OPTIONS
+.TP
+.BI \-config " path"
+Configuration file to read. Default:
+.IR /etc/sudosrv/config.yaml .
+.TP
+.BI \-log-level " level"
+Operational log level for the daemon's own logging:
+.BR debug ", " info ", " warn ", or " error .
+Overrides
+.I server.server_operational_log_level
+in the configuration file. This is the daemon's diagnostic log, distinct from
+the sudo event log and from the session transcripts.
+.TP
+.B \-validate
+Parse and validate the configuration, report any problem, and exit without
+binding a socket. Exits 0 when the configuration is usable.
+.TP
+.B \-dry-run
+Validate the configuration and report what the daemon would do, without
+starting it.
+.TP
+.B \-version
+Print the version and exit.
+.TP
+.B \-help
+Print a usage summary and exit.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Re-read the configuration and apply changes to the listen addresses and to
+every TLS setting without dropping established connections. Certificates
+renewed in place need no signal at all; the key pair is re-read per handshake.
+Sent by
+.B systemctl reload sudosrv
+and by the shipped logrotate stanza.
+.TP
+.BR SIGINT ", " SIGTERM
+Shut down gracefully: stop accepting new connections, let sessions in flight
+finish, and flush what is pending.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General failure.
+.TP
+.B 2
+Configuration error.
+.TP
+.B 3
+Server error.
+.SH FILES
+.TP
+.I /etc/sudosrv/config.yaml
+Configuration file.
+.TP
+.I /var/log/sudosrv
+Session transcripts in local mode.
+.TP
+.I /var/spool/sudosrv-cache
+Undelivered session journals in relay mode. Do not point
+.BR logrotate (8)
+at this directory: rotating a journal renames it out of reach of the flush and
+recovery code, which destroys an undelivered session permanently.
+.SH SEE ALSO
+.BR logsh (8),
+.BR sudo (8),
+.BR sudoreplay (8),
+.BR sudo_logsrvd (8),
+.BR sudoers (5)

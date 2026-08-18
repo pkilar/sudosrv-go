@@ -291,9 +291,9 @@ managed host, the daemon usually does not.
 
 | Distribution | Package | Maintainer scripts |
 |---|---|---|
-| Debian/Ubuntu | `logsh` binary package from the same source | `debian/logsh.postinst`, `debian/logsh.prerm` |
+| Debian/Ubuntu | `logsh` binary package from the same source | `packaging/debian/logsh.postinst`, `packaging/debian/logsh.prerm` |
 | RHEL/Fedora | `logsh` subpackage of the `sudosrv` spec | `%post -n logsh`, `%preun -n logsh` |
-| Arch | `logsh` in a split PKGBUILD | `archlinux/logsh.install` |
+| Arch | `logsh` in a split PKGBUILD | `packaging/arch/logsh.install` |
 
 Each installs the static binary, the install script under the distribution's
 libexec directory, `examples/logsh.yaml` as `/etc/logsh/logsh.yaml` (a conffile,

@@ -2,8 +2,15 @@ Source: sudosrv
 Section: admin
 Priority: optional
 Maintainer: Paul Kilar <pkilar@gmail.com>
-Build-Depends: debhelper (>= 13),
-               golang-go (>= 2:1.26),
+# debhelper-compat replaces the debian/compat file, which was still present
+# alongside it. golang-go's floor was 2:1.26, which trixie cannot satisfy
+# (it ships 1.24), so dpkg-checkbuilddeps refused the build outright. The module
+# needs Go 1.26.3; the floor below is the version that understands GOTOOLCHAIN,
+# and debian/rules sets GOTOOLCHAIN=auto so the distro toolchain fetches the
+# one it needs. That requires network access at build time -- a sealed builder
+# must vendor a toolchain instead.
+Build-Depends: debhelper-compat (= 13),
+               golang-go (>= 2:1.21~),
                protobuf-compiler
 Standards-Version: 4.6.2
 Homepage: https://github.com/pkilar/sudosrv
@@ -12,7 +19,17 @@ Rules-Requires-Root: no
 
 Package: logsh
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+# logsh-install.sh drives every install and removal step, so what IT needs is a
+# hard dependency of this package. The RPM and PKGBUILD already declared these;
+# Debian did not, which is the kind of gap that only shows up on a minimal
+# image where the postinst fails and no symlink is ever created.
+#
+# coreutils and grep are NOT listed, unlike in the other two formats: both are
+# Essential on Debian, so depending on them unversioned is an error
+# (depends-on-essential-package-without-using-version) rather than diligence.
+# awk is not essential, and is named by its real providers because a dependency
+# on the virtual package alone is not satisfiable by apt.
+Depends: ${shlibs:Depends}, ${misc:Depends}, mawk | gawk | original-awk
 Recommends: sudosrv
 Description: recording login shell for sudo I/O log servers
  logsh is a multi-call login shell that records a user's terminal session to a
@@ -27,7 +44,10 @@ Description: recording login shell for sudo I/O log servers
 
 Package: sudosrv
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+# procps provides /bin/kill, which the unit's ExecReload runs. Without it
+# `systemctl reload sudosrv` -- the documented way to apply a renewed TLS
+# certificate without dropping connections -- fails.
+Depends: ${shlibs:Depends}, ${misc:Depends}, procps
 Recommends: sudo (>= 1.9.0)
 Description: sudo I/O log server
  A Go-based sudo I/O log server that implements the sudo_logsrv.proto

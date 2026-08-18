@@ -85,8 +85,7 @@ func shippedRelayCacheDirs(t *testing.T) []string {
 	seen := map[string]bool{}
 	var dirs []string
 	for _, p := range []string{
-		"../../archlinux/sudosrv.conf",
-		"../../rpm/SOURCES/sudosrv.conf",
+		"../../packaging/config/sudosrv.yaml",
 	} {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -110,8 +109,7 @@ func shippedLogrotateConfigs(t *testing.T) []string {
 	t.Helper()
 	var configs []string
 	for _, pattern := range []string{
-		"../../archlinux/*.logrotate",
-		"../../rpm/SOURCES/*.logrotate",
+		"../../packaging/logrotate/*.logrotate",
 	} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
@@ -119,8 +117,13 @@ func shippedLogrotateConfigs(t *testing.T) []string {
 		}
 		configs = append(configs, matches...)
 	}
-	if len(configs) < 2 {
-		t.Fatalf("expected to find the shipped logrotate configs, found %v", configs)
+	// One file now, not one per format: the per-format copies were merged into
+	// packaging/logrotate/ so they cannot drift. Whether every format actually
+	// INSTALLS it is a separate question, and the answer used to be no --
+	// Debian shipped none at all. TestEveryFormatInstallsTheSharedAssets in
+	// internal/logshell covers that; this test covers the content.
+	if len(configs) != 1 {
+		t.Fatalf("expected exactly the one shared logrotate config, found %v", configs)
 	}
 	return configs
 }
