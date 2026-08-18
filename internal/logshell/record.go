@@ -262,6 +262,22 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.RunEnv},
 		}})
 	}
+
+	// submitenv is sent ALWAYS, and always empty. That is the opposite rule to
+	// the two above, deliberately: they are omitted when unknown, whereas this
+	// is a positive statement that no submit environment was recorded. C writes
+	// all three arrays into log.json (IOLOG-023), so a consumer walking that
+	// field set finds submitenv present and empty rather than having to guess
+	// whether an absent key means "empty" or "this recorder does not send it".
+	//
+	// logsh has no separate submit environment to record in any case: it is the
+	// login shell, so the environment it is exec'd with IS the session's. Under
+	// sudo the submitter's environment belonged to a process that has already
+	// been replaced, and sudo's own env_reset means what survives is not that
+	// environment anyway.
+	msgs = append(msgs, &pb.InfoMessage{Key: "submitenv", Value: &pb.InfoMessage_Strlistval{
+		Strlistval: &pb.InfoMessage_StringList{Strings: []string{}},
+	}})
 	return msgs
 }
 

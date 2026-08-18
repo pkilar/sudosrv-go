@@ -1144,8 +1144,10 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 			value = strconv.FormatInt(v.Numval, 10)
 			s.logMeta[key] = v.Numval
 		case *pb.InfoMessage_Strlistval:
-			value = strings.Join(v.Strlistval.Strings, " ")
-			s.logMeta[key] = v.Strlistval.Strings
+			value = strings.Join(v.Strlistval.GetStrings(), " ")
+			// Via the helper so an empty list lands in log.json as [] rather
+			// than null; see protocol.StringList.
+			s.logMeta[key] = protocol.StringList(v.Strlistval)
 		}
 		infoMap[key] = value
 		slog.Debug("Received InfoMessage", "key", key, "value", value)

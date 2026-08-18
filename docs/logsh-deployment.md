@@ -54,6 +54,7 @@ Alongside the identity, tty and command fields sudo also sends, each session's
 |---|---|
 | `source` | Path to the logsh binary that recorded the session. A host can hold sessions written by both sudo and logsh; this is what tells them apart. It is the resolved binary, not the `lbash` symlink — that name is a property of the account. |
 | `runenv` | `TZ=<zone>` only. |
+| `submitenv` | Always present, always empty. logsh has no separate submit environment: it *is* the login shell, so the environment it is exec'd with is the session's. The key is sent so a consumer walking C's field set finds it, rather than having to guess whether an absent key means "empty" or "this recorder does not send it". |
 | `logsh_session` | logsh's own session UUID, which the command log stamps on every line. |
 | `logsh_nested`, `logsh_parent_session` | The enclosing recorder, if any. |
 

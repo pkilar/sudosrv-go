@@ -134,6 +134,31 @@ func TestInfoMessagesCarrySourceAndRunenv(t *testing.T) {
 	}
 }
 
+// TestInfoMessagesAlwaysSendAnEmptySubmitenv pins the rule that is the opposite
+// of the one below: source and runenv are omitted when unknown, submitenv is
+// always present and always empty. It is a positive statement that no submit
+// environment was recorded, so a consumer walking C's log.json field set finds
+// it rather than having to guess whether an absent key means "empty" or "this
+// recorder does not send it".
+func TestInfoMessagesAlwaysSendAnEmptySubmitenv(t *testing.T) {
+	for _, meta := range []SessionMeta{
+		{},
+		{Source: "/usr/sbin/logsh", RunEnv: []string{"TZ=UTC"}},
+	} {
+		env := infoOf(meta.InfoMessages(), "submitenv")
+		if env == nil {
+			t.Fatalf("no submitenv info key for %+v", meta)
+		}
+		list := env.GetStrlistval()
+		if list == nil {
+			t.Fatalf("submitenv is %T, want a string list", env.Value)
+		}
+		if len(list.Strings) != 0 {
+			t.Errorf("submitenv = %v, want empty", list.Strings)
+		}
+	}
+}
+
 // TestInfoMessagesOmitAnUnknownSource covers the difference between "not
 // determined" and "determined to be nothing". The server copies every key it
 // receives straight into log.json, so sending an empty source would assert that
