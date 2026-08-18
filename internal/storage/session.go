@@ -200,6 +200,33 @@ func sanitizeLogSummaryField(s string, colonDelimited bool) string {
 	}, s)
 }
 
+// logSummaryCommand builds the third line of the plaintext `log` file: the
+// command followed by its arguments.
+//
+// C writes evlog->command and then every element of runargv EXCEPT the first,
+// separated by single spaces (lib/iolog/iolog_loginfo.c:128-135). Skipping
+// runargv[0] is not an oversight there: argv[0] is the invoked name, which the
+// command path already accounts for, so including it would print the program
+// twice.
+//
+// This used to write the bare command. The result was a `log` file whose third
+// line said "/bin/sh" for a session that ran "/bin/sh -c ...", so anything
+// reading the legacy file -- rather than log.json, which carries runargv as an
+// array and was always correct -- saw a command that could not be told apart
+// from an interactive shell. Verified against the real sudo_logsrvd fed the
+// identical session; see TestLogSummaryIncludesCommandArguments.
+func (s *Session) logSummaryCommand(command string) string {
+	var b strings.Builder
+	b.WriteString(sanitizeLogSummaryField(command, false))
+	if argv, ok := s.logMeta["runargv"].([]string); ok {
+		for _, arg := range argv[min(1, len(argv)):] {
+			b.WriteByte(' ')
+			b.WriteString(sanitizeLogSummaryField(arg, false))
+		}
+	}
+	return b.String()
+}
+
 // strftimeExpand expands C strftime-style "%X" date/time escapes against t,
 // matching the strftime pass C sudo applies to an iolog path after %{...}
 // expansion (lib/iolog/iolog_path.c). "%%" collapses to a literal "%". Only the
@@ -1163,6 +1190,21 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 			s.logMeta[field] = "unknown"
 		}
 	}
+	// C seeds the terminal size to 24x80 before it parses any info message
+	// (logsrvd/iolog_writer.c:167-168), so a client that omits them -- any
+	// tty-less session -- still yields a well-formed log line and a log.json
+	// carrying both members, which IOLOG-023 requires it to emit always.
+	// Without this the legacy log line ends in two empty colon-delimited
+	// fields.
+	for _, d := range []struct {
+		field string
+		value int64
+	}{{"lines", 24}, {"columns", 80}} {
+		if infoMap[d.field] == "" {
+			infoMap[d.field] = strconv.FormatInt(d.value, 10)
+			s.logMeta[d.field] = d.value
+		}
+	}
 
 	s.logMeta["server_log_id"] = s.logID // Add our own server-side log ID for reference
 	if acceptMsg.SubmitTime == nil {
@@ -1205,7 +1247,7 @@ func (s *Session) initialize(acceptMsg *pb.AcceptMessage) (retErr error) {
 		sanitizeLogSummaryField(infoMap["lines"], true),
 		sanitizeLogSummaryField(infoMap["columns"], true),
 		sanitizeLogSummaryField(infoMap["submitcwd"], false),
-		sanitizeLogSummaryField(infoMap["command"], false),
+		s.logSummaryCommand(infoMap["command"]),
 	)
 	if err := writeSessionFileAt(s.root, fileLog, []byte(summaryLine), os.FileMode(s.config.EffectiveFileMode())); err != nil {
 		return fmt.Errorf("failed to create 'log' summary file: %w", err)
