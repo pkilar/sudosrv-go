@@ -422,9 +422,18 @@ func TestStorageSession(t *testing.T) {
 	})
 
 	t.Run("ErrorHandling", func(t *testing.T) {
-		// Test with invalid directory
+		// An unusable log directory. It is a path UNDER A REGULAR FILE rather
+		// than a merely absent one, because absent is not unusable: MkdirAll
+		// happily creates /invalid/path/... when the tests run as root, so this
+		// asserted nothing under a root build and left an /invalid directory on
+		// the build host as a souvenir. A path under a file fails with ENOTDIR
+		// for everyone, root included.
+		blocker := filepath.Join(t.TempDir(), "a-file-not-a-directory")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		invalidCfg := &config.LocalStorageConfig{
-			LogDirectory: "/invalid/path/that/does/not/exist",
+			LogDirectory: filepath.Join(blocker, "sessions"),
 		}
 
 		_, err := NewSession(sessionUUID, createTestAcceptMessage(), invalidCfg)

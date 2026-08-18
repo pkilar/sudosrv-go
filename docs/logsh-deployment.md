@@ -295,10 +295,17 @@ managed host, the daemon usually does not.
 | RHEL/Fedora | `logsh` subpackage of the `sudosrv` spec | `%post -n logsh`, `%preun -n logsh` |
 | Arch | `logsh` in a split PKGBUILD | `archlinux/logsh.install` |
 
-Each installs the static binary at `/usr/sbin/logsh`, the install script under
-the distribution's libexec directory, `examples/logsh.yaml` as
-`/etc/logsh/logsh.yaml` (a conffile, so upgrades never clobber it), and this
-runbook under `/usr/share/doc/logsh/`.
+Each installs the static binary, the install script under the distribution's
+libexec directory, `examples/logsh.yaml` as `/etc/logsh/logsh.yaml` (a conffile,
+so upgrades never clobber it), and this runbook under `/usr/share/doc/logsh/`.
+
+The binary lands in `/usr/sbin` on Debian and Fedora but in **`/usr/bin` on
+Arch**, and so do the `l*` symlinks. Arch is usr-merged with `/usr/sbin` a
+symlink owned by the `filesystem` package, so a package that installs there
+fails the transaction outright. This is the one place the three formats
+genuinely differ, and it is why `/etc/passwd` on an Arch host reads
+`/usr/bin/lbash`. Check with `command -v logsh` before copying a shell path out
+of this document.
 
 **Installation switches no account.** The maintainer scripts run `install` and
 `verify` only. Enabling an account stays a deliberate per-host decision, because
@@ -317,6 +324,37 @@ during an update would silently switch recording off. Arch routes upgrades to
 point, so a bad config leaves no account worse off, whereas a failed postinst
 leaves the package manager half-configured. It warns loudly instead; do not
 enable an account until it passes.
+
+### Verified
+
+Recipes that parse prove almost nothing, so each format was built and then
+**installed and upgraded in a clean container**:
+
+| Format | Image | Tiers run |
+|---|---|---|
+| RPM | `fedora:43` | build, rpmlint, install, upgrade 0.1.0 → 0.1.1, remove |
+| deb | `debian:trixie` | build, lintian, install, upgrade 0.1.0 → 0.1.1, remove |
+| Arch | `archlinux:latest` | build **with `check()`**, namcap, install, upgrade, remove |
+
+The upgrade tier is the one that matters, and each run asserts the three things
+that would hurt a real deployment: a site edit to `/etc/logsh/logsh.yaml`
+survives, an account that was switched to logsh **stays** switched, and removal
+puts every switched account back on a real shell.
+
+Not covered: a live systemd, non-x86_64 architectures, and SELinux enforcing.
+
+### Known linter findings, and why they stand
+
+- **`statically-linked-binary`** (rpmlint, lintian) and **`lacks PIE` / `lacks
+  FULL RELRO`** (namcap) — deliberate. logsh is an account's login shell, so a
+  dynamic linker that cannot resolve it prevents login entirely rather than
+  degrading it. `debian/logsh.lintian-overrides` records this next to the
+  suppression; the RPM and Arch findings are left visible.
+- **`Dependency included, but may not be needed`** (namcap, for coreutils, gawk,
+  grep, bash) — wrong. namcap infers dependencies from ELF linkage and cannot
+  see inside a shell script; `logsh-install.sh` uses all four, and it drives
+  every install and removal step.
+- **`no-manual-page`** — a real gap, deliberately **not** suppressed.
 
 ### What the packages deliberately do not own
 

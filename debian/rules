@@ -12,8 +12,13 @@ export CGO_ENABLED = 0
 	dh $@
 
 override_dh_auto_configure:
-	# Generate protobuf Go code
-	protoc --proto_path=pkg/sudosrv_proto --go_out=pkg/sudosrv_proto --go_opt=paths=source_relative pkg/sudosrv_proto/sudo_logsrv.proto
+	# Use the Makefile's proto target rather than invoking protoc directly.
+	# protoc needs protoc-gen-go on PATH, and Debian's protobuf-compiler does not
+	# ship it, so the direct call failed with "protoc-gen-go: program not found"
+	# and the package could not be built at all. The Makefile resolves the plugin
+	# through `go tool`, pinned by the tool directive in go.mod, so the generator
+	# always matches the protobuf runtime this module compiles against.
+	$(MAKE) proto
 
 override_dh_auto_build:
 	# Build the application
@@ -59,7 +64,11 @@ override_dh_auto_install:
 
 override_dh_auto_test:
 	# Run tests
-	go test -timeout 30s -v ./...
+	# 30s could not even finish internal/relay, so this target failed and the
+	# package could not be built at all. Build hosts are slower than laptops;
+	# skip tests entirely with DEB_BUILD_OPTIONS=nocheck where ptrace or a pty
+	# is unavailable (see the logshell suite).
+	go test -timeout 600s ./...
 
 override_dh_auto_clean:
 	# Clean build artifacts

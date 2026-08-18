@@ -121,7 +121,7 @@ proto:
 # Run all unit tests verbosely with race detection
 test:
 	@echo "Running tests..."
-	$(GOTEST) -race -timeout 60s -v ./...
+	$(GOTEST) -race -timeout 600s -v ./...
 
 # Run the linter. This is the ONLY place the version is pinned: the CI lint job
 # runs `make lint` rather than the golangci-lint action, so there is no second
