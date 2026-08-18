@@ -127,7 +127,7 @@ func TestInstallChangesNoAccount(t *testing.T) {
 	if after := fr.read(t, "etc/passwd"); after != before {
 		t.Errorf("install modified /etc/passwd:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	for _, name := range []string{"lsh", "lbash", "lzsh", "ldash"} {
+	for _, name := range []string{"lsh", "lbash", "lzsh"} {
 		if _, err := os.Lstat(filepath.Join(fr.sbin, name)); err != nil {
 			t.Errorf("install did not create the %s symlink: %v", name, err)
 		}
@@ -194,6 +194,70 @@ func TestEnableTouchesOnlyTheTargetAccount(t *testing.T) {
 	// Every other field of the rewritten line must survive intact.
 	if !strings.Contains(fr.read(t, "etc/passwd"), "alice:x:1000:1000:Alice:/home/alice:/usr/sbin/lbash") {
 		t.Errorf("the rewritten passwd line lost a field:\n%s", fr.read(t, "etc/passwd"))
+	}
+}
+
+// TestInstallDoesNotRecreateARetiredName guards the other half of retiring a
+// multi-call name: `install` runs on every upgrade, so a name left in SYMLINKS
+// by accident would be silently reintroduced on every host in the fleet.
+func TestInstallDoesNotRecreateARetiredName(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "ldash")); !os.IsNotExist(err) {
+		t.Error("install created an ldash symlink; dash was retired from the shipped set")
+	}
+	if strings.Contains(fr.read(t, "etc/shells"), "/usr/sbin/ldash") {
+		t.Error("install registered /usr/sbin/ldash in /etc/shells")
+	}
+}
+
+// TestUninstallRestoresAccountsOnRetiredNames covers the upgrade path that
+// retiring a name opens up.
+//
+// An account switched to ldash by an older version keeps working after the
+// upgrade, because `install` only adds symlinks and never prunes them. Removal
+// is where it breaks: if the restore sweep only walks the names this build
+// still installs, that account is left pointing at a symlink whose target has
+// just been deleted -- a login nobody can use, which is precisely what
+// cmd_uninstall's ordering exists to prevent. LEGACY_SYMLINKS is what keeps it
+// in scope.
+func TestUninstallRestoresAccountsOnRetiredNames(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+
+	// Stand in for a host installed by a version that still shipped ldash: the
+	// symlink AND the /etc/shells entry, since the old install created both and
+	// `enable` rightly refuses a shell that is not registered.
+	if err := os.Symlink("logsh", filepath.Join(fr.sbin, "ldash")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fr.shells,
+		[]byte(fr.read(t, "etc/shells")+"/usr/sbin/ldash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "enable", "alice", "ldash"); err != nil {
+		t.Fatalf("enable alice ldash: %v\n%s", err, out)
+	}
+	if got := fr.shellOf(t, "alice"); got != "/usr/sbin/ldash" {
+		t.Fatalf("setup failed: alice is on %q, want /usr/sbin/ldash", got)
+	}
+
+	if out, err := fr.run(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+
+	if got := fr.shellOf(t, "alice"); strings.Contains(got, "/usr/sbin/l") {
+		t.Errorf("alice still points at %q after uninstall; that account cannot log in", got)
+	}
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "ldash")); !os.IsNotExist(err) {
+		t.Error("uninstall left the retired ldash symlink behind, pointing at a removed binary")
+	}
+	if strings.Contains(fr.read(t, "etc/shells"), "/usr/sbin/ldash") {
+		t.Error("uninstall left /usr/sbin/ldash in /etc/shells")
 	}
 }
 

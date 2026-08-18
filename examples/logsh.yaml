@@ -21,7 +21,6 @@ shells:
   lsh: /bin/sh
   lbash: /bin/bash
   lzsh: /bin/zsh
-  ldash: /bin/dash
 
 # Accounts whose sessions are recorded. Anything not listed here gets the real
 # shell with no recording and no log entry, which is what makes it safe to

@@ -38,7 +38,17 @@ CONFIG="$CONFDIR/logsh.yaml"
 # The names installed as symlinks. Keep in step with the shells map in the
 # shipped config: a symlink with no mapping is refused at login, and a mapping
 # with no symlink is simply unreachable.
-SYMLINKS="lsh lbash lzsh ldash"
+# The multi-call names this build installs.
+SYMLINKS="lsh lbash lzsh"
+
+# Names this build NO LONGER installs, but that an account on a host installed
+# by an earlier version may still be using. `install` never created these, so
+# nothing here brings them back -- but uninstall must still restore accounts
+# from them and clean them out of /etc/shells. Dropping a name from SYMLINKS
+# without listing it here leaves such an account pointing at a symlink to a
+# binary that removal just deleted, which is a login nobody can use and the
+# exact failure the ordering in cmd_uninstall exists to prevent.
+LEGACY_SYMLINKS="ldash"
 
 r() { printf '%s%s' "$ROOT" "$1"; }
 
@@ -170,7 +180,7 @@ cmd_disable() {
 cmd_uninstall() {
 	_fallback="${FALLBACK_SHELL:-/bin/sh}"
 
-	for name in $SYMLINKS; do
+	for name in $SYMLINKS $LEGACY_SYMLINKS; do
 		_target="$SBINDIR/$name"
 		for u in $(users_with_shell "$_target"); do
 			note "restoring $u from $_target to $_fallback"
@@ -178,7 +188,7 @@ cmd_uninstall() {
 		done
 	done
 
-	for name in $SYMLINKS; do
+	for name in $SYMLINKS $LEGACY_SYMLINKS; do
 		remove_shell "$SBINDIR/$name"
 		rm -f "$(r "$SBINDIR/$name")"
 	done

@@ -989,16 +989,22 @@ local_storage:
 // TestShippedConfigsHaveNoUnknownKeys makes sure the strict decoding above does
 // not reject the configs this repo ships and packages install.
 func TestShippedConfigsHaveNoUnknownKeys(t *testing.T) {
-	paths, err := filepath.Glob("../../*.yaml")
-	if err != nil {
-		t.Fatalf("glob failed: %v", err)
-	}
-	paths = append(paths, "../../packaging/config/sudosrv.yaml")
-	if len(paths) < 2 {
-		t.Fatal("expected to find the shipped example configs")
+	// Named, not globbed. This used to glob ../../*.yaml, which stopped
+	// matching anything tracked once the example moved into examples/ -- and
+	// then passed anyway on a developer machine, because an untracked local
+	// config.yaml at the repo root satisfied the glob. From a clean checkout
+	// the count guard tripped and took the whole Debian build down with it.
+	//
+	// Naming the files means a future move fails loudly here instead of
+	// silently reducing this test to nothing. Do NOT reintroduce a glob over
+	// examples/: logsh.yaml lives there too and is not a daemon config.
+	paths := []string{
+		"../../examples/config.yaml",
+		"../../packaging/config/sudosrv.yaml",
 	}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err != nil {
+			t.Errorf("shipped config %s is missing: %v", p, err)
 			continue
 		}
 		cfg, err := LoadConfig(p)
