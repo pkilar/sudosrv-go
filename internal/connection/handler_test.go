@@ -1158,16 +1158,26 @@ func TestWaitForRateToken(t *testing.T) {
 	defer serverConn.Close()
 	h := NewHandler(serverConn, cfg)
 
-	// A burst of rateBurst messages must not be throttled at all: that is the
-	// headroom an ordinary terminal session runs in.
+	// A burst must not be throttled at all: that is the headroom an ordinary
+	// terminal session runs in. A SAMPLE of the bucket is consumed rather than
+	// all of it -- draining the full rateBurst is ~1s under the race detector
+	// on an idle machine, and several times that when the rest of the suite is
+	// running in parallel, which made this assertion fail on time rather than
+	// on behaviour. The sample is still twenty times the old 100/sec ceiling,
+	// so it proves the property; the bucket's total size is not what is in
+	// question here.
+	const sampleBurst = 2000
+	if rateBurst < sampleBurst {
+		t.Fatalf("rateBurst is %v, below the %d this test consumes", rateBurst, sampleBurst)
+	}
 	start := time.Now()
-	for range int(rateBurst) {
+	for range sampleBurst {
 		if err := h.waitForRateToken(context.Background()); err != nil {
 			t.Fatalf("unexpected error draining burst: %v", err)
 		}
 	}
 	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("draining the burst took %s, expected near-instant", d)
+		t.Fatalf("consuming %d tokens took %s, expected near-instant", sampleBurst, d)
 	}
 
 	// The bucket is emptied explicitly rather than by draining it in a loop.
