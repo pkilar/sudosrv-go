@@ -78,9 +78,33 @@ type doneNotifier interface {
 
 // Rate limiter parameters. A single client connection is allowed to sustain
 // rateRefillPerSec messages per second with room for a short burst of rateBurst.
+//
+// These are a guard against pathological message spam, NOT a traffic shaper.
+// They were 100/sec, which is below what an ordinary terminal session produces
+// and corrupted every recording that exceeded it: a pty delivers output in
+// small reads, so `seq 1 20000` -- 130KB, over in a fraction of a second --
+// arrives as 1744 separate ttyout buffers. At 100/sec that session needed 17
+// seconds to reach the server.
+//
+// The damage is worse than slowness, because the throttle is invisible to the
+// person being recorded. logsh writes the user's terminal BEFORE handing the
+// buffer to the recorder, so output still appears instantly while delivery
+// falls behind; the stall is then charged to whatever event comes next and
+// written into the timing file as elapsed session time. A replay shows a
+// multi-second pause between a keystroke and its output that never happened,
+// which makes the transcript actively misleading rather than merely late. The
+// same backlog also delays logout, since the exit waits for the server to
+// commit the session.
+//
+// The ceiling below is set an order of magnitude above any rate a real terminal
+// produces. Note what does and does not bound resource use here: this limit
+// bounds messages, while the 2MB cap in internal/protocol bounds each message
+// and max_connections bounds concurrency. A message-rate limit alone never
+// bounded bytes -- 100 x 2MB/sec was always permitted -- so raising it does not
+// give up a byte-rate guarantee that existed.
 const (
-	rateRefillPerSec = 100.0
-	rateBurst        = 100.0
+	rateRefillPerSec = 50000.0
+	rateBurst        = 50000.0
 )
 
 // SessionHandler defines the interface for handling session data (either locally or by relay).
