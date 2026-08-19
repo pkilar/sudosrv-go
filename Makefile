@@ -39,6 +39,13 @@ LOGSH_CMD_PATH=./cmd/logsh
 # it stops packaging tools flagging a reference to the build sandbox.
 LOGSH_ENV=CGO_ENABLED=0
 
+# wiredump, the journal/cache decoder. A debugging tool, so it is not part of
+# `build` and the packages do not ship it -- but it is the only way to read a
+# parked journal, which is by definition the sole copy of a session that never
+# reached a server.
+WIREDUMP_BINARY_NAME=wiredump
+WIREDUMP_CMD_PATH=./cmd/wiredump
+
 # Build flags for stripped release binary
 LDFLAGS_STRIP = -ldflags="-s -w"
 
@@ -46,7 +53,7 @@ LDFLAGS_STRIP = -ldflags="-s -w"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: lint all build build-logsh install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
+.PHONY: lint all build build-logsh build-wiredump install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
@@ -62,6 +69,14 @@ build-logsh:
 	@echo "Building logsh (static) for local architecture..."
 	$(LOGSH_ENV) $(GOBUILD) -trimpath -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
 	@echo "Build complete: ./$(LOGSH_BINARY_NAME)"
+
+# Build wiredump, the wire-format decoder for journals and relay cache files.
+# Deliberately not a dependency of `build`: it is a debugging tool, not part of
+# what a host runs.
+build-wiredump:
+	@echo "Building wiredump for local architecture..."
+	$(GOBUILD) -o $(WIREDUMP_BINARY_NAME) $(WIREDUMP_CMD_PATH)
+	@echo "Build complete: ./$(WIREDUMP_BINARY_NAME)"
 
 # Install logsh on THIS host: binary, symlinks, /etc/shells, then verify.
 # Switches no account -- see docs/logsh-deployment.md for the rollout sequence

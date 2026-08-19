@@ -277,6 +277,29 @@ tell them apart:
 None of these is ever pruned. Sweep `.undelivered` with a timer; the rest want a
 human. **Never point logrotate at the spool directory.**
 
+### Reading a parked journal
+
+A journal is wire format, not text, so `less` tells you nothing. `wiredump`
+decodes it — the same reader the flush path uses, so a file it calls intact is
+one the real code can replay:
+
+```sh
+make build-wiredump
+./wiredump /var/spool/logsh/logsh-<uuid>.journal.undelivered
+```
+
+It prints one line per message with the delay the CLIENT recorded, a running
+total, the kind and the size, and lists every delay of a second or more at the
+end. That last part is what answers "why does this replay pause where the
+session did not" — the pause, if it is in the recording at all, is attached to a
+message the summary names. Exit status is 0 for a file that decodes to its end,
+1 for one that is truncated or malformed, which makes it usable in a sweeper.
+
+It prints a short preview of each I/O buffer by default. That is session
+content, and a journal has **not** been through the server's password filter, so
+ttyin may hold a secret that would have been masked in the finished I/O log. Use
+`-content=false` when that matters; message metadata is shown either way.
+
 ---
 
 ## Recovery

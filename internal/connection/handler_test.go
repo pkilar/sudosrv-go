@@ -1192,19 +1192,30 @@ func TestWaitForRateToken(t *testing.T) {
 
 	// With the bucket empty the next token must BLOCK and then SUCCEED — never
 	// return an error (which the caller turns into a connection teardown).
-	start = time.Now()
+	// With the bucket empty the next token must BLOCK and then SUCCEED -- never
+	// return an error, which the caller turns into a connection teardown. The
+	// assertion is that it succeeds, not how long it took: at this refill rate
+	// one token is back in 1/rateRefillPerSec seconds, which is tens of
+	// microseconds and not something a wall-clock comparison can measure
+	// reliably on a loaded machine.
 	if err := h.waitForRateToken(context.Background()); err != nil {
 		t.Fatalf("expected back-pressure (block then succeed), got error: %v", err)
 	}
-	if d := time.Since(start); d <= 0 {
-		t.Errorf("expected the empty bucket to block, got %s", d)
-	}
 
-	// Force the bucket empty, then a cancelled context must abort the wait
-	// promptly rather than blocking forever.
+	// A cancelled context must abort the wait rather than blocking forever.
+	//
+	// Holding the bucket empty needs the refill CLOCK moved, not just the token
+	// count zeroed. Refill is time-based, so zeroing the tokens and stamping
+	// rateLastRefill with the current time leaves a token available again after
+	// 1/rateRefillPerSec seconds -- 20us here. The test cannot re-enter the
+	// function that fast under the race detector, so a token was always waiting
+	// and the function returned nil without ever reaching its context check.
+	// That is what this assertion started failing on, intermittently and only
+	// under parallel load. Dating the refill in the future keeps `elapsed > 0`
+	// false, so no tokens are granted no matter how long the test takes.
 	h.rateLimitMutex.Lock()
 	h.rateTokens = 0
-	h.rateLastRefill = time.Now()
+	h.rateLastRefill = time.Now().Add(time.Hour)
 	h.rateLimitMutex.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
