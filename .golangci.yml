@@ -85,6 +85,23 @@ linters:
         text: "G103"
         linters:
           - gosec
+      # G703 — the shell path in logsh's standalone recorder (-record), which
+      # comes from the user's own -shell flag or their $SHELL. Scoped to the
+      # one file and the one rule, for the same reason as G103 above.
+      #
+      # There is no privilege boundary here to traverse. Standalone recording
+      # runs as the invoking user, records their own terminal and execs the
+      # shell they named, all with privileges they already hold: someone who
+      # could "traverse" to a binary could simply run it. That is what makes
+      # this different from the LOGIN-shell path, where argv[0] is
+      # attacker-influenced across a boundary and Config.Shells is the control
+      # — an allowlist this path deliberately does not apply, since requiring
+      # it would mean a standalone capture could not work without a system
+      # configuration file.
+      - path: cmd/logsh/main\.go
+        text: "G703"
+        linters:
+          - gosec
       - path: pkg/sudosrv_proto/
         linters:
           - errcheck

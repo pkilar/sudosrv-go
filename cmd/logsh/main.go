@@ -17,9 +17,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"log/syslog"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"sudosrv/internal/logshell"
 )
@@ -204,10 +206,25 @@ func runAdmin(inv logshell.Invocation) int {
 	validate := fs.Bool("validate", false, "Validate the configuration and exit")
 	selftest := fs.Bool("selftest", false, "Check that this host can run logsh as a login shell, and exit")
 	showVersion := fs.Bool("version", false, "Show version information and exit")
+	record := fs.String("record", "",
+		"Record this session into DIR as a sudoreplay-compatible I/O log and contact no log server")
+	shell := fs.String("shell", "",
+		"Shell to run under -record (default $SHELL, then /bin/sh)")
 
 	if err := fs.Parse(inv.Args); err != nil {
 		return exitConfig
 	}
+
+	// Whether -config was given, as opposed to left at its default. Standalone
+	// recording does not require a system configuration to exist -- the whole
+	// point is that it runs anywhere -- so it uses built-in defaults unless the
+	// user asks for a file.
+	configGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configGiven = true
+		}
+	})
 
 	switch {
 	case *showVersion:
@@ -217,6 +234,8 @@ func runAdmin(inv logshell.Invocation) int {
 		return runValidate(*configPath)
 	case *selftest:
 		return runSelftest(*configPath)
+	case *record != "":
+		return runRecord(*record, *shell, *configPath, configGiven, fs.Args())
 	}
 
 	fmt.Fprintf(os.Stderr,
@@ -224,9 +243,125 @@ func runAdmin(inv logshell.Invocation) int {
 			"Install it as a symlink named after the shell it should wrap (lbash for\n"+
 			"/bin/bash, lzsh for /bin/zsh, ...) and set that symlink as an account's\n"+
 			"shell in /etc/passwd.\n\n"+
-			"Administrative flags:\n", appName)
+			"To capture a session for yourself rather than for an audit trail:\n"+
+			"  %s -record ./my-session          # then replay with sudoreplay\n\n"+
+			"Administrative flags:\n", appName, appName)
 	fs.PrintDefaults()
 	return exitConfig
+}
+
+// runRecord is the standalone recorder: `logsh -record DIR`.
+//
+// It records THIS terminal session into DIR as the same sudoreplay-compatible
+// file set the daemon writes, and contacts no log server. It exists because the
+// recording machinery is useful on its own -- for capturing a session to replay,
+// or to feed to something that renders one as a video -- and that use has
+// nothing to do with auditing anybody.
+//
+// It is deliberately not the login-shell path and shares none of its policy.
+// record_users does not apply, because the person running this asked for it by
+// name. Nesting is not consulted, because a capture inside an already-recorded
+// session is a reasonable thing to want. Neither fail-closed nor break-glass
+// applies, because there is no audit obligation to fail against: if the
+// directory cannot be written, the user gets an error on their terminal and no
+// session starts.
+func runRecord(dir, shellOverride, configPath string, configGiven bool, args []string) int {
+	cfg := logshell.DefaultConfig()
+	if configGiven {
+		loaded, err := logshell.Load(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
+			return exitConfig
+		}
+		cfg = loaded
+	}
+	if !cfg.LogTTYOut {
+		fmt.Fprintf(os.Stderr,
+			"%s: log_ttyout is off in this configuration, so there would be nothing\n"+
+				"       to record. Enable it or drop -config.\n", appName)
+		return exitConfig
+	}
+	cfg.RecordDir = dir
+
+	// Quiet the storage package's own logging. It writes at INFO about opening
+	// and finalising a session, which is what an operator wants in a daemon's
+	// journal and is noise on the terminal of somebody recording themselves --
+	// it lands on their screen the moment their shell exits. Warnings and
+	// errors still come through, because those they need to see.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+
+	shellPath, err := recordShell(shellOverride)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
+		return exitConfig
+	}
+
+	// A recording of a session that has no terminal would hold no terminal
+	// output. Saying so beats writing an empty transcript and letting the user
+	// discover it when they try to replay it.
+	if !logshell.IsTerminal(os.Stdin.Fd()) {
+		fmt.Fprintf(os.Stderr,
+			"%s: -record needs a terminal; stdin is not one.\n", appName)
+		return exitConfig
+	}
+
+	// Refuse to write over an existing recording. storage opens the stream
+	// files with O_TRUNC, so a second run into the same directory would
+	// overwrite the first with no warning -- and a recording someone meant to
+	// keep is exactly the thing not to silently destroy.
+	if existing, err := os.Stat(filepath.Join(dir, "timing")); err == nil && !existing.IsDir() {
+		fmt.Fprintf(os.Stderr,
+			"%s: %s already holds a recording; choose another directory.\n", appName, dir)
+		return exitConfig
+	}
+
+	fmt.Fprintf(os.Stderr, "%s: recording to %s\n", appName, dir)
+
+	inv := logshell.Invocation{Name: filepath.Base(shellPath), Args: args}
+	outcome, err := logshell.RunRecorded(context.Background(), cfg, inv, shellPath,
+		logshell.StdTerminal(), nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
+		if errors.Is(err, logshell.ErrRecordingUnavailable) {
+			// No shell ever started, so there is nothing to report an exit
+			// status for.
+			return exitGeneral
+		}
+		// The shell ran; the user is still owed its exit status.
+		return outcome.ExitCode
+	}
+
+	fmt.Fprintf(os.Stderr, "%s: recorded to %s\n", appName, dir)
+	fmt.Fprintf(os.Stderr, "%s: replay with: sudoreplay -d %s %s\n",
+		appName, filepath.Dir(dir), filepath.Base(dir))
+	return outcome.ExitCode
+}
+
+// recordShell picks the shell a standalone recording runs.
+//
+// $SHELL rather than the passwd entry: this records the session the user is
+// actually having, and $SHELL is what their terminal gave them. It is also why
+// the shells allowlist does not apply here -- that list exists to stop a stray
+// symlink becoming an exec primitive for OTHER people's logins, and there is no
+// privilege boundary being crossed when someone runs their own shell.
+func recordShell(override string) (string, error) {
+	candidate := override
+	if candidate == "" {
+		candidate = os.Getenv("SHELL")
+	}
+	if candidate == "" {
+		candidate = "/bin/sh"
+	}
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return "", fmt.Errorf("shell %s: %w", candidate, err)
+	}
+	if info.IsDir() || info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("shell %s is not executable", candidate)
+	}
+	return candidate, nil
 }
 
 // runValidate reports content problems and permission problems independently.

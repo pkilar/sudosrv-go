@@ -70,6 +70,19 @@ type Config struct {
 	// a mere network blip, because a blip must not lock out a fleet.
 	FailClosed bool `yaml:"fail_closed"`
 
+	// RecordDir makes this a standalone recorder: the session is written to
+	// that directory as a sudoreplay-compatible I/O log and no log server is
+	// contacted at all. It is what `logsh -record` sets.
+	//
+	// `yaml:"-"` is load-bearing, not tidiness. A local recording is written by
+	// the very user being recorded, as that user, so they can edit or delete
+	// it -- it is a capture, not an audit trail. Were this settable from
+	// logsh.yaml, an administrator could believe they had configured recording
+	// for an account while giving that account full control of its own
+	// evidence. Standalone recording is something a user asks for on their own
+	// command line, for their own session, and nowhere else.
+	RecordDir string `yaml:"-"`
+
 	// NestedSessions decides what to do when logsh finds itself inside something
 	// that may already be recording: record, metadata, or skip. Default metadata.
 	//

@@ -92,6 +92,18 @@ var (
 // point: were it triggered by an unreachable server alone, a network blip would
 // lock every recorded account out of an entire fleet at once.
 func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
+	// Standalone recording short-circuits everything below: there is no server
+	// to reach, so there is no journal to fall back to and no fail-closed
+	// decision to make. If the directory cannot be written the answer is an
+	// error the user reads on their own terminal, not a policy branch.
+	if cfg.RecordDir != "" {
+		s, err := newLocalSink(cfg.RecordDir)
+		if err != nil {
+			return nil, err
+		}
+		return newBufferedSink(s), nil
+	}
+
 	var journalErr, streamErr error
 
 	if dir := cfg.Server.JournalDirectory; dir != "" {
