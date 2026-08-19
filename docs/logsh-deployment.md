@@ -101,6 +101,20 @@ is passed to it untouched. A directory that already holds a recording is
 refused rather than overwritten, and a `%` in the path is refused because the
 I/O log path expansion would interpret it.
 
+**`/etc/logsh/logsh.yaml` is never read on this path**, and its absence is not an
+error — the login-shell path treats a missing configuration as a refusal because
+without one it cannot tell whether an account should be recorded, but you have
+already answered that by typing `-record`. Nor is the system file picked up when
+it happens to exist: it describes an *audit* deployment and may name an upstream
+server, restrict recording to particular accounts, or switch off the very stream
+you are capturing, so inheriting it would make the same command behave
+differently from host to host.
+
+Pass `-config` if you do want settings from a file. That file need only be
+readable by you — the root-ownership rule that guards the login-shell
+configuration does not apply, since nothing here crosses a privilege boundary,
+and enforcing it would make `-config ~/capture.yaml` impossible.
+
 **This is not an audit path, and the code will not let you make it one.** A
 local recording is written by the very user being recorded, as that user, so
 they can edit or delete it. `RecordDir` therefore carries `yaml:"-"`: no

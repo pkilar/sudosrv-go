@@ -266,14 +266,10 @@ func runAdmin(inv logshell.Invocation) int {
 // directory cannot be written, the user gets an error on their terminal and no
 // session starts.
 func runRecord(dir, shellOverride, configPath string, configGiven bool, args []string) int {
-	cfg := logshell.DefaultConfig()
-	if configGiven {
-		loaded, err := logshell.Load(configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
-			return exitConfig
-		}
-		cfg = loaded
+	cfg, err := recordConfig(configPath, configGiven)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
+		return exitConfig
 	}
 	if !cfg.LogTTYOut {
 		fmt.Fprintf(os.Stderr,
@@ -337,6 +333,36 @@ func runRecord(dir, shellOverride, configPath string, configGiven bool, args []s
 	fmt.Fprintf(os.Stderr, "%s: replay with: sudoreplay -d %s %s\n",
 		appName, filepath.Dir(dir), filepath.Base(dir))
 	return outcome.ExitCode
+}
+
+// recordConfig resolves the configuration a standalone recording runs under.
+//
+// /etc/logsh/logsh.yaml is NOT read unless -config asks for it, and its absence
+// is not an error. That is the difference between a login shell and a tool: the
+// login-shell path must find a configuration or it cannot tell whether the
+// account should be recorded, so a missing file there is a refusal. Here the
+// user has already answered that question by typing -record, and logsh is a
+// single static binary -- someone who copies it onto a machine to capture a
+// session should not have to install a system configuration first.
+//
+// Nor is the system file read opportunistically when it happens to exist. It
+// describes an AUDIT deployment: it can name an upstream server, restrict
+// recording to particular accounts, or switch off the very stream being
+// captured. Silently inheriting that would make the same command behave
+// differently from host to host, and `log_ttyout: false` in it would turn a
+// capture into an empty file. Wanting those settings is what -config is for.
+// A file named with -config is read with LoadUnchecked: its CONTENT is
+// validated, but the root-ownership gate is not applied. That gate exists to
+// stop a recorded user pointing their own login shell at a configuration they
+// control, since the file decides which binary gets exec'd for their account.
+// No such boundary exists here -- the caller is recording their own session as
+// themselves -- and enforcing it would mean `-config ~/capture.yaml` could not
+// work at all, which is not a standalone tool.
+func recordConfig(configPath string, configGiven bool) (*logshell.Config, error) {
+	if !configGiven {
+		return logshell.DefaultConfig(), nil
+	}
+	return logshell.LoadUnchecked(configPath)
 }
 
 // recordShell picks the shell a standalone recording runs.
