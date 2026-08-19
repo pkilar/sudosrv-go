@@ -236,8 +236,6 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 		strInfo("runhome", m.Home),
 
 		strInfo("ttyname", m.TTYName),
-		numInfo("lines", int64(m.Rows)),
-		numInfo("columns", int64(m.Cols)),
 
 		strInfo("command", m.Command),
 		// internal/storage copies every info key into log.json, so this lands in
@@ -256,6 +254,25 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 	// that the recorder is unknown rather than that it was not determined. C
 	// omits optional scalars whose struct member is NULL for the same reason
 	// (IOLOG-023).
+	// lines and columns are OMITTED when the terminal did not report a size,
+	// rather than sent as zero.
+	//
+	// Zero is not a neutral value here: sudoreplay refuses a session recorded as
+	// 0x0, silently, exiting 1 with no message and replaying nothing. A capture
+	// from a pty whose size was never set -- which is what a terminal that fails
+	// TIOCGWINSZ leaves us with -- was therefore unplayable, and gave no clue
+	// why. Leaving the keys out instead lets the server apply the same 24x80 it
+	// uses for any client that omits them, which is what C seeds evlog with
+	// before parsing info messages (logsrvd/iolog_writer.c:167-168). A default
+	// that makes the recording playable beats an honest zero that makes it
+	// unreadable.
+	if m.Rows > 0 {
+		msgs = append(msgs, numInfo("lines", int64(m.Rows)))
+	}
+	if m.Cols > 0 {
+		msgs = append(msgs, numInfo("columns", int64(m.Cols)))
+	}
+
 	if m.Source != "" {
 		msgs = append(msgs, strInfo("source", m.Source))
 	}
