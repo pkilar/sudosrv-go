@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"sudosrv/internal/config"
+	"sudosrv/internal/logsrvclient"
 	"sudosrv/internal/storage"
 	pb "sudosrv/pkg/sudosrv_proto"
 
@@ -41,7 +42,24 @@ type localSink struct {
 	cfg     *config.LocalStorageConfig
 	dir     string
 	session *storage.Session
+
+	// wire is the optional raw copy: every message, in the framing a server
+	// would have received, written beside the I/O log. wireErr latches the
+	// first write failure -- once framing is broken by a short write the rest
+	// of the file is unreadable, so there is nothing to gain by continuing, and
+	// Finish reports it rather than leaving a truncated file to be discovered
+	// by whoever reads it next.
+	wire     *os.File
+	wirePath string
+	wireErr  error
 }
+
+// WireFileName is the raw copy's name inside the recording directory. Fixed
+// rather than derived, so a capture is one predictable path for the caller to
+// hand to cmd/wiredump. It sits inside the I/O log directory deliberately:
+// sudoreplay reads specific filenames and ignores anything else there, so the
+// two forms travel together as one artefact.
+const WireFileName = "session.wire"
 
 // newLocalSink prepares a sink that will write into dir.
 //
@@ -49,7 +67,7 @@ type localSink struct {
 // ttyout -- not a root to search. The caller names it, so it can tell the user
 // where the recording went before the session starts rather than hunting for it
 // afterwards.
-func newLocalSink(dir string) (*localSink, error) {
+func newLocalSink(dir string, alsoWire bool) (*localSink, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("no record directory given")
 	}
@@ -68,8 +86,25 @@ func newLocalSink(dir string) (*localSink, error) {
 		return nil, fmt.Errorf("resolving %s: %w", dir, err)
 	}
 	dir = filepath.Clean(abs)
+
+	var wire *os.File
+	var wirePath string
+	if alsoWire {
+		wirePath = filepath.Join(dir, WireFileName)
+		// O_EXCL: the caller already refuses a directory holding a recording,
+		// and this is the same refusal one level down -- appending to an
+		// existing wire file would splice two sessions into one stream that
+		// decodes without complaint and describes neither.
+		wire, err = os.OpenFile(wirePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, localRecordMode)
+		if err != nil {
+			return nil, fmt.Errorf("creating %s: %w", wirePath, err)
+		}
+	}
+
 	return &localSink{
-		dir: dir,
+		dir:      dir,
+		wire:     wire,
+		wirePath: wirePath,
 		cfg: &config.LocalStorageConfig{
 			// IologDir and IologFile together are the session path. They are
 			// taken literally, which splitSessionDir guarantees by refusing a
@@ -141,11 +176,27 @@ const localRecordMode = 0o600
 // here first.
 const localRecordDirMode = 0o700
 
+// tap writes one message to the raw copy, if there is one.
+//
+// The tap runs BEFORE the message reaches storage, so the wire file holds what
+// the client produced even for a message the I/O log then rejects. That is the
+// point of keeping it: it is the record of what was sent, not of what was
+// successfully stored.
+func (l *localSink) tap(msg *pb.ClientMessage) {
+	if l.wire == nil || l.wireErr != nil {
+		return
+	}
+	if err := logsrvclient.WriteMessage(l.wire, msg); err != nil {
+		l.wireErr = fmt.Errorf("writing %s: %w", l.wirePath, err)
+	}
+}
+
 func (l *localSink) Start(_ context.Context, accept *pb.ClientMessage) (string, error) {
 	msg := accept.GetAcceptMsg()
 	if msg == nil {
 		return "", fmt.Errorf("first message is not an AcceptMessage")
 	}
+	l.tap(accept)
 	session, err := storage.NewSession(uuid.New(), msg, l.cfg)
 	if err != nil {
 		return "", fmt.Errorf("creating the recording in %s: %w", l.dir, err)
@@ -163,6 +214,7 @@ func (l *localSink) Send(msg *pb.ClientMessage) error {
 	if l.session == nil {
 		return fmt.Errorf("recording was never started")
 	}
+	l.tap(msg)
 	// The ServerMessage a real server would return here is a commit point, and
 	// there is nobody to send it to: the bytes are already on this disk, which
 	// is what a commit point would have been promising.
@@ -173,17 +225,31 @@ func (l *localSink) Send(msg *pb.ClientMessage) error {
 // Finish has nothing to wait for. Durability is not a round trip here -- every
 // buffer was written as it arrived -- so unlike the streaming and journal sinks
 // there is no acknowledgement to block on.
-func (l *localSink) Finish(context.Context, time.Duration) error { return nil }
+//
+// It does report a failed raw copy. Returning the error costs the caller
+// nothing it needs: RunRecorded keeps the shell's exit status and reports the
+// failure separately, so the user still gets their exit code and still gets
+// told that the wire file beside their intact I/O log is incomplete.
+func (l *localSink) Finish(context.Context, time.Duration) error { return l.wireErr }
 
 // Close finalises the session: storage.Session closes the stream files and
 // chmods timing read-only, which is what marks a recording complete.
 func (l *localSink) Close() error {
+	if l.wire != nil {
+		if err := l.wire.Close(); err != nil && l.wireErr == nil {
+			l.wireErr = fmt.Errorf("closing %s: %w", l.wirePath, err)
+		}
+		l.wire = nil
+	}
 	if l.session == nil {
-		return nil
+		return l.wireErr
 	}
 	err := l.session.Close()
 	l.session = nil
-	return err
+	if err != nil {
+		return err
+	}
+	return l.wireErr
 }
 
 // Dir is where the recording was written.

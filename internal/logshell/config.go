@@ -83,6 +83,21 @@ type Config struct {
 	// command line, for their own session, and nowhere else.
 	RecordDir string `yaml:"-"`
 
+	// RecordWire additionally writes the session in RAW WIRE FORMAT beside the
+	// I/O log: the same length-prefixed ClientMessage stream logsh would have
+	// sent a server, which cmd/wiredump reads.
+	//
+	// The two are not redundant. The I/O log is the processed form -- streams
+	// split per file, delays flattened into a timing file, ttyin masked by the
+	// password filter -- and is what sudoreplay and anything sudo-compatible
+	// consumes. The wire file is what the client actually produced, before any
+	// of that, which is what makes it the artefact for debugging the recorder
+	// itself rather than the session.
+	//
+	// `yaml:"-"` for the same reason as RecordDir: it is only reachable from
+	// the command line, alongside -record.
+	RecordWire bool `yaml:"-"`
+
 	// NestedSessions decides what to do when logsh finds itself inside something
 	// that may already be recording: record, metadata, or skip. Default metadata.
 	//
