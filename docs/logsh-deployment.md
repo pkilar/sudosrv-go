@@ -77,6 +77,56 @@ evidence.
 
 ---
 
+## Recording a session for yourself
+
+Everything above is about recording *other people* for an audit trail. The same
+machinery captures a session for its own sake — to replay later, or to feed to
+something that renders it as a video — and that use has nothing to do with
+auditing anybody:
+
+```sh
+logsh -record ./my-session              # runs $SHELL, records until you exit
+logsh -record ./demo -- -c 'make test'  # or record one command
+```
+
+It writes the same sudoreplay-compatible file set the daemon writes — `log`,
+`log.json`, `timing` and the I/O streams — into the directory you name, and
+**contacts no log server**. Nothing needs to be installed or configured: it runs
+from built-in defaults, so `/etc/logsh/logsh.yaml` need not exist. Replay it
+with `sudoreplay /path/to/my-session`, or point any tool that already reads sudo
+I/O logs at it.
+
+`-shell` picks the shell (default `$SHELL`, then `/bin/sh`). Anything after `--`
+is passed to it untouched. A directory that already holds a recording is
+refused rather than overwritten, and a `%` in the path is refused because the
+I/O log path expansion would interpret it.
+
+**`/etc/logsh/logsh.yaml` is never read on this path**, and its absence is not an
+error — the login-shell path treats a missing configuration as a refusal because
+without one it cannot tell whether an account should be recorded, but you have
+already answered that by typing `-record`. Nor is the system file picked up when
+it happens to exist: it describes an *audit* deployment and may name an upstream
+server, restrict recording to particular accounts, or switch off the very stream
+you are capturing, so inheriting it would make the same command behave
+differently from host to host.
+
+Pass `-config` if you do want settings from a file. That file need only be
+readable by you — the root-ownership rule that guards the login-shell
+configuration does not apply, since nothing here crosses a privilege boundary,
+and enforcing it would make `-config ~/capture.yaml` impossible.
+
+**This is not an audit path, and the code will not let you make it one.** A
+local recording is written by the very user being recorded, as that user, so
+they can edit or delete it. `RecordDir` therefore carries `yaml:"-"`: no
+configuration file can turn it on, and no administrator can accidentally
+configure an account for "recording" that the account fully controls. It is a
+capture you ask for on your own command line, for your own session.
+
+One thing it shares with the audit path: the password filter is on, so a
+password prompt in a demo capture is still masked.
+
+---
+
 ## Topology
 
 Run a sudosrv in **relay mode on loopback** on each recorded host:

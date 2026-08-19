@@ -159,6 +159,36 @@ func TestInfoMessagesAlwaysSendAnEmptySubmitenv(t *testing.T) {
 	}
 }
 
+// TestInfoMessagesOmitAZeroTerminalSize is a bug with an invisible failure
+// mode. sudoreplay refuses a session recorded as 0x0 -- it exits 1 with no
+// message and replays nothing -- so a capture from a pty whose size was never
+// set produced a file that looked fine and could not be played, with no clue
+// why. Omitting the keys lets the server apply the 24x80 that C seeds into
+// evlog before it parses info messages.
+func TestInfoMessagesOmitAZeroTerminalSize(t *testing.T) {
+	msgs := SessionMeta{Rows: 0, Cols: 0}.InfoMessages()
+	if infoOf(msgs, "lines") != nil {
+		t.Error("a zero row count was sent; sudoreplay refuses a 0x0 session")
+	}
+	if infoOf(msgs, "columns") != nil {
+		t.Error("a zero column count was sent; sudoreplay refuses a 0x0 session")
+	}
+}
+
+// TestInfoMessagesSendARealTerminalSize is the other half: a size the terminal
+// did report must survive, or every recording would replay at 24x80 regardless
+// of how it was actually laid out.
+func TestInfoMessagesSendARealTerminalSize(t *testing.T) {
+	msgs := SessionMeta{Rows: 44, Cols: 170}.InfoMessages()
+	lines, cols := infoOf(msgs, "lines"), infoOf(msgs, "columns")
+	if lines == nil || cols == nil {
+		t.Fatalf("a reported size was dropped: lines=%v columns=%v", lines, cols)
+	}
+	if lines.GetNumval() != 44 || cols.GetNumval() != 170 {
+		t.Errorf("size = %dx%d, want 44x170", lines.GetNumval(), cols.GetNumval())
+	}
+}
+
 // TestInfoMessagesOmitAnUnknownSource covers the difference between "not
 // determined" and "determined to be nothing". The server copies every key it
 // receives straight into log.json, so sending an empty source would assert that
