@@ -210,6 +210,8 @@ func runAdmin(inv logshell.Invocation) int {
 		"Record this session into DIR as a sudoreplay-compatible I/O log and contact no log server")
 	shell := fs.String("shell", "",
 		"Shell to run under -record (default $SHELL, then /bin/sh)")
+	wire := fs.Bool("wire", false,
+		"With -record, also write the raw wire-format stream as "+logshell.WireFileName)
 
 	if err := fs.Parse(inv.Args); err != nil {
 		return exitConfig
@@ -235,7 +237,7 @@ func runAdmin(inv logshell.Invocation) int {
 	case *selftest:
 		return runSelftest(*configPath)
 	case *record != "":
-		return runRecord(*record, *shell, *configPath, configGiven, fs.Args())
+		return runRecord(*record, *shell, *configPath, configGiven, *wire, fs.Args())
 	}
 
 	fmt.Fprintf(os.Stderr,
@@ -244,8 +246,9 @@ func runAdmin(inv logshell.Invocation) int {
 			"/bin/bash, lzsh for /bin/zsh, ...) and set that symlink as an account's\n"+
 			"shell in /etc/passwd.\n\n"+
 			"To capture a session for yourself rather than for an audit trail:\n"+
-			"  %s -record ./my-session          # then replay with sudoreplay\n\n"+
-			"Administrative flags:\n", appName, appName)
+			"  %s -record ./my-session          # then replay with sudoreplay\n"+
+			"  %s -record ./my-session -wire    # and keep the raw wire stream too\n\n"+
+			"Administrative flags:\n", appName, appName, appName)
 	fs.PrintDefaults()
 	return exitConfig
 }
@@ -265,7 +268,7 @@ func runAdmin(inv logshell.Invocation) int {
 // applies, because there is no audit obligation to fail against: if the
 // directory cannot be written, the user gets an error on their terminal and no
 // session starts.
-func runRecord(dir, shellOverride, configPath string, configGiven bool, args []string) int {
+func runRecord(dir, shellOverride, configPath string, configGiven, alsoWire bool, args []string) int {
 	cfg, err := recordConfig(configPath, configGiven)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
@@ -278,6 +281,7 @@ func runRecord(dir, shellOverride, configPath string, configGiven bool, args []s
 		return exitConfig
 	}
 	cfg.RecordDir = dir
+	cfg.RecordWire = alsoWire
 
 	// Quiet the storage package's own logging. It writes at INFO about opening
 	// and finalising a session, which is what an operator wants in a daemon's
@@ -321,18 +325,31 @@ func runRecord(dir, shellOverride, configPath string, configGiven bool, args []s
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {
-			// No shell ever started, so there is nothing to report an exit
-			// status for.
+			// No shell ever started, so there is no recording to point at and
+			// no exit status to report.
 			return exitGeneral
 		}
-		// The shell ran; the user is still owed its exit status.
+		// The shell ran, so the files are on disk and the user is owed both the
+		// exit status and the path -- a failure to write the raw copy, say,
+		// leaves the I/O log perfectly usable, and saying nothing about where
+		// it is would be the unhelpful half of the truth.
+		reportRecording(dir, alsoWire)
 		return outcome.ExitCode
 	}
 
+	reportRecording(dir, alsoWire)
+	return outcome.ExitCode
+}
+
+// reportRecording tells the user where the session went and how to play it.
+func reportRecording(dir string, alsoWire bool) {
 	fmt.Fprintf(os.Stderr, "%s: recorded to %s\n", appName, dir)
+	if alsoWire {
+		fmt.Fprintf(os.Stderr, "%s: raw wire format: %s\n",
+			appName, filepath.Join(dir, logshell.WireFileName))
+	}
 	fmt.Fprintf(os.Stderr, "%s: replay with: sudoreplay -d %s %s\n",
 		appName, filepath.Dir(dir), filepath.Base(dir))
-	return outcome.ExitCode
 }
 
 // recordConfig resolves the configuration a standalone recording runs under.

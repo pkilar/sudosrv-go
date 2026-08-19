@@ -97,7 +97,7 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 	// decision to make. If the directory cannot be written the answer is an
 	// error the user reads on their own terminal, not a policy branch.
 	if cfg.RecordDir != "" {
-		s, err := newLocalSink(cfg.RecordDir)
+		s, err := newLocalSink(cfg.RecordDir, cfg.RecordWire)
 		if err != nil {
 			return nil, err
 		}

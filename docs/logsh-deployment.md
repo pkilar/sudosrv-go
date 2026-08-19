@@ -87,6 +87,7 @@ auditing anybody:
 ```sh
 logsh -record ./my-session              # runs $SHELL, records until you exit
 logsh -record ./demo -- -c 'make test'  # or record one command
+logsh -record ./demo -wire              # and keep the raw wire stream too
 ```
 
 It writes the same sudoreplay-compatible file set the daemon writes — `log`,
@@ -100,6 +101,38 @@ I/O logs at it.
 is passed to it untouched. A directory that already holds a recording is
 refused rather than overwritten, and a `%` in the path is refused because the
 I/O log path expansion would interpret it.
+
+### `-wire`: keeping the raw stream as well
+
+`-wire` additionally writes `session.wire` inside the recording directory: the
+same length-prefixed `ClientMessage` stream logsh would have sent a server,
+which `cmd/wiredump` decodes.
+
+The two forms are not redundant, and which one you want depends on what you are
+looking at:
+
+| | I/O log (`timing`, `ttyout`, `log.json`) | `session.wire` |
+|---|---|---|
+| Written by | `internal/storage`, the server's own code | the client, before anything processes it |
+| Read by | sudoreplay, and anything sudo-compatible | `wiredump` |
+| Streams | split into one file each | interleaved, as produced |
+| Delays | flattened into `timing` | on the message that carries them |
+| `ttyin` | masked by the password filter | **not masked** |
+
+So the I/O log is the artefact for watching a session, and the wire file is the
+artefact for debugging the *recorder* — it shows what the client actually
+produced, which is the only way to tell a recording that was made wrong from one
+that was processed wrong.
+
+Two consequences worth knowing. `session.wire` has not been through the password
+filter, so it can hold a prompt response the finished I/O log masks — treat it as
+more sensitive than the recording beside it. And it sits inside the I/O log
+directory on purpose: sudoreplay reads specific filenames and ignores anything
+else, so the two travel together as one artefact (verified — a capture with
+`-wire` replays identically).
+
+An existing `session.wire` is refused rather than appended to, because appending
+splices two sessions into one stream that decodes cleanly and describes neither.
 
 **`/etc/logsh/logsh.yaml` is never read on this path**, and its absence is not an
 error — the login-shell path treats a missing configuration as a refusal because

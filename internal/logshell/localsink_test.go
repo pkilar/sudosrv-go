@@ -6,12 +6,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"sudosrv/internal/logsrvclient"
+	pb "sudosrv/pkg/sudosrv_proto"
 )
 
 // TestLocalRecordingIsAReplayableSession is the feature in one test: with
@@ -158,4 +163,156 @@ func TestSplitSessionDirIsAbsoluteAndSplit(t *testing.T) {
 	if name != "capture" {
 		t.Errorf("name = %q, want capture", name)
 	}
+}
+
+// readWire decodes a raw copy with the same reader the flush path and
+// cmd/wiredump use, so a file these tests call intact is one the real code can
+// read.
+func readWire(t *testing.T, path string) []*pb.ClientMessage {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening the wire copy: %v", err)
+	}
+	defer f.Close()
+
+	var msgs []*pb.ClientMessage
+	for {
+		msg, err := logsrvclient.ReadMessage(f)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return msgs
+			}
+			t.Fatalf("the wire copy does not decode after %d messages: %v", len(msgs), err)
+		}
+		msgs = append(msgs, msg)
+	}
+}
+
+// TestLocalRecordingAlsoWritesTheWireCopy is the feature: the same session,
+// additionally kept as the raw stream the client produced. It must be the WHOLE
+// stream -- a copy missing the accept has no metadata and one missing the exit
+// cannot say how the session ended, and either would decode without complaint.
+func TestLocalRecordingAlsoWritesTheWireCopy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a shell")
+	}
+	dir := filepath.Join(t.TempDir(), "capture")
+	_, slave := outerTerminal(t)
+
+	cfg := DefaultConfig()
+	cfg.RecordDir = dir
+	cfg.RecordWire = true
+	cfg.LogTTYOut = true
+
+	var userSaw bytes.Buffer
+	inv := Invocation{Name: "sh", Args: []string{"-c", "printf WIRE-MARKER; sleep 1; printf DONE"}}
+	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+		t.Fatalf("RunRecorded: %v", err)
+	}
+
+	// Both forms, side by side. The I/O log is asserted elsewhere; here it only
+	// has to still be there, because the raw copy must be an ADDITION.
+	if _, err := os.Stat(filepath.Join(dir, "timing")); err != nil {
+		t.Errorf("the I/O log is missing alongside the wire copy: %v", err)
+	}
+
+	msgs := readWire(t, filepath.Join(dir, WireFileName))
+	if len(msgs) < 3 {
+		t.Fatalf("the wire copy holds %d messages, too few to be a session", len(msgs))
+	}
+	if msgs[0].GetAcceptMsg() == nil {
+		t.Errorf("the wire copy does not open with an AcceptMessage; %T", msgs[0].Type)
+	}
+	if msgs[len(msgs)-1].GetExitMsg() == nil {
+		t.Errorf("the wire copy does not end with an ExitMessage; %T", msgs[len(msgs)-1].Type)
+	}
+
+	var sawMarker bool
+	var total time.Duration
+	for _, m := range msgs {
+		if b := m.GetTtyoutBuf(); b != nil {
+			total += time.Duration(b.GetDelay().GetTvSec())*time.Second +
+				time.Duration(b.GetDelay().GetTvNsec())
+			if bytes.Contains(b.GetData(), []byte("WIRE-MARKER")) {
+				sawMarker = true
+			}
+		}
+	}
+	if !sawMarker {
+		t.Error("the wire copy does not carry the session output")
+	}
+	// The delays must be the real ones, not zeroes: this file exists to be the
+	// record of what the client produced, timings included.
+	if total < 900*time.Millisecond {
+		t.Errorf("wire delays total %v, want about the 1s the shell slept", total)
+	}
+}
+
+// TestLocalRecordingOmitsTheWireCopyByDefault keeps the raw stream opt-in. It
+// is a second copy of the session, unfiltered and in a format nothing but this
+// project reads, so it should appear only when asked for.
+func TestLocalRecordingOmitsTheWireCopyByDefault(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture")
+	sink, err := newLocalSink(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+
+	if _, err := os.Stat(filepath.Join(dir, WireFileName)); !os.IsNotExist(err) {
+		t.Errorf("a wire copy was created without being asked for: %v", err)
+	}
+}
+
+// TestLocalSinkRefusesToAppendToAWireFile: appending would splice two sessions
+// into one stream that decodes cleanly and describes neither, which is worse
+// than either failing or overwriting because nothing downstream can detect it.
+func TestLocalSinkRefusesToAppendToAWireFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture")
+	first, err := newLocalSink(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newLocalSink(dir, true); err == nil {
+		t.Error("a second recording opened the existing wire file instead of refusing")
+	}
+}
+
+// TestLocalSinkReportsAFailedWireWrite covers the half of this that is easy to
+// get wrong: the I/O log is written by separate code and stays intact, so a
+// broken raw copy has no visible symptom unless it is reported. Finish is where
+// the caller looks.
+func TestLocalSinkReportsAFailedWireWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture")
+	sink, err := newLocalSink(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+
+	// Close the descriptor underneath the tap, which is the shape of any write
+	// failure: the next write fails and every one after it is pointless.
+	if err := sink.wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sink.tap(&pb.ClientMessage{Type: &pb.ClientMessage_TtyoutBuf{
+		TtyoutBuf: &pb.IoBuffer{Delay: spec(0), Data: []byte("x")},
+	}})
+
+	if sink.wireErr == nil {
+		t.Fatal("a failed wire write was not recorded")
+	}
+	if err := sink.Finish(context.Background(), 0); err == nil {
+		t.Error("Finish reported success with an incomplete wire copy")
+	}
+}
+
+func spec(d time.Duration) *pb.TimeSpec {
+	return &pb.TimeSpec{TvSec: int64(d / time.Second), TvNsec: int32(d % time.Second)}
 }
