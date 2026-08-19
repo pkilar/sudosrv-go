@@ -5,6 +5,7 @@
 /sudosrv.exe
 /logsh
 /logsh-linux-*
+/wiredump
 
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
