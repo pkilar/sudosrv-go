@@ -42,8 +42,10 @@ build() {
     # a login shell, so a dynamic linker that cannot resolve it prevents login
     # rather than degrading it.
     export CGO_ENABLED=0
-    go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
-    go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
+    # -X stamps the version the package is being built as, so `-version` and
+    # `pacman -Qi` cannot disagree.
+    go build -ldflags="-s -w -X main.appVersion=${pkgver}" -o sudosrv ./cmd/sudosrv
+    go build -trimpath -ldflags="-s -w -X main.appVersion=${pkgver}" -o logsh ./cmd/logsh
 }
 
 check() {

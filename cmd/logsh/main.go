@@ -27,9 +27,24 @@ import (
 )
 
 const (
-	appName    = "logsh"
-	appVersion = "1.0.0"
+	appName = "logsh"
 )
+
+// versionUnset is what appVersion reads in a build that did not inject one.
+//
+// Deliberately not a number. The version used to be a hardcoded "1.0.0" while
+// the VERSION file said 0.1.0, so `-version` confidently reported something no
+// package had ever shipped. A word cannot be mistaken for a release, which
+// makes an uninjected binary obvious instead of quietly wrong.
+const versionUnset = "dev"
+
+// appVersion is set at build time from the top-level VERSION file:
+//
+//	go build -ldflags "-X main.appVersion=$(cat VERSION)"
+//
+// The Makefile and all three packaging recipes pass it. A var, not a const,
+// because -X can only write to a variable.
+var appVersion = versionUnset
 
 // Exit codes. These apply ONLY before the real shell is exec'd; once logsh
 // hands off, the status the caller sees is the shell's own. That separation is
