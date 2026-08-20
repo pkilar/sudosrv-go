@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Helper to create a standard AcceptMessage for tests
@@ -475,7 +475,7 @@ func TestRelaySession_NoMessageLossUnderCloseRace(t *testing.T) {
 				UpstreamHost:         "127.0.0.1:1", // unreachable
 			}
 
-			sessionUUID := uuid.New()
+			sessionUUID := uuid.NewV4()
 			session, err := NewSession(t.Context(), sessionUUID, createTestAcceptMessage(), relayCfg, nil)
 			if err != nil {
 				t.Fatalf("NewSession: %v", err)
@@ -577,7 +577,7 @@ func TestRelayFinalCommitOnExit(t *testing.T) {
 		UpstreamHost:         "127.0.0.1:0", // never connects; we only exercise HandleClientMessage
 	}
 
-	session, err := NewSession(t.Context(), uuid.New(), createTestAcceptMessage(), relayCfg, nil)
+	session, err := NewSession(t.Context(), uuid.NewV4(), createTestAcceptMessage(), relayCfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
@@ -727,7 +727,7 @@ func TestRelayRestartResumesCachedSession(t *testing.T) {
 	}
 
 	// A restart for an unknown/already-flushed log_id cannot resume locally.
-	goneUUID := uuid.New()
+	goneUUID := uuid.NewV4()
 	gone := base64.StdEncoding.EncodeToString(goneUUID[:])
 	if _, err := NewRestartSession(t.Context(), &pb.RestartMessage{LogId: gone}, cfg, nil); err == nil {
 		t.Error("expected error resuming a relay session with no cache file")

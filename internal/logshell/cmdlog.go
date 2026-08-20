@@ -10,7 +10,7 @@ import (
 	"sudosrv/internal/eventlog"
 	"sync"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // The command log: one syslog record per command executed in the session,
@@ -89,7 +89,7 @@ type CommandLogConfig struct {
 // info key, so a session recorded with the command log switched off still
 // carries the identifier that a later switched-on session would be joined by.
 func OpenCommandLog(cfg *Config, shellPath string) (*CommandLog, error) {
-	c := &CommandLog{sessionID: uuid.NewString(), maxLen: DefaultCommandLogMaxLen}
+	c := &CommandLog{sessionID: uuid.NewV4().String(), maxLen: DefaultCommandLogMaxLen}
 	if !cfg.CommandLog.Enabled {
 		return c, nil
 	}

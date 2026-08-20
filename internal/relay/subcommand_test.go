@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 func subCommandAccept(cmd string) *pb.ClientMessage {
@@ -84,7 +84,7 @@ func TestRelayForwardsSubCommandAccepts(t *testing.T) {
 	cfg.ReconnectAttempts = 3
 	cfg.MaxReconnectInterval = 50 * time.Millisecond
 
-	session, err := NewSession(context.Background(), uuid.New(),
+	session, err := NewSession(context.Background(), uuid.NewV4(),
 		ioAccept().GetAcceptMsg(), cfg, func() {})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -183,7 +183,7 @@ func TestRelayEventOnlyAcceptCachesSubCommandAccepts(t *testing.T) {
 	cfg.ReconnectAttempts = 3
 	cfg.MaxReconnectInterval = 50 * time.Millisecond
 
-	session, err := NewSession(context.Background(), uuid.New(),
+	session, err := NewSession(context.Background(), uuid.NewV4(),
 		eventOnlyAccept().GetAcceptMsg(), cfg, func() {})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -246,7 +246,7 @@ func TestSubCommandAcceptReusesOneJournalAndOneLogID(t *testing.T) {
 		ReconnectAttempts:   1,
 	}
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	s, err := NewSession(context.Background(), sessionUUID, ioAcceptMsg("/bin/ls"), cfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

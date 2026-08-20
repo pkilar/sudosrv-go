@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 type fakeProvider struct {
@@ -19,7 +19,7 @@ func (f *fakeProvider) LiveStats() LiveStats { return f.stats }
 
 func newInfo(t *testing.T, mode string) SessionInfo {
 	t.Helper()
-	id := uuid.New()
+	id := uuid.NewV4()
 	return SessionInfo{
 		SessionID:   id.String(),
 		SessionUUID: id,
@@ -158,7 +158,7 @@ func TestRegistry_Concurrent_RegisterDeregisterSnapshot(t *testing.T) {
 
 	ids := make([]string, writers*opsPerWriter)
 	for i := range ids {
-		ids[i] = uuid.New().String()
+		ids[i] = uuid.NewV4().String()
 	}
 
 	// Writers and readers use separate WaitGroups so we can deterministically
@@ -209,7 +209,7 @@ func TestRegistry_Concurrent_RegisterDeregisterSnapshot(t *testing.T) {
 func BenchmarkRegistry_Snapshot(b *testing.B) {
 	r := NewRegistry()
 	for range 1000 {
-		id := uuid.New()
+		id := uuid.NewV4()
 		r.Register(SessionInfo{SessionID: id.String(), SessionUUID: id, StartedAt: time.Now()})
 	}
 	b.ResetTimer()
@@ -224,7 +224,7 @@ func BenchmarkRegistry_Snapshot(b *testing.B) {
 // logID cannot resolve to a session that has since taken its place.
 func TestRegistry_GetByLogIDIsO1(t *testing.T) {
 	r := NewRegistry()
-	id := uuid.New()
+	id := uuid.NewV4()
 	r.Register(SessionInfo{
 		SessionID:   id.String(),
 		SessionUUID: id,
@@ -267,8 +267,8 @@ func TestRegistry_GetByLogIDIsO1(t *testing.T) {
 // operators want to inspect it.
 func TestRegistry_DuplicateLogIDOverlap(t *testing.T) {
 	r := NewRegistry()
-	idA := uuid.New()
-	idB := uuid.New()
+	idA := uuid.NewV4()
+	idB := uuid.NewV4()
 	const sharedLogID = "shared-log-id"
 
 	r.Register(SessionInfo{
@@ -308,7 +308,7 @@ func TestRegistry_DuplicateLogIDOverlap(t *testing.T) {
 // Sanity: ensure %v formatting of a SessionInfo doesn't panic, useful when
 // tests include diagnostic output.
 func TestSessionInfo_FormatStable(t *testing.T) {
-	id := uuid.New()
+	id := uuid.NewV4()
 	info := &SessionInfo{
 		SessionID:   id.String(),
 		SessionUUID: id,

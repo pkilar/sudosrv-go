@@ -13,7 +13,7 @@ import (
 
 	pb "sudosrv/pkg/sudosrv_proto"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // staleContents is long enough that a truncating open is distinguishable from a
@@ -51,7 +51,7 @@ func TestSessionReusesDirectoryByTruncating(t *testing.T) {
 	cfg, sessionDir := fixedPathConfig(t)
 	plantStaleSession(t, sessionDir, "uuid", "log", "log.json", "timing", "stdout", "stderr", "ttyout", "ttyin")
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	session, err := NewSession(sessionUUID, createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession over a re-used directory: %v", err)
@@ -104,7 +104,7 @@ func TestEventSessionReusesDirectoryByTruncating(t *testing.T) {
 	acceptMsg := createTestAcceptMessage()
 	acceptMsg.ExpectIobufs = false
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	session, err := NewEventSession(sessionUUID, acceptMsg, cfg)
 	if err != nil {
 		t.Fatalf("NewEventSession over a re-used directory: %v", err)
@@ -139,7 +139,7 @@ func TestSessionRootRefusesSymlinkedUUID(t *testing.T) {
 		t.Fatalf("plant symlink: %v", err)
 	}
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSessionReusesDirectoryAfterCompletedSession(t *testing.T) {
 	cfg, sessionDir := fixedPathConfig(t)
 	plantCompletedSession(t, sessionDir, "uuid", "log", "log.json", "timing", "stdout", "stderr", "ttyout", "ttyin")
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	session, err := NewSession(sessionUUID, createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession over a completed re-used directory: %v", err)
@@ -237,7 +237,7 @@ func TestSessionReusesReadOnlyStreamFile(t *testing.T) {
 		t.Fatalf("make ttyin read-only: %v", err)
 	}
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestSessionRootRefusesReadOnlySymlinkedTiming(t *testing.T) {
 		t.Fatalf("plant symlink: %v", err)
 	}
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

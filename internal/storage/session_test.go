@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Helper to create a standard AcceptMessage for tests
@@ -1684,7 +1684,7 @@ func TestBuildSessionPathRejectsDotDotAfterExpansion(t *testing.T) {
 		t.Fatal("test setup failed: submituser info message not found")
 	}
 
-	_, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	_, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
 	if err == nil {
 		t.Fatal("expected path traversal error for submituser='..'")
 	}
@@ -1711,7 +1711,7 @@ func TestStorageSessionCommitPoints(t *testing.T) {
 		FilePermissions: 0644,
 	}
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), storageCfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), storageCfg)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}
@@ -1855,7 +1855,7 @@ func TestIologEscapeParity(t *testing.T) {
 		},
 	}
 
-	got, err := buildSessionPath(uuid.New(), cfg, acceptMsg)
+	got, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
 	if err != nil {
 		t.Fatalf("buildSessionPath() failed: %v", err)
 	}
@@ -1900,7 +1900,7 @@ func TestRestartResumeSeek(t *testing.T) {
 	// the log_id and session dir.
 	seed := func(t *testing.T, cfg *config.LocalStorageConfig) (string, string) {
 		t.Helper()
-		s, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+		s, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 		if err != nil {
 			t.Fatalf("NewSession: %v", err)
 		}
@@ -2071,7 +2071,7 @@ func TestLogJSONTimestampIsClientSubmitTime(t *testing.T) {
 	// the log_id, so a session is not usable until it has seen one.
 	start := func(t *testing.T, cfg *config.LocalStorageConfig) *Session {
 		t.Helper()
-		s, err := NewSession(uuid.New(), acceptAt(), cfg)
+		s, err := NewSession(uuid.NewV4(), acceptAt(), cfg)
 		if err != nil {
 			t.Fatalf("NewSession: %v", err)
 		}
@@ -2171,7 +2171,7 @@ func TestLogSummaryFileInjection(t *testing.T) {
 		},
 	}
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	session, err := NewSession(sessionUUID, acceptMsg, cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Sink is where a session's messages go. Two implementations exist and the
@@ -204,7 +204,7 @@ func newJournalSink(dir string, cfg *Config) (*journalSink, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("create journal directory %s: %w", dir, err)
 	}
-	path := filepath.Join(dir, JournalPrefix+uuid.NewString()+JournalSuffix)
+	path := filepath.Join(dir, JournalPrefix+uuid.NewV4().String()+JournalSuffix)
 
 	// 0600: a journal is a verbatim transcript of a privileged session, so it
 	// must not be readable by other users even while it sits in a shared spool.

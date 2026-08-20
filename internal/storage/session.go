@@ -30,8 +30,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -776,6 +776,15 @@ func createSessionDir(path string, perm os.FileMode) (string, error) {
 // and previously open-coded it. Two copies of a directory layout is the kind of
 // duplication that stays correct right up until one of them is changed, at which
 // point reject records quietly stop landing beside the sessions they relate to.
+// The first six hex digits are the first 24 BITS of the UUID, so this only
+// spreads sessions if those bits are random. That is why every session UUID is
+// minted with uuid.NewV4 rather than uuid.New: the standard library documents
+// New as "at this time" equivalent to NewV4, and a future release is free to
+// make it version 7 instead. A v7 UUID opens with the top bits of a
+// millisecond timestamp, which change roughly every 4.7 hours -- every session
+// recorded in that window would land in ONE directory, which is the exact
+// pileup this hierarchy exists to avoid. Guarded by
+// TestUUIDHierarchySpreadsSessions.
 func UUIDHierarchyPath(logDirectory string, sessionUUID uuid.UUID) string {
 	sessID := sessionUUID.String()[:6]
 	return filepath.Join(logDirectory, sessID[:2], sessID[2:4], sessID[4:6])

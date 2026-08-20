@@ -15,7 +15,7 @@ import (
 
 	"sudosrv/internal/config"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // templateConfig builds a local-storage config whose iolog_file ends in the
@@ -56,12 +56,12 @@ func isExpandedSuffix(s string) bool {
 func TestSessionPathMkdtempTemplateIsUnique(t *testing.T) {
 	cfg, parent := templateConfig(t, "XXXXXX")
 
-	first, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	first, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession (first): %v", err)
 	}
 	defer first.Close()
-	second, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	second, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession (second): %v", err)
 	}
@@ -101,12 +101,12 @@ func TestEventSessionPathMkdtempTemplateIsUnique(t *testing.T) {
 	acceptMsg := createTestAcceptMessage()
 	acceptMsg.ExpectIobufs = false
 
-	first, err := NewEventSession(uuid.New(), acceptMsg, cfg)
+	first, err := NewEventSession(uuid.NewV4(), acceptMsg, cfg)
 	if err != nil {
 		t.Fatalf("NewEventSession (first): %v", err)
 	}
 	defer first.Close()
-	second, err := NewEventSession(uuid.New(), acceptMsg, cfg)
+	second, err := NewEventSession(uuid.NewV4(), acceptMsg, cfg)
 	if err != nil {
 		t.Fatalf("NewEventSession (second): %v", err)
 	}
@@ -123,7 +123,7 @@ func TestEventSessionPathMkdtempTemplateIsUnique(t *testing.T) {
 func TestSessionPathMkdtempKeepsPrefixAndExtraXs(t *testing.T) {
 	cfg, parent := templateConfig(t, "run-XXXXXXXX")
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSessionPathMkdtempKeepsPrefixAndExtraXs(t *testing.T) {
 func TestSessionPathWithoutTemplateIsUnchanged(t *testing.T) {
 	cfg, parent := templateConfig(t, "XXXXX")
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

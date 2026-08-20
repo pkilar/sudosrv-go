@@ -11,7 +11,7 @@ import (
 	"sudosrv/internal/config"
 	pb "sudosrv/pkg/sudosrv_proto"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // logSummaryLines writes a session for the given command/runargv and returns the
@@ -32,7 +32,7 @@ func logSummaryLines(t *testing.T, command string, runargv []string) []string {
 	}
 
 	cfg := &config.LocalStorageConfig{LogDirectory: t.TempDir()}
-	sess, err := NewSession(uuid.New(), accept, cfg)
+	sess, err := NewSession(uuid.NewV4(), accept, cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestLogSummaryDefaultsTerminalSize(t *testing.T) {
 	accept.InfoMsgs = kept
 
 	cfg := &config.LocalStorageConfig{LogDirectory: t.TempDir()}
-	sess, err := NewSession(uuid.New(), accept, cfg)
+	sess, err := NewSession(uuid.NewV4(), accept, cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 	"sudosrv/internal/storage"
 	pb "sudosrv/pkg/sudosrv_proto"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // localSink writes a session straight to a sudoreplay-compatible directory on
@@ -197,7 +197,7 @@ func (l *localSink) Start(_ context.Context, accept *pb.ClientMessage) (string, 
 		return "", fmt.Errorf("first message is not an AcceptMessage")
 	}
 	l.tap(accept)
-	session, err := storage.NewSession(uuid.New(), msg, l.cfg)
+	session, err := storage.NewSession(uuid.NewV4(), msg, l.cfg)
 	if err != nil {
 		return "", fmt.Errorf("creating the recording in %s: %w", l.dir, err)
 	}

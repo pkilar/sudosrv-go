@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // Handler manages a single client connection.
@@ -813,7 +813,7 @@ func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, 
 	// storage.buildSessionPath: an iolog_dir template can reference %{command}
 	// and %{runuser}, and a rejected command has no run identity to expand them
 	// from. Sharing the layout while not sharing the templating is the point.
-	rejectUUID := uuid.New()
+	rejectUUID := uuid.NewV4()
 	rejectDir := storage.UUIDHierarchyPath(h.config.LocalStorage.LogDirectory, rejectUUID)
 
 	if err := os.MkdirAll(rejectDir, os.FileMode(h.config.LocalStorage.EffectiveDirMode())); err != nil {
@@ -920,7 +920,7 @@ func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, 
 		}
 	}
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	h.logID = sessionUUID.String() // Store UUID string for logging
 	// Retained so the ExitMessage, which carries no identifying fields of its
 	// own, can be logged against the command it belongs to.
