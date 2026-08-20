@@ -13,7 +13,7 @@ import (
 	"sudosrv/internal/config"
 	pb "sudosrv/pkg/sudosrv_proto"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // fixedPathConfig returns a config whose session directory is fully
@@ -55,7 +55,7 @@ func acceptClientMsg() *pb.ClientMessage {
 func TestSessionRootPinsDirectoryAgainstSwap(t *testing.T) {
 	cfg, sessionDir := fixedPathConfig(t)
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSessionRootRefusesSymlinkedLogJSONTmp(t *testing.T) {
 		t.Fatalf("plant symlink: %v", err)
 	}
 
-	session, err := NewSession(uuid.New(), createTestAcceptMessage(), cfg)
+	session, err := NewSession(uuid.NewV4(), createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRestartSessionRefusesSymlinkedStream(t *testing.T) {
 		FilePermissions: 0640,
 	}
 
-	sessionUUID := uuid.New()
+	sessionUUID := uuid.NewV4()
 	session, err := NewSession(sessionUUID, createTestAcceptMessage(), cfg)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

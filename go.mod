@@ -4,7 +4,6 @@ module sudosrv
 go 1.27
 
 require (
-	github.com/google/uuid v1.6.0
 	go.uber.org/goleak v1.3.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1

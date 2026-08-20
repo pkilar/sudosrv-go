@@ -12,7 +12,7 @@ import (
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // failAfterConnectServer accepts connections, completes the ServerHello
@@ -98,7 +98,7 @@ func TestRelayFlushFailureIsThrottled(t *testing.T) {
 		UpstreamHost:         upstream.Addr(),
 	}
 
-	session, err := NewSession(t.Context(), uuid.New(), createTestAcceptMessage(), cfg, nil)
+	session, err := NewSession(t.Context(), uuid.NewV4(), createTestAcceptMessage(), cfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession() failed: %v", err)
 	}

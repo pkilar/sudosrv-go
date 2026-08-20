@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // SessionInfo is the registry record for one active session. Static fields are

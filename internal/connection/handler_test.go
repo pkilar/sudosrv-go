@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // mockSessionHandler is a mock implementation of the SessionHandler interface for testing.

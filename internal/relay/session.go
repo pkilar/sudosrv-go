@@ -21,8 +21,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 

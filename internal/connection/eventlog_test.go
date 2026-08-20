@@ -12,7 +12,7 @@ import (
 	pb "sudosrv/pkg/sudosrv_proto"
 	"testing"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // eventLogToFile points the process-wide event logger at a temp file for the
