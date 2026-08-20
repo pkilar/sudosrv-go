@@ -64,8 +64,8 @@ func NewServer(cfg *config.Config, configPath string, logLevel *slog.LevelVar) (
 		registry:   sessions.NewRegistry(),
 	}
 	s.config.Store(cfg)
-	if max := cfg.Server.MaxConnections; max > 0 {
-		s.connSem = make(chan struct{}, max)
+	if maxConns := cfg.Server.MaxConnections; maxConns > 0 {
+		s.connSem = make(chan struct{}, maxConns)
 	}
 	return s, nil
 }

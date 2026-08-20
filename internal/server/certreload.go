@@ -97,7 +97,9 @@ func (r *keyPairReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate
 	// stat and the read is caught by the next handshake instead of being
 	// recorded as the current generation.
 	certStamp, keyStamp := statStamp(r.certFile), statStamp(r.keyFile)
-	if certStamp.exists && keyStamp.exists && certStamp == r.certStamp && keyStamp == r.keyStamp {
+	bothPresent := certStamp.exists && keyStamp.exists
+	unchanged := certStamp == r.certStamp && keyStamp == r.keyStamp
+	if bothPresent && unchanged {
 		return r.cert, nil
 	}
 

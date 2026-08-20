@@ -208,7 +208,7 @@ func setupStructuredLogging(cfg *config.Config, logLevelOverride string) (*slog.
 	handlerOpts := &slog.HandlerOptions{
 		Level:     logLevel,
 		AddSource: parsedLevel <= slog.LevelDebug, // Add source info for debug level
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				if t, ok := a.Value.Any().(time.Time); ok {
 					a.Value = slog.StringValue(t.Format(time.RFC3339))
