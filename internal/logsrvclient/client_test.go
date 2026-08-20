@@ -3,7 +3,6 @@
 package logsrvclient
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net"
@@ -75,7 +74,7 @@ func TestConnectAnnouncesTheConfiguredClientID(t *testing.T) {
 		<-stop
 	})
 
-	proc, err := Connect(context.Background(), Config{
+	proc, err := Connect(t.Context(), Config{
 		ClientID:       "TestClient/9.9",
 		UpstreamHost:   addr,
 		ConnectTimeout: 5 * time.Second,
@@ -115,14 +114,14 @@ func TestReadAckWithoutWaitCommitReturnsOnTheFirstMessage(t *testing.T) {
 
 	cfg := Config{ClientID: "t", UpstreamHost: addr, ConnectTimeout: 5 * time.Second,
 		ResponseTimeout: 2 * time.Second}
-	proc, err := Connect(context.Background(), cfg)
+	proc, err := Connect(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer func() { _ = proc.Close() }()
 
 	done := make(chan error, 1)
-	go func() { done <- ReadAck(context.Background(), proc, cfg, false) }()
+	go func() { done <- ReadAck(t.Context(), proc, cfg, false) }()
 
 	select {
 	case err := <-done:
@@ -148,13 +147,13 @@ func TestReadAckTreatsAnErrorReplyAsDefinitive(t *testing.T) {
 
 	cfg := Config{ClientID: "t", UpstreamHost: addr, ConnectTimeout: 5 * time.Second,
 		ResponseTimeout: 2 * time.Second}
-	proc, err := Connect(context.Background(), cfg)
+	proc, err := Connect(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer func() { _ = proc.Close() }()
 
-	err = ReadAck(context.Background(), proc, cfg, true)
+	err = ReadAck(t.Context(), proc, cfg, true)
 	if !errors.Is(err, ErrUpstreamRejected) {
 		t.Errorf("ReadAck on an error reply = %v, want it to wrap ErrUpstreamRejected", err)
 	}
@@ -175,13 +174,13 @@ func TestReadAckTreatsEOFAsFailure(t *testing.T) {
 
 	cfg := Config{ClientID: "t", UpstreamHost: addr, ConnectTimeout: 5 * time.Second,
 		ResponseTimeout: 2 * time.Second}
-	proc, err := Connect(context.Background(), cfg)
+	proc, err := Connect(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer func() { _ = proc.Close() }()
 
-	err = ReadAck(context.Background(), proc, cfg, true)
+	err = ReadAck(t.Context(), proc, cfg, true)
 	if err == nil {
 		t.Fatal("a clean EOF was accepted as an acknowledgement; the caller would retire a " +
 			"journal the server never persisted")

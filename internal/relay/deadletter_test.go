@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"errors"
 	"os"
 	"sudosrv/internal/protocol"
@@ -64,7 +63,7 @@ func TestRejectedOrphanIsParkedNotRetried(t *testing.T) {
 	path := writeCacheFile(t, ioAccept(), exitMsg())
 	cfg := durabilityConfig(rejectingUpstream(t))
 
-	err := FlushOrphanedFile(context.Background(), path, cfg)
+	err := FlushOrphanedFile(t.Context(), path, cfg)
 	if err == nil {
 		t.Fatal("FlushOrphanedFile reported success although the upstream refused the session")
 	}

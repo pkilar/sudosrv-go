@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,7 +41,7 @@ func TestLocalRecordingIsAReplayableSession(t *testing.T) {
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf LOCAL-MARKER; sleep 1; printf DONE"}}
 
 	started := time.Now()
-	outcome, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
@@ -120,7 +119,7 @@ func TestLocalRecordingNeedsNoServer(t *testing.T) {
 	cfg.RecordDir = filepath.Join(t.TempDir(), "capture")
 	cfg.Server.UpstreamHost = "127.0.0.1:1"
 
-	sink, err := OpenSink(context.Background(), cfg)
+	sink, err := OpenSink(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("OpenSink with RecordDir set: %v", err)
 	}
@@ -207,7 +206,7 @@ func TestLocalRecordingAlsoWritesTheWireCopy(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf WIRE-MARKER; sleep 1; printf DONE"}}
-	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -308,7 +307,7 @@ func TestLocalSinkReportsAFailedWireWrite(t *testing.T) {
 	if sink.wireErr == nil {
 		t.Fatal("a failed wire write was not recorded")
 	}
-	if err := sink.Finish(context.Background(), 0); err == nil {
+	if err := sink.Finish(t.Context(), 0); err == nil {
 		t.Error("Finish reported success with an incomplete wire copy")
 	}
 }

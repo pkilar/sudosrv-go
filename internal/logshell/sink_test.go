@@ -82,7 +82,7 @@ func TestJournalledSessionSurvivesAServerOutage(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'WORK-GOT-DONE\\n'; exit 3"}}
 
-	outcome, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 
 	// The shell must have run to completion with its real exit status.
@@ -131,7 +131,7 @@ func TestJournalledSessionIsDeliveredAndRemoved(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'SPOOLED\\n'"}}
-	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestStreamingFallbackWhenSpoolIsUnusable(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'STREAMED\\n'"}}
-	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("an unwritable spool should fall back to the server, got: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestFailClosedRequiresBothPathsToFail(t *testing.T) {
 	cfg.Server.JournalDirectory = filepath.Join(locked, "spool")
 
 	var userSaw bytes.Buffer
-	_, err := RunRecorded(context.Background(), cfg,
+	_, err := RunRecorded(t.Context(), cfg,
 		Invocation{Name: "lsh", Args: []string{"-c", "true"}}, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err == nil {
@@ -238,7 +238,7 @@ func TestBufferedSinkDeliversEverythingBeforeFinish(t *testing.T) {
 	cfg := testConfig(srv.addr)
 	cfg.Server.JournalDirectory = t.TempDir()
 
-	rec, err := StartRecorder(context.Background(), cfg,
+	rec, err := StartRecorder(t.Context(), cfg,
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
@@ -256,7 +256,7 @@ func TestBufferedSinkDeliversEverythingBeforeFinish(t *testing.T) {
 			t.Fatalf("TTYOut %d: %v", i, err)
 		}
 	}
-	if err := rec.Exit(context.Background(), 0, "", false); err != nil {
+	if err := rec.Exit(t.Context(), 0, "", false); err != nil {
 		t.Fatalf("Exit: %v", err)
 	}
 
@@ -285,7 +285,7 @@ func TestFlushJournalRefusesAJournalWithNoExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sink.Start(context.Background(), acceptFor(t)); err != nil {
+	if _, err := sink.Start(t.Context(), acceptFor(t)); err != nil {
 		t.Fatal(err)
 	}
 	path := sink.path
@@ -294,7 +294,7 @@ func TestFlushJournalRefusesAJournalWithNoExit(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- FlushJournal(context.Background(), path, cfg) }()
+	go func() { done <- FlushJournal(t.Context(), path, cfg) }()
 
 	select {
 	case err := <-done:
@@ -351,7 +351,7 @@ func TestBufferedSinkBlocksRatherThanDropping(t *testing.T) {
 			t.Fatalf("Send: %v", err)
 		}
 	}
-	if err := b.Finish(context.Background(), 0); err != nil {
+	if err := b.Finish(t.Context(), 0); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -401,7 +401,7 @@ func TestCorruptJournalIsKeptNotDeleted(t *testing.T) {
 	// A plausible length prefix followed by bytes that are not a protobuf.
 	path := writeJournal(t, dir, []byte{0, 0, 0, 8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
 
-	err := FlushJournal(context.Background(), path, cfg)
+	err := FlushJournal(t.Context(), path, cfg)
 	if err == nil {
 		t.Fatal("a corrupt journal was reported as delivered")
 	}
@@ -428,7 +428,7 @@ func TestTruncatedJournalIsKeptNotDeleted(t *testing.T) {
 	full := framed(t, acceptFor(t), exitMsg())
 	path := writeJournal(t, dir, full[:len(full)-5]) // chop the tail
 
-	err := FlushJournal(context.Background(), path, cfg)
+	err := FlushJournal(t.Context(), path, cfg)
 	if !errors.Is(err, ErrJournalCorrupt) {
 		t.Fatalf("error = %v, want ErrJournalCorrupt for a truncated journal", err)
 	}
@@ -445,7 +445,7 @@ func TestMetadataJournalWithoutAnAcceptIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJournal(t, dir, framed(t, exitMsg())) // no AcceptMessage at all
 
-	err := FlushJournal(context.Background(), path, cfg)
+	err := FlushJournal(t.Context(), path, cfg)
 	if !errors.Is(err, ErrJournalCorrupt) {
 		t.Fatalf("error = %v, want ErrJournalCorrupt for a journal with no AcceptMessage", err)
 	}
@@ -512,7 +512,7 @@ func TestLostAcknowledgementDoesNotReplay(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJournal(t, dir, framed(t, acceptFor(t), exitMsg()))
 
-	err = flushWithBudget(context.Background(), path, cfg, journalRetryBudget)
+	err = flushWithBudget(t.Context(), path, cfg, journalRetryBudget)
 	if err == nil {
 		t.Fatal("a session that was never acknowledged was reported as delivered")
 	}
@@ -541,7 +541,7 @@ func TestConnectFailureIsRetried(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJournal(t, dir, framed(t, acceptFor(t), exitMsg()))
 
-	err := flushWithBudget(context.Background(), path, cfg, 300*time.Millisecond)
+	err := flushWithBudget(t.Context(), path, cfg, 300*time.Millisecond)
 	if err == nil {
 		t.Fatal("flush succeeded with no server")
 	}
@@ -574,7 +574,7 @@ func TestGarbageAfterAValidExitIsNotSilentlyDropped(t *testing.T) {
 	body = append(body, 0, 0, 0, 4, 0xff, 0xff, 0xff) // a length prefix and a short, invalid tail
 	path := writeJournal(t, dir, body)
 
-	err := FlushJournal(context.Background(), path, cfg)
+	err := FlushJournal(t.Context(), path, cfg)
 	if err == nil {
 		t.Fatal("a journal with a corrupt tail was reported as delivered and removed")
 	}
@@ -649,7 +649,7 @@ func TestExitWaitsForTheFinalCommitPoint(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close(); <-done })
 
 	cfg := testConfig(ln.Addr().String())
-	rec, err := StartRecorder(context.Background(), cfg,
+	rec, err := StartRecorder(t.Context(), cfg,
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
@@ -663,7 +663,7 @@ func TestExitWaitsForTheFinalCommitPoint(t *testing.T) {
 	<-time.After(150 * time.Millisecond)
 
 	start := time.Now()
-	if err := rec.Exit(context.Background(), 0, "", false); err != nil {
+	if err := rec.Exit(t.Context(), 0, "", false); err != nil {
 		t.Fatalf("Exit: %v", err)
 	}
 	waited := time.Since(start)

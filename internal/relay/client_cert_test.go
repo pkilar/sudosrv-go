@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -176,7 +175,7 @@ func TestRelayPresentsClientCertificateToUpstream(t *testing.T) {
 	}
 
 	t.Run("WithoutClientCertTheUpstreamRejectsUs", func(t *testing.T) {
-		proc, err := connectToUpstream(context.Background(), base())
+		proc, err := connectToUpstream(t.Context(), base())
 		if err == nil {
 			_ = proc.Close()
 			t.Error("connected to an upstream requiring client certs while presenting none; " +
@@ -188,7 +187,7 @@ func TestRelayPresentsClientCertificateToUpstream(t *testing.T) {
 		cfg := base()
 		cfg.TLSCertFile = f.cliCert
 		cfg.TLSKeyFile = f.cliKey
-		proc, err := connectToUpstream(context.Background(), cfg)
+		proc, err := connectToUpstream(t.Context(), cfg)
 		if err != nil {
 			t.Fatalf("relay could not authenticate to the upstream with a valid client cert: %v", err)
 		}
@@ -203,7 +202,7 @@ func TestRelayPresentsClientCertificateToUpstream(t *testing.T) {
 		cfg.TLSCACertFile = ""
 		cfg.TLSCertFile = f.cliCert
 		cfg.TLSKeyFile = f.cliKey
-		proc, err := connectToUpstream(context.Background(), cfg)
+		proc, err := connectToUpstream(t.Context(), cfg)
 		if err == nil {
 			_ = proc.Close()
 			t.Error("a privately-signed upstream verified against the system trust store")
@@ -213,7 +212,7 @@ func TestRelayPresentsClientCertificateToUpstream(t *testing.T) {
 	t.Run("UnreadableCABundleIsAnError", func(t *testing.T) {
 		cfg := base()
 		cfg.TLSCACertFile = filepath.Join(t.TempDir(), "absent.pem")
-		if _, err := connectToUpstream(context.Background(), cfg); err == nil {
+		if _, err := connectToUpstream(t.Context(), cfg); err == nil {
 			t.Error("a missing relay CA bundle was accepted; it would silently fall back to " +
 				"the system trust store")
 		}

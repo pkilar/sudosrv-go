@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"path/filepath"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
@@ -84,7 +83,7 @@ func TestRelayForwardsSubCommandAccepts(t *testing.T) {
 	cfg.ReconnectAttempts = 3
 	cfg.MaxReconnectInterval = 50 * time.Millisecond
 
-	session, err := NewSession(context.Background(), uuid.NewV4(),
+	session, err := NewSession(t.Context(), uuid.NewV4(),
 		ioAccept().GetAcceptMsg(), cfg, func() {})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -183,7 +182,7 @@ func TestRelayEventOnlyAcceptCachesSubCommandAccepts(t *testing.T) {
 	cfg.ReconnectAttempts = 3
 	cfg.MaxReconnectInterval = 50 * time.Millisecond
 
-	session, err := NewSession(context.Background(), uuid.NewV4(),
+	session, err := NewSession(t.Context(), uuid.NewV4(),
 		eventOnlyAccept().GetAcceptMsg(), cfg, func() {})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -247,7 +246,7 @@ func TestSubCommandAcceptReusesOneJournalAndOneLogID(t *testing.T) {
 	}
 
 	sessionUUID := uuid.NewV4()
-	s, err := NewSession(context.Background(), sessionUUID, ioAcceptMsg("/bin/ls"), cfg, nil)
+	s, err := NewSession(t.Context(), sessionUUID, ioAcceptMsg("/bin/ls"), cfg, nil)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

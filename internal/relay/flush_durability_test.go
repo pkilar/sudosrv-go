@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -66,6 +65,12 @@ func durabilityConfig(addr string) *config.RelayConfig {
 	return &config.RelayConfig{
 		UpstreamHost:   addr,
 		ConnectTimeout: 2 * time.Second,
+		// Without this the flush falls back to operationTimeout's 30s, and
+		// TestFlushRequiresUpstreamCommitBeforeRetiringCache waits it out in
+		// full -- 30s of this package's runtime spent on a value that test
+		// never asserts. The 30s default stays pinned by
+		// TestResponseTimeoutFallback, which checks it directly.
+		ResponseTimeout: 2 * time.Second,
 	}
 }
 
@@ -117,7 +122,7 @@ func exitMsg() *pb.ClientMessage {
 
 func flushCache(t *testing.T, path string, cfg *config.RelayConfig) error {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	proc, err := connectToUpstream(ctx, cfg)
 	if err != nil {
 		t.Fatalf("connectToUpstream: %v", err)

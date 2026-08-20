@@ -1172,7 +1172,7 @@ func TestWaitForRateToken(t *testing.T) {
 	}
 	start := time.Now()
 	for range sampleBurst {
-		if err := h.waitForRateToken(context.Background()); err != nil {
+		if err := h.waitForRateToken(t.Context()); err != nil {
 			t.Fatalf("unexpected error draining burst: %v", err)
 		}
 	}
@@ -1198,7 +1198,7 @@ func TestWaitForRateToken(t *testing.T) {
 	// one token is back in 1/rateRefillPerSec seconds, which is tens of
 	// microseconds and not something a wall-clock comparison can measure
 	// reliably on a loaded machine.
-	if err := h.waitForRateToken(context.Background()); err != nil {
+	if err := h.waitForRateToken(t.Context()); err != nil {
 		t.Fatalf("expected back-pressure (block then succeed), got error: %v", err)
 	}
 
