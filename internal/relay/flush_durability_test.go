@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,7 +116,7 @@ func exitMsg() *pb.ClientMessage {
 
 func flushCache(t *testing.T, path string, cfg *config.RelayConfig) error {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	proc, err := connectToUpstream(ctx, cfg)
 	if err != nil {
 		t.Fatalf("connectToUpstream: %v", err)

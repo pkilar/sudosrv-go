@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net"
@@ -186,7 +185,7 @@ func TestRunRecordedCapturesOutputAndExitStatus(t *testing.T) {
 	inv := Invocation{Name: "lsh", LoginShell: true,
 		Args: []string{"-c", "printf 'HELLO-FROM-SHELL\\n'; exit 7"}}
 
-	outcome, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
+	outcome, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
@@ -234,7 +233,7 @@ func TestRunRecordedCapturesInput(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'got:%s\\n' \"$line\""}}
 
-	if _, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -266,7 +265,7 @@ func TestRunRecordedRespectsStreamToggles(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'ok\\n'"}}
-	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -289,7 +288,7 @@ func TestRunRecordedReportsSignalDeath(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "kill -TERM $$"}}
 
-	outcome, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
+	outcome, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
@@ -369,7 +368,7 @@ func TestRunRecordedFailsBeforeSpawningShell(t *testing.T) {
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "touch " + marker + "; sleep 30"}}
 
 	var userSaw bytes.Buffer
-	_, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	_, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err == nil {
 		t.Fatal("RunRecorded succeeded although the server never acknowledged the session")
@@ -392,7 +391,7 @@ func TestRecorderDelaysAreDeltas(t *testing.T) {
 	srv := newMockServer(t)
 
 	cfg := testConfig(srv.addr)
-	rec, err := StartRecorder(context.Background(), cfg,
+	rec, err := StartRecorder(t.Context(), cfg,
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
@@ -410,7 +409,7 @@ func TestRecorderDelaysAreDeltas(t *testing.T) {
 	if err := rec.TTYOut([]byte("b")); err != nil {
 		t.Fatal(err)
 	}
-	if err := rec.Exit(context.Background(), 0, "", false); err != nil {
+	if err := rec.Exit(t.Context(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 

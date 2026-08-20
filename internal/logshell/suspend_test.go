@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
 )
@@ -18,7 +17,7 @@ import (
 // transcript rather than the single event.
 func TestRecorderSuspendRejectsUnknownSignalNames(t *testing.T) {
 	srv := newMockServer(t)
-	rec, err := StartRecorder(context.Background(), testConfig(srv.addr),
+	rec, err := StartRecorder(t.Context(), testConfig(srv.addr),
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
@@ -48,7 +47,7 @@ func TestRecorderSuspendRejectsUnknownSignalNames(t *testing.T) {
 // with the bare name.
 func TestRecorderSuspendRoundTrips(t *testing.T) {
 	srv := newMockServer(t)
-	rec, err := StartRecorder(context.Background(), testConfig(srv.addr),
+	rec, err := StartRecorder(t.Context(), testConfig(srv.addr),
 		CollectMeta("/dev/pts/99", WinSize{Rows: 24, Cols: 80}, "/bin/sh", []string{"-sh"}))
 	if err != nil {
 		t.Fatalf("StartRecorder: %v", err)
@@ -61,7 +60,7 @@ func TestRecorderSuspendRoundTrips(t *testing.T) {
 	if err := rec.Suspend("CONT"); err != nil {
 		t.Fatal(err)
 	}
-	if err := rec.Exit(context.Background(), 0, "", false); err != nil {
+	if err := rec.Exit(t.Context(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,7 +97,7 @@ func TestRecordsBinaryDataVerbatim(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf '" + sb.String() + "'"}}
-	if _, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -146,7 +145,7 @@ func TestRecordsHugeOutputWithoutLoss(t *testing.T) {
 		"i=0; while [ $i -lt " + itoa(lines) + " ]; do printf '0123456789abcdefghijklmnopqrstuvwxyz012345678901234567890123\\n'; i=$((i+1)); done"}}
 
 	var userSaw bytes.Buffer
-	if _, err := RunRecorded(context.Background(), testConfig(srv.addr), inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}

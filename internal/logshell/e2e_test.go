@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -171,7 +170,7 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 	inv := Invocation{Name: "lbash", LoginShell: true,
 		Args: []string{"-c", "printf 'END-TO-END-MARKER\\n'; exit 9"}}
 
-	outcome, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil)
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
@@ -294,7 +293,7 @@ func TestEndToEndNonInteractiveSessionIsMetadataOnly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = RunNonInteractive(context.Background(), cfg,
+		_, _ = RunNonInteractive(t.Context(), cfg,
 			Invocation{Name: "lsh", Args: []string{"-c", "true"}}, "/bin/sh",
 			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 	}()

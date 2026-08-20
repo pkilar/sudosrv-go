@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,7 +67,7 @@ func TestBurstOfOutputIsNotThrottled(t *testing.T) {
 		Args: []string{"-c", "seq 1 200000"}}
 
 	started := time.Now()
-	if _, err := RunRecorded(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
 		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}

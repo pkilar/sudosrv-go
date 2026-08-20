@@ -3,7 +3,6 @@
 package logshell
 
 import (
-	"context"
 	"os"
 	"strings"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -79,7 +78,7 @@ func TestNonInteractiveDoesNotWaitForAnAcknowledgement(t *testing.T) {
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
-		out, _ := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
+		out, _ := RunNonInteractive(t.Context(), cfg, inv, "/bin/sh",
 			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 		done <- out
 	}()
@@ -117,7 +116,7 @@ func TestNonInteractiveRecordsTheCommandLine(t *testing.T) {
 	rIn := emptyStdin(t)
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "scp -t /tmp/incoming"}}
-	if _, err := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunNonInteractive(t.Context(), cfg, inv, "/bin/sh",
 		StdIO{In: rIn, Out: wOut, Err: wOut}, nil); err != nil {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
@@ -162,7 +161,7 @@ func TestNonInteractivePassesStreamsThroughUntouched(t *testing.T) {
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
-		_, _ = RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
+		_, _ = RunNonInteractive(t.Context(), cfg, inv, "/bin/sh",
 			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 		_ = wOut.Close()
 	}()
@@ -203,7 +202,7 @@ func TestNonInteractiveStreamTogglesPromoteToAnIOSession(t *testing.T) {
 	rIn := emptyStdin(t)
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'CAPTURED-STDOUT\\n'"}}
-	if _, err := RunNonInteractive(context.Background(), cfg, inv, "/bin/sh",
+	if _, err := RunNonInteractive(t.Context(), cfg, inv, "/bin/sh",
 		StdIO{In: rIn, Out: wOut, Err: wOut}, nil); err != nil {
 		t.Fatalf("RunNonInteractive: %v", err)
 	}
@@ -227,7 +226,7 @@ func TestNonInteractiveReportsExitStatus(t *testing.T) {
 	_, wOut := pipes(t)
 	rIn := emptyStdin(t)
 
-	outcome, err := RunNonInteractive(context.Background(), cfg,
+	outcome, err := RunNonInteractive(t.Context(), cfg,
 		Invocation{Name: "lsh", Args: []string{"-c", "exit 42"}}, "/bin/sh",
 		StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
 	if err != nil {

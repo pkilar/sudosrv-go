@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"context"
 	"errors"
 	"net"
 	"os"
@@ -51,7 +50,7 @@ func TestRequireUpstreamRejectsWhenUnreachable(t *testing.T) {
 			ConnectTimeout:      durabilityConfig("x").ConnectTimeout,
 			// RequireUpstream defaults to false.
 		}
-		s, err := NewSession(context.Background(), uuid.NewV4(), acceptMsg, cfg, func() {})
+		s, err := NewSession(t.Context(), uuid.NewV4(), acceptMsg, cfg, func() {})
 		if err != nil {
 			t.Fatalf("default relay must accept the session and spool it, got: %v", err)
 		}
@@ -70,7 +69,7 @@ func TestRequireUpstreamRejectsWhenUnreachable(t *testing.T) {
 			ConnectTimeout:      durabilityConfig("x").ConnectTimeout,
 			RequireUpstream:     true,
 		}
-		_, err := NewSession(context.Background(), uuid.NewV4(), acceptMsg, cfg, func() {})
+		_, err := NewSession(t.Context(), uuid.NewV4(), acceptMsg, cfg, func() {})
 		if err == nil {
 			t.Fatal("require_upstream is set but an unreachable upstream still accepted the session; " +
 				"the command would run with no auditable path to the log server")
@@ -103,7 +102,7 @@ func TestRequireUpstreamRejectsWhenUnreachable(t *testing.T) {
 		cfg.RelayCacheDirectory = t.TempDir()
 		cfg.RequireUpstream = true
 
-		s, err := NewSession(context.Background(), uuid.NewV4(), acceptMsg, cfg, func() {})
+		s, err := NewSession(t.Context(), uuid.NewV4(), acceptMsg, cfg, func() {})
 		if err != nil {
 			t.Fatalf("reachable upstream must be accepted: %v", err)
 		}

@@ -6,7 +6,6 @@
 package server
 
 import (
-	"context"
 	"net"
 	"syscall"
 	"testing"
@@ -84,7 +83,7 @@ func keepaliveState(t *testing.T, conn net.Conn) (enabled, idle, interval, count
 func TestAcceptedConnectionKeepaliveMatchesSystemDefaults(t *testing.T) {
 	wantIdle, wantInterval, wantCount := systemKeepaliveDefaults(t)
 
-	ln, err := listenTCP(context.Background(), "127.0.0.1:0")
+	ln, err := listenTCP(t.Context(), "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listenTCP: %v", err)
 	}

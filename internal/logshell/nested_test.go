@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"strings"
 	"testing"
@@ -292,7 +291,7 @@ func TestMetadataOnlySessionRecordsNoTranscript(t *testing.T) {
 	inv := Invocation{Name: "lbash", LoginShell: true,
 		Args: []string{"-c", "printf 'NOT-DUPLICATED\\n'; exit 5"}}
 
-	outcome, err := RunMetadataOnly(context.Background(), cfg, inv, "/bin/sh",
+	outcome, err := RunMetadataOnly(t.Context(), cfg, inv, "/bin/sh",
 		StdIO{In: rIn, Out: wOut, Err: wOut}, nil, nesting)
 	if err != nil {
 		t.Fatalf("RunMetadataOnly: %v", err)
@@ -346,7 +345,7 @@ func TestMetadataOnlySessionPassesTheTerminalThrough(t *testing.T) {
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
-		_, _ = RunMetadataOnly(context.Background(), cfg, inv, "/bin/sh",
+		_, _ = RunMetadataOnly(t.Context(), cfg, inv, "/bin/sh",
 			StdIO{In: rIn, Out: wOut, Err: wOut}, nil,
 			Nesting{Kind: NestedSudo, SudoUID: -1, SudoGID: -1})
 		_ = wOut.Close()
