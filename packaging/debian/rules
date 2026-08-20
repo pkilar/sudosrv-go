@@ -11,6 +11,13 @@ export CGO_ENABLED = 0
 # comment in debian/control. Needs network at build time.
 export GOTOOLCHAIN = auto
 
+# Stamp the binaries with the version, from the same VERSION file build-deb.sh
+# takes the package version from. Without it `sudosrv -version` reports "dev"
+# inside a package whose metadata says otherwise, which is the drift this
+# replaces: the version used to be hardcoded in the source and had already
+# fallen out of step with the file.
+VERSION_X = -X main.appVersion=$(shell tr -d "[:space:]" < VERSION)
+
 # --with installsysusers, because dh_installsysusers is only in the default
 # sequence from compat 14 (debhelper's root_sequence.pm gates it on
 # $include_if_compat_X_or_newer->(14, ...)). Without the opt-in the sysusers
@@ -31,11 +38,11 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	# Build the application
-	go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
+	go build -ldflags="-s -w $(VERSION_X)" -o sudosrv ./cmd/sudosrv
 	# logsh is always CGO-free (set globally above): it is a login shell, so a
 	# dynamic linker that cannot resolve it prevents login rather than degrading
 	# it. See LOGSH_ENV in the Makefile.
-	go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
+	go build -trimpath -ldflags="-s -w $(VERSION_X)" -o logsh ./cmd/logsh
 
 override_dh_auto_install:
 	# Install binary

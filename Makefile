@@ -46,8 +46,15 @@ LOGSH_ENV=CGO_ENABLED=0
 WIREDUMP_BINARY_NAME=wiredump
 WIREDUMP_CMD_PATH=./cmd/wiredump
 
-# Build flags for stripped release binary
-LDFLAGS_STRIP = -ldflags="-s -w"
+# The version stamped into both binaries, from the one place it is written.
+# Without it `-version` reports "dev", which is the point: an uninjected build
+# should be recognisable rather than claim a release it is not.
+VERSION_X = -X main.appVersion=$(PKG_VERSION)
+
+# Build flags. The stripped variant carries the version too -- a release binary
+# is the one that most needs to be able to say which release it is.
+LDFLAGS_VERSION = -ldflags="$(VERSION_X)"
+LDFLAGS_STRIP = -ldflags="-s -w $(VERSION_X)"
 
 # Default target executed when you just run `make`
 .DEFAULT_GOAL := help
@@ -60,14 +67,14 @@ all: build
 
 build: proto deps build-logsh
 	@echo "Building the application for local architecture..."
-	$(GOBUILD) -o $(BINARY_NAME) $(CMD_PATH)
+	$(GOBUILD) $(LDFLAGS_VERSION) -o $(BINARY_NAME) $(CMD_PATH)
 	@echo "Build complete: ./$(BINARY_NAME)"
 
 # Build logsh, the recording login shell. See LOGSH_ENV for why this is always
 # a static build.
 build-logsh:
 	@echo "Building logsh (static) for local architecture..."
-	$(LOGSH_ENV) $(GOBUILD) -trimpath -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
+	$(LOGSH_ENV) $(GOBUILD) -trimpath $(LDFLAGS_VERSION) -o $(LOGSH_BINARY_NAME) $(LOGSH_CMD_PATH)
 	@echo "Build complete: ./$(LOGSH_BINARY_NAME)"
 
 # Build wiredump, the wire-format decoder for journals and relay cache files.

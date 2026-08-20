@@ -89,8 +89,10 @@ make deps
 # and diverges from what debian/rules and the PKGBUILD produce. CGO stays off
 # throughout; see the logsh comment below.
 export CGO_ENABLED=0
-go build -ldflags="-s -w" -o sudosrv ./cmd/sudosrv
-go build -trimpath -ldflags="-s -w" -o logsh ./cmd/logsh
+# -X stamps the version this package is being built as, so `-version` and
+# `rpm -q` cannot disagree.
+go build -ldflags="-s -w -X main.appVersion=%{version}" -o sudosrv ./cmd/sudosrv
+go build -trimpath -ldflags="-s -w -X main.appVersion=%{version}" -o logsh ./cmd/logsh
 
 %install
 # Install the binary
@@ -207,6 +209,22 @@ exit 0
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 
 %changelog
+* Tue Aug 19 2026 Paul Kilar <pkilar@gmail.com> - 0.2.0-1
+- logsh records standalone with -record, writing a sudoreplay-compatible I/O
+  log locally and contacting no server; -wire additionally keeps the raw stream
+- New wiredump command for decoding a journal or relay cache file
+- Fix: terminal I/O was throttled to 100 messages/sec, which distorted recorded
+  timings and delayed logout
+- Fix: the legacy log file dropped the command's arguments and left lines and
+  columns empty for a tty-less client
+- Fix: a session from a terminal reporting no size recorded as 0x0, which
+  sudoreplay refuses silently
+- Sessions now carry source, runenv and submitenv, matching what C writes
+- Both binaries report the version they were built as; it is no longer a
+  literal in the source that drifts from the VERSION file
+- The ldash multi-call name is retired; accounts already using it are restored
+  on removal
+
 * Mon Aug 17 2026 Paul Kilar <pkilar@gmail.com> - 0.1.0-1
 - Install shared assets from packaging/ rather than per-format copies
 - Ship manual pages for sudosrv(8) and logsh(8)
