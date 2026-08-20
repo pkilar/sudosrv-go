@@ -14,7 +14,7 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/pkilar/sudosrv'
 license=('Apache-2.0')
 depends=('procps-ng')
-makedepends=('go>=1.26' 'protobuf')
+makedepends=('go>=1.27' 'protobuf')
 optdepends=('sudo: sudo client (>= 1.9.0)')
 # !debug: makepkg otherwise emits a sudosrv-debug package, and there is nothing
 # in it -- both binaries are linked with -ldflags="-s -w", so the symbols it

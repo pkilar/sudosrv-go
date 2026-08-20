@@ -23,7 +23,7 @@ The server captures complete transcripts of user sessions run via sudo, includin
 
 ### Prerequisites
 
-- Go 1.26+
+- Go 1.27+
 - Protocol Buffer Compiler (`protoc`) and `protoc-gen-go`
 - `make`
 

@@ -19,7 +19,7 @@ Source0:        %{name}-%{version}.tar.gz
 Source1:        sudosrv.sysusers
 Source2:        sudosrv.tmpfiles
 
-# The module needs Go 1.26.3, which no current Fedora ships -- F43 has
+# The module needs Go 1.27, which no current Fedora ships -- F43 has
 # 1.25.12. Declaring >= 1.26 made the package unbuildable there rather than
 # merely inconvenient. The floor below is the version that understands
 # GOTOOLCHAIN, and %%build sets GOTOOLCHAIN=auto so the distro's Go fetches

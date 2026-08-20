@@ -7,7 +7,7 @@ export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 # Go build flags
 export GOOS = linux
 export CGO_ENABLED = 0
-# The module needs Go 1.26.3 and trixie ships 1.24; see the Build-Depends
+# The module needs Go 1.27 and trixie ships 1.24; see the Build-Depends
 # comment in debian/control. Needs network at build time.
 export GOTOOLCHAIN = auto
 

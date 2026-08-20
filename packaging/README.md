@@ -34,7 +34,7 @@ field **in the staged copy**, and runs the native builder. The committed
 `pkgver` and `Version:` are deliberately implausible placeholders so a package
 built by calling the native tool directly cannot be mistaken for a release.
 
-Building needs network access: the module requires Go 1.26.3, which neither
+Building needs network access: the module requires Go 1.27, which neither
 Debian trixie nor Fedora 43 ships, so each recipe sets `GOTOOLCHAIN=auto` and
 lets the distribution toolchain fetch the one it needs. A sealed builder
 (`mock` without `--enable-network`, koji) must vendor a toolchain instead.
