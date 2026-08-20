@@ -65,6 +65,12 @@ func durabilityConfig(addr string) *config.RelayConfig {
 	return &config.RelayConfig{
 		UpstreamHost:   addr,
 		ConnectTimeout: 2 * time.Second,
+		// Without this the flush falls back to operationTimeout's 30s, and
+		// TestFlushRequiresUpstreamCommitBeforeRetiringCache waits it out in
+		// full -- 30s of this package's runtime spent on a value that test
+		// never asserts. The 30s default stays pinned by
+		// TestResponseTimeoutFallback, which checks it directly.
+		ResponseTimeout: 2 * time.Second,
 	}
 }
 
