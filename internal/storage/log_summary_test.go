@@ -144,7 +144,7 @@ func TestLogSummaryDefaultsTerminalSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := strings.SplitN(string(raw), "\n", 2)[0]
+	first, _, _ := strings.Cut(string(raw), "\n")
 	if !strings.HasSuffix(first, ":24:80") {
 		t.Errorf("log summary first line = %q, want it to end in :24:80", first)
 	}

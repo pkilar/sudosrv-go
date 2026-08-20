@@ -70,15 +70,18 @@ const LogshSessionEnv = "LOGSH_SESSION"
 
 // DetectNesting reports whether something is already recording this session.
 func DetectNesting() Nesting {
-	n := Nesting{SudoUID: -1, SudoGID: -1}
-
 	// sudo sets these AFTER env_reset, so unlike most of the environment they
 	// do survive an escalation. They are read for the WHO, not for the
 	// detection: a user who controls their environment could set SUDO_USER by
 	// hand, and the ancestry walk below is what cannot be lied to.
-	n.SudoUser = os.Getenv("SUDO_USER")
-	n.SudoUID = envInt("SUDO_UID")
-	n.SudoGID = envInt("SUDO_GID")
+	//
+	// envInt reports -1 when the variable is unset or unparseable, which is the
+	// "unknown" that Nesting documents -- so these need no -1 initializer.
+	n := Nesting{
+		SudoUser: os.Getenv("SUDO_USER"),
+		SudoUID:  envInt("SUDO_UID"),
+		SudoGID:  envInt("SUDO_GID"),
+	}
 
 	parentSession := os.Getenv(LogshSessionEnv)
 

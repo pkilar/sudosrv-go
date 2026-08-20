@@ -298,8 +298,7 @@ func (h *Handler) Handle() {
 			// did wrong instead of being blamed for a server fault; anything
 			// else is an internal failure.
 			errText := "Internal Server Error"
-			var violation *stateMachineViolation
-			if errors.As(err, &violation) {
+			if _, ok := errors.AsType[*stateMachineViolation](err); ok {
 				errText = stateMachineErrorText
 			}
 			errMsg := &pb.ServerMessage{Type: &pb.ServerMessage_Error{Error: errText}}
