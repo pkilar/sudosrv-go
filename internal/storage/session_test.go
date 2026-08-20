@@ -621,7 +621,10 @@ func TestStorageSession(t *testing.T) {
 		if !ok || len(alerts) != 1 {
 			t.Fatalf("Expected 1 alert in log.json, got %v", logMeta["alerts"])
 		}
-		alert := alerts[0].(map[string]any)
+		alert, ok := alerts[0].(map[string]any)
+		if !ok {
+			t.Fatalf("alert entry is %T, want map[string]any", alerts[0])
+		}
 		if alert["reason"] != "policy violation detected" {
 			t.Errorf("Expected alert reason 'policy violation detected', got '%v'", alert["reason"])
 		}

@@ -21,9 +21,13 @@ func freeTCPPort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
+	a := l.Addr()
 	_ = l.Close()
-	return port
+	addr, ok := a.(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", a)
+	}
+	return addr.Port
 }
 
 // reloadTestServer starts a plaintext-only server on addr and returns it plus
