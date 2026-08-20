@@ -326,8 +326,8 @@ func waitOutcome(cmd *exec.Cmd) Outcome {
 		return Outcome{ExitCode: 0}
 	}
 
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
+	ee, ok := errors.AsType[*exec.ExitError](err)
+	if !ok {
 		return Outcome{ExitCode: 1}
 	}
 	ws, ok := ee.Sys().(syscall.WaitStatus)

@@ -448,8 +448,7 @@ func TestAcceptLoop_RejectsOverCap(t *testing.T) {
 	} else if !errors.Is(err, io.EOF) {
 		// Some platforms surface this as a different error (e.g., ECONNRESET);
 		// any non-nil read error is acceptable, just not nil/timeout.
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
+		if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 			t.Errorf("read on rejected connection timed out; expected close")
 		}
 	}

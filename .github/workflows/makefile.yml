@@ -33,25 +33,25 @@ jobs:
     # pinned by the `tool` directive in go.mod and resolved by `make proto`
     # through `go tool`, so the apt package for it is unused — and is a
     # different version (1.32.0) from the protobuf runtime this module builds
-    # against (v1.36.11). It was previously installing protobuf-compiler as a
+    # against (v1.36.12). It was previously installing protobuf-compiler as a
     # transitive dependency, which is why that is now requested directly.
     # protoc is pinned to the version the committed .pb.go was generated with
-    # (its header records `protoc v6.33.1`, i.e. protobuf release 33.1). The apt
+    # (its header records `protoc v7.35.1`, i.e. protobuf release 35.1). The apt
     # package is 3.21.12, so `make proto` used to regenerate that file with a
     # different compiler than it was committed with -- a silent source of diff
     # noise and, in principle, of generated-code drift. Keep this in step with
     # the stamp in pkg/sudosrv_proto/sudo_logsrv.pb.go.
     - name: Install protoc
       env:
-        PROTOC_VERSION: "33.1"
-        # SHA-256 of protoc-33.1-linux-x86_64.zip. This is not optional: the apt
+        PROTOC_VERSION: "35.1"
+        # SHA-256 of protoc-35.1-linux-x86_64.zip. This is not optional: the apt
         # package this replaced was signature-verified by apt, so fetching a
         # release asset over plain HTTPS and executing it would be a step DOWN in
         # supply-chain terms. Verifying the digest pins the artefact so a
         # replaced or tampered asset fails the build instead of running as part
         # of it. Regenerate with:
         #   curl -fsSL <url> | sha256sum
-        PROTOC_SHA256: "f3340e28a83d1c637d8bafdeed92b9f7db6a384c26bca880a6e5217b40a4328b"
+        PROTOC_SHA256: "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7"
       run: |
         set -euo pipefail
         curl -fsSL -o /tmp/protoc.zip \

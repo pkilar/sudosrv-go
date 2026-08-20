@@ -271,20 +271,14 @@ func runServerWithGracefulShutdown(cfg *config.Config, configPath string, logLev
 
 // handleApplicationError provides centralized error handling with appropriate exit codes.
 func handleApplicationError(err error) {
-	var (
-		ce *configError
-		se *serverError
-	)
-
 	var exitCode int
-	switch {
-	case errors.As(err, &ce):
+	if _, ok := errors.AsType[*configError](err); ok {
 		exitCode = exitConfig
 		slog.Error("Configuration error", "error", err)
-	case errors.As(err, &se):
+	} else if _, ok := errors.AsType[*serverError](err); ok {
 		exitCode = exitServer
 		slog.Error("Server error", "error", err)
-	default:
+	} else {
 		exitCode = exitFailure
 		slog.Error("Application error", "error", err)
 	}

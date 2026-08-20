@@ -145,8 +145,7 @@ func dialTLS(t *testing.T, addr, serverCertPath string, certs []tls.Certificate)
 	}
 	var buf [1]byte
 	_, readErr := conn.Read(buf[:])
-	var ne net.Error
-	if errors.As(readErr, &ne) && ne.Timeout() {
+	if ne, ok := errors.AsType[net.Error](readErr); ok && ne.Timeout() {
 		return nil // still connected: accepted
 	}
 	return readErr

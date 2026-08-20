@@ -218,6 +218,35 @@ func TestDetectNestingIsQuietWhenNotNested(t *testing.T) {
 	}
 }
 
+// TestDetectNestingReadsTheEscalationIds pins what Nesting documents: the sudo
+// ids are -1 when unknown, and "unknown" covers both an unset variable and one
+// that is not a number. Nothing else asserted this -- the test above checks only
+// Kind -- so seeding the fields to 0, or dropping envInt, went unnoticed.
+func TestDetectNestingReadsTheEscalationIds(t *testing.T) {
+	tests := []struct {
+		user, uid, gid string
+		wantUser       string
+		wantUID        int
+		wantGID        int
+	}{
+		{"", "", "", "", -1, -1},                       // no sudo in sight
+		{"alice", "1000", "2000", "alice", 1000, 2000}, // a real escalation
+		{"bob", "root", "-", "bob", -1, -1},            // set, but not numeric
+	}
+	for _, tt := range tests {
+		t.Setenv("SUDO_USER", tt.user)
+		t.Setenv("SUDO_UID", tt.uid)
+		t.Setenv("SUDO_GID", tt.gid)
+
+		n := DetectNesting()
+		if n.SudoUser != tt.wantUser || n.SudoUID != tt.wantUID || n.SudoGID != tt.wantGID {
+			t.Errorf("SUDO_USER=%q SUDO_UID=%q SUDO_GID=%q gave (%q, %d, %d), want (%q, %d, %d)",
+				tt.user, tt.uid, tt.gid, n.SudoUser, n.SudoUID, n.SudoGID,
+				tt.wantUser, tt.wantUID, tt.wantGID)
+		}
+	}
+}
+
 // TestProcInfoHandlesExecutableNamesWithSpaces guards the /proc/<pid>/stat parse.
 // Field 2 is parenthesised and may contain spaces and brackets, so splitting the
 // line on whitespace misreads both the name and the parent pid.
