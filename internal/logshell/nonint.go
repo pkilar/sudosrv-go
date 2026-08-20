@@ -35,12 +35,33 @@ func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Std
 // These five travel together through every entry point in this file -- the two
 // exported ones differ only in the nesting and capture decisions layered on top
 // -- so they are passed as one value rather than threaded individually.
+//
+// The zero value is not usable, and the fields do not fail alike: a missing
+// Config panics on entry, while a missing Std is accepted and records the wrong
+// thing. Positional arguments used to oblige the caller to name all five; a
+// struct does not, so which is which is written down per field.
 type RunSpec struct {
-	Config     *Config
+	// Config is required. RunNonInteractive dereferences it on entry, to decide
+	// whether any stream is being captured.
+	Config *Config
+
+	// Invocation is argv[0] and the arguments handed through to the shell. Its
+	// zero value is legitimate -- that is a shell started with no arguments.
 	Invocation Invocation
-	ShellPath  string
-	Std        StdIO
-	CmdLog     *CommandLog
+
+	// ShellPath is required: the resolved shell to exec.
+	ShellPath string
+
+	// Std is required, and is the one field whose absence does not announce
+	// itself. (*os.File).Fd reports ^uintptr(0) rather than panicking on a nil
+	// file, and os/exec hands the child /dev/null for a nil stream, so a zero
+	// Std yields a session recorded against the wrong terminal instead of a
+	// crash.
+	Std StdIO
+
+	// CmdLog is optional. SessionID, Bind and End are each nil-safe, which is
+	// what lets the tests here record a session with no command log open.
+	CmdLog *CommandLog
 }
 
 // recordsAnyStream reports whether any of the non-tty streams is being captured.
