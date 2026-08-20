@@ -106,7 +106,7 @@ func runShell(inv logshell.Invocation) int {
 	// The command log is independent of recording: its own toggle, local syslog
 	// rather than the log server, and it runs whether the session is recorded,
 	// journalled, or not recorded at all.
-	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg, shellPath)
+	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg)
 	if cmdLogErr != nil {
 		if cfg.CommandLog.Required {
 			return refuse(cfg, inv, shellPath, fmt.Sprintf("command log unavailable: %v", cmdLogErr))

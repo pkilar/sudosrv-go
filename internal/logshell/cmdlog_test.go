@@ -25,7 +25,7 @@ type captureLog struct {
 func newCaptureLog(t *testing.T) *captureLog {
 	t.Helper()
 	cl := &captureLog{}
-	inner, err := OpenCommandLog(&Config{}, "/bin/sh") // disabled: mints the UUID only
+	inner, err := OpenCommandLog(&Config{}) // disabled: mints the UUID only
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestCommandLogEscapesControlCharacters(t *testing.T) {
 // when the feature is off: a session recorded today should be joinable to
 // records from a host where the command log is switched on.
 func TestCommandLogDisabledStillMintsASessionID(t *testing.T) {
-	cl, err := OpenCommandLog(DefaultConfig(), "/bin/sh") // command_log disabled by default
+	cl, err := OpenCommandLog(DefaultConfig()) // command_log disabled by default
 	if err != nil {
 		t.Fatalf("OpenCommandLog: %v", err)
 	}

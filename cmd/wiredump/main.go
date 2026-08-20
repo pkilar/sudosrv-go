@@ -231,20 +231,28 @@ func main() {
 		os.Exit(2)
 	}
 
-	f, err := os.Open(flag.Arg(0))
+	os.Exit(run(flag.Arg(0), *showContent))
+}
+
+// run holds everything after flag parsing so its deferred close actually runs.
+// os.Exit does not unwind defers, so calling it from main alongside a
+// `defer f.Close()` reads as if the file is released when it never is.
+func run(path string, showContent bool) int {
+	f, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wiredump:", err)
-		os.Exit(2)
+		return 2
 	}
 	defer f.Close()
 
 	out := bufio.NewWriter(os.Stdout)
-	res := dump(bufio.NewReader(f), out, *showContent)
+	res := dump(bufio.NewReader(f), out, showContent)
 	if err := out.Flush(); err != nil {
 		fmt.Fprintln(os.Stderr, "wiredump:", err)
-		os.Exit(2)
+		return 2
 	}
 	if res.err != nil {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

@@ -178,13 +178,13 @@ func procInfo(pid int) (comm string, ppid int, ok bool) {
 	// spaces and brackets, so it is delimited from the LAST ')' rather than by
 	// splitting the line.
 	open := bytes.IndexByte(raw, '(')
-	close := bytes.LastIndexByte(raw, ')')
-	if open < 0 || close < open {
+	closeIdx := bytes.LastIndexByte(raw, ')')
+	if open < 0 || closeIdx < open {
 		return "", 0, false
 	}
-	comm = string(raw[open+1 : close])
+	comm = string(raw[open+1 : closeIdx])
 
-	rest := strings.Fields(string(raw[close+1:]))
+	rest := strings.Fields(string(raw[closeIdx+1:]))
 	if len(rest) < 2 {
 		return comm, 0, false
 	}

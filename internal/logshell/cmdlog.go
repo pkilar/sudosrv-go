@@ -88,7 +88,7 @@ type CommandLogConfig struct {
 // UUID has to exist regardless: it is attached to the recorded session as an
 // info key, so a session recorded with the command log switched off still
 // carries the identifier that a later switched-on session would be joined by.
-func OpenCommandLog(cfg *Config, shellPath string) (*CommandLog, error) {
+func OpenCommandLog(cfg *Config) (*CommandLog, error) {
 	c := &CommandLog{sessionID: uuid.NewV4().String(), maxLen: DefaultCommandLogMaxLen}
 	if !cfg.CommandLog.Enabled {
 		return c, nil
