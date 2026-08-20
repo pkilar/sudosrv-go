@@ -29,6 +29,20 @@ type StdIO struct {
 // StdStreams is the production StdIO.
 func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Stderr} }
 
+// RunSpec is one non-interactive run: which shell, how it was invoked, the
+// streams to attach to it, and the command log the session is recorded against.
+//
+// These five travel together through every entry point in this file -- the two
+// exported ones differ only in the nesting and capture decisions layered on top
+// -- so they are passed as one value rather than threaded individually.
+type RunSpec struct {
+	Config     *Config
+	Invocation Invocation
+	ShellPath  string
+	Std        StdIO
+	CmdLog     *CommandLog
+}
+
 // recordsAnyStream reports whether any of the non-tty streams is being captured.
 // When none is, the session is recorded as metadata only.
 func (c *Config) recordsAnyStream() bool {
@@ -45,9 +59,9 @@ func (c *Config) recordsAnyStream() bool {
 //
 // Setting any of log_stdin / log_stdout / log_stderr promotes the session to a
 // full I/O recording of those streams, at the cost of that pass-through.
-func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog) (Outcome, error) {
-	return runPassthrough(ctx, cfg, inv, shellPath, std, cmdLog,
-		Nesting{SudoUID: -1, SudoGID: -1}, cfg.recordsAnyStream())
+func RunNonInteractive(ctx context.Context, spec RunSpec) (Outcome, error) {
+	return runPassthrough(ctx, spec,
+		Nesting{SudoUID: -1, SudoGID: -1}, spec.Config.recordsAnyStream())
 }
 
 // RunMetadataOnly runs the shell with its streams passed straight through and
@@ -62,28 +76,28 @@ func RunNonInteractive(ctx context.Context, cfg *Config, inv Invocation, shellPa
 // It keeps a record rather than exec'ing straight through so that a nested
 // session is still visible as a fact -- with both session UUIDs, so it joins to
 // whatever the outer recorder stored.
-func RunMetadataOnly(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog, nesting Nesting) (Outcome, error) {
-	return runPassthrough(ctx, cfg, inv, shellPath, std, cmdLog, nesting, false)
+func RunMetadataOnly(ctx context.Context, spec RunSpec, nesting Nesting) (Outcome, error) {
+	return runPassthrough(ctx, spec, nesting, false)
 }
 
-func runPassthrough(ctx context.Context, cfg *Config, inv Invocation, shellPath string, std StdIO, cmdLog *CommandLog, nesting Nesting, captureStreams bool) (Outcome, error) {
-	argv0 := ChildArgv0(shellPath, inv.LoginShell)
-	argv := append([]string{argv0}, inv.Args...)
+func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureStreams bool) (Outcome, error) {
+	argv0 := ChildArgv0(spec.ShellPath, spec.Invocation.LoginShell)
+	argv := append([]string{argv0}, spec.Invocation.Args...)
 
 	// A nested interactive session has a real terminal even though logsh did not
 	// allocate one; naming it is what lets this record be lined up against the
 	// enclosing recorder's.
-	meta := CollectMeta(TTYNameOf(std.In.Fd()), WinSize{}, shellPath, argv)
-	meta.SessionID = cmdLog.SessionID()
+	meta := CollectMeta(TTYNameOf(spec.Std.In.Fd()), WinSize{}, spec.ShellPath, argv)
+	meta.SessionID = spec.CmdLog.SessionID()
 	meta.ApplyNesting(nesting)
 
-	rec, err := StartEventRecorder(ctx, cfg, meta, captureStreams)
+	rec, err := StartEventRecorder(ctx, spec.Config, meta, captureStreams)
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
 	defer func() { _ = rec.Close() }()
 
-	cmdLog.Bind(meta, rec.LogID())
+	spec.CmdLog.Bind(meta, rec.LogID())
 
 	var wg sync.WaitGroup
 	var closers []*os.File
@@ -95,14 +109,14 @@ func runPassthrough(ctx context.Context, cfg *Config, inv Invocation, shellPath 
 		// streams are rewired per attempt rather than shared.
 		closeAll(closers)
 		closers = nil
-		cmd = exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
+		cmd = exec.Command(spec.ShellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		cmd.Args = argv
-		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), shellPath), cmdLog.SessionID())
-		closers, wireErr = wireStreams(cmd, std, cfg, rec, &wg, captureStreams)
+		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.ShellPath), spec.CmdLog.SessionID())
+		closers, wireErr = spec.wireStreams(cmd, rec, &wg, captureStreams)
 		return cmd
 	}
 
-	child, err := startChild(build, cfg, cmdLog)
+	child, err := startChild(build, spec.Config, spec.CmdLog)
 	if err == nil && wireErr != nil {
 		err = wireErr
 	}
@@ -119,7 +133,7 @@ func runPassthrough(ctx context.Context, cfg *Config, inv Invocation, shellPath 
 
 	outcome := child.Wait()
 	wg.Wait()
-	cmdLog.End(outcome)
+	spec.CmdLog.End(outcome)
 
 	if err := rec.Exit(ctx, outcome.ExitCode, outcome.Signal, outcome.CoreDumped); err != nil {
 		return outcome, err
@@ -130,14 +144,14 @@ func runPassthrough(ctx context.Context, cfg *Config, inv Invocation, shellPath 
 // wireStreams connects the child's three streams, teeing the ones being
 // recorded. It returns the parent-side descriptors that must be closed after
 // the child starts.
-func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.WaitGroup, capture bool) ([]*os.File, error) {
+func (spec RunSpec) wireStreams(cmd *exec.Cmd, rec *Recorder, wg *sync.WaitGroup, capture bool) ([]*os.File, error) {
 	var closers []*os.File
 
 	// Pass-through is the default and the fast path: handing os/exec the real
 	// *os.File means the child inherits the descriptor with no copy at all.
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = std.In, std.Out, std.Err
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = spec.Std.In, spec.Std.Out, spec.Std.Err
 
-	if capture && cfg.LogStdin {
+	if capture && spec.Config.LogStdin {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -146,10 +160,10 @@ func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.
 		closers = append(closers, pr)
 		wg.Go(func() {
 			defer func() { _ = pw.Close() }()
-			copyRecording(pw, std.In, func(b []byte) { _ = rec.Stream("stdin", b) })
+			copyRecording(pw, spec.Std.In, func(b []byte) { _ = rec.Stream("stdin", b) })
 		})
 	}
-	if capture && cfg.LogStdout {
+	if capture && spec.Config.LogStdout {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -158,10 +172,10 @@ func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.
 		closers = append(closers, pw)
 		wg.Go(func() {
 			defer func() { _ = pr.Close() }()
-			copyRecording(std.Out, pr, func(b []byte) { _ = rec.Stream("stdout", b) })
+			copyRecording(spec.Std.Out, pr, func(b []byte) { _ = rec.Stream("stdout", b) })
 		})
 	}
-	if capture && cfg.LogStderr {
+	if capture && spec.Config.LogStderr {
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			return closers, err
@@ -170,7 +184,7 @@ func wireStreams(cmd *exec.Cmd, std StdIO, cfg *Config, rec *Recorder, wg *sync.
 		closers = append(closers, pw)
 		wg.Go(func() {
 			defer func() { _ = pr.Close() }()
-			copyRecording(std.Err, pr, func(b []byte) { _ = rec.Stream("stderr", b) })
+			copyRecording(spec.Std.Err, pr, func(b []byte) { _ = rec.Stream("stderr", b) })
 		})
 	}
 	return closers, nil
