@@ -291,8 +291,13 @@ func TestMetadataOnlySessionRecordsNoTranscript(t *testing.T) {
 	inv := Invocation{Name: "lbash", LoginShell: true,
 		Args: []string{"-c", "printf 'NOT-DUPLICATED\\n'; exit 5"}}
 
-	outcome, err := RunMetadataOnly(t.Context(), cfg, inv, "/bin/sh",
-		StdIO{In: rIn, Out: wOut, Err: wOut}, nil, nesting)
+	outcome, err := RunMetadataOnly(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		Std:        StdIO{In: rIn, Out: wOut, Err: wOut},
+	},
+		nesting)
 	if err != nil {
 		t.Fatalf("RunMetadataOnly: %v", err)
 	}
@@ -345,8 +350,12 @@ func TestMetadataOnlySessionPassesTheTerminalThrough(t *testing.T) {
 	ran := make(chan struct{})
 	go func() {
 		defer close(ran)
-		_, _ = RunMetadataOnly(t.Context(), cfg, inv, "/bin/sh",
-			StdIO{In: rIn, Out: wOut, Err: wOut}, nil,
+		_, _ = RunMetadataOnly(t.Context(), RunSpec{
+			Config:     cfg,
+			Invocation: inv,
+			ShellPath:  "/bin/sh",
+			Std:        StdIO{In: rIn, Out: wOut, Err: wOut},
+		},
 			Nesting{Kind: NestedSudo, SudoUID: -1, SudoGID: -1})
 		_ = wOut.Close()
 	}()

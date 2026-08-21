@@ -121,6 +121,16 @@ func runShell(inv logshell.Invocation) int {
 	// uses logsh -- with a pseudo-terminal layer for each.
 	nesting := logshell.DetectNesting()
 
+	// Both non-interactive entry points below take this as one value. The
+	// terminal path builds its own, since it attaches a TerminalIO instead.
+	spec := logshell.RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  shellPath,
+		Std:        logshell.StdStreams(),
+		CmdLog:     cmdLog,
+	}
+
 	var outcome logshell.Outcome
 	switch mode := cfg.NestedMode(nesting); mode {
 	case logshell.NestedModeSkip:
@@ -133,16 +143,14 @@ func runShell(inv logshell.Invocation) int {
 		// Streams pass straight through, so no second pty and no duplicate
 		// transcript -- but the session still leaves a record, carrying both
 		// UUIDs so it joins to whatever the outer recorder stored.
-		outcome, err = logshell.RunMetadataOnly(ctx, cfg, inv, shellPath,
-			logshell.StdStreams(), cmdLog, nesting)
+		outcome, err = logshell.RunMetadataOnly(ctx, spec, nesting)
 
 	default:
 		if logshell.IsTerminal(os.Stdin.Fd()) {
 			outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
 				logshell.StdTerminal(), cmdLog)
 		} else {
-			outcome, err = logshell.RunNonInteractive(ctx, cfg, inv, shellPath,
-				logshell.StdStreams(), cmdLog)
+			outcome, err = logshell.RunNonInteractive(ctx, spec)
 		}
 	}
 	if err != nil {

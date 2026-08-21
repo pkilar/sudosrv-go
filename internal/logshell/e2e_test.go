@@ -293,9 +293,12 @@ func TestEndToEndNonInteractiveSessionIsMetadataOnly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = RunNonInteractive(t.Context(), cfg,
-			Invocation{Name: "lsh", Args: []string{"-c", "true"}}, "/bin/sh",
-			StdIO{In: rIn, Out: wOut, Err: wOut}, nil)
+		_, _ = RunNonInteractive(t.Context(), RunSpec{
+			Config:     cfg,
+			Invocation: Invocation{Name: "lsh", Args: []string{"-c", "true"}},
+			ShellPath:  "/bin/sh",
+			Std:        StdIO{In: rIn, Out: wOut, Err: wOut},
+		})
 	}()
 	select {
 	case <-done:
