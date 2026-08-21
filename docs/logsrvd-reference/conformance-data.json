@@ -431,7 +431,7 @@
    "id": "CONF-017",
    "status": "INTENTIONAL",
    "severity": "low",
-   "go_source": "cmd/sudosrv/main.go:54-73,240-261; archlinux/sudosrv.servic…",
+   "go_source": "cmd/sudosrv/main.go:54-73,240-261; packaging/systemd/sudosrv.serv…",
    "notes": "No way to self-background for a sysvinit script; under systemd the behavior equals C's -n mode, which is what C recommends for supervised operation."
   },
   {
@@ -487,7 +487,7 @@
    "id": "CONF-025",
    "status": "MATCH",
    "severity": "none",
-   "go_source": "internal/config/config.go, archlinux/sudosrv.conf, rpm/SOUR…",
+   "go_source": "internal/config/config.go, packaging/config/sudosrv.yaml…",
    "notes": ""
   },
   {
@@ -933,10 +933,10 @@
   },
   {
    "id": "IOLOG-021",
-   "status": "PARTIAL",
-   "severity": "low",
-   "go_source": "internal/storage/session.go:1041-1052,188-199",
-   "notes": "A hand-read `log` shows '/usr/bin/id' where C shows '/usr/bin/id -u', and a tty-less client yields two empty fields where C writes 24:80. sudoreplay is unaffected: iolog_parse_loginfo (iolo…"
+   "status": "MATCH",
+   "severity": "none",
+   "go_source": "internal/storage/session.go",
+   "notes": "Both divergences fixed: line 3 now appends runargv[1..] after the command, and lines/columns default to 24x80 as C seeds them. Verified byte-for-byte against the real sudo_logsrvd fed the identical session."
   },
   {
    "id": "IOLOG-022",
@@ -1143,10 +1143,10 @@
   },
   {
    "id": "IOLOG-051",
-   "status": "PARTIAL",
-   "severity": "low",
+   "status": "MATCH",
+   "severity": "none",
    "go_source": "internal/connection/handler.go:713-728; internal/storage/se…",
-   "notes": "A tty-less client that omits lines/columns gets a log.json with no 'columns'/'lines' members (C always emits them) and two empty fields in the legacy log line - neither is required by iolog…"
+   "notes": "The lines/columns half is fixed: both default to 24x80 as C seeds them before parsing info messages, so log.json always carries them and the legacy log line no longer ends in two empty fields."
   },
   {
    "id": "PROTO-001",
@@ -2183,6 +2183,62 @@
    "severity": "low",
    "go_source": "internal/server/server.go:78, internal/server/server.go:104…",
    "notes": "One listener instead of two, IPv4-mapped peers accepted on the v6 socket, and IPv4 clients logged as remote_addr \"[::ffff:10.0.0.1]:port\" rather than \"10.0.0.1:port\" — which will not match…"
+  },
+  {
+   "id": "PROD-001",
+   "status": "MATCH",
+   "severity": "breaking",
+   "go_source": "internal/logshell/record.go:376-383, internal/storage/session.go:1450",
+   "notes": "Delay is stamped on the record carrying the bytes it precedes; storage writes it through unmodified in C's field order."
+  },
+  {
+   "id": "PROD-002",
+   "status": "MATCH",
+   "severity": "breaking",
+   "go_source": "internal/logshell/record.go:376-383",
+   "notes": "send() samples now, computes delta from r.last, builds the message with it, then advances r.last -- C's measure/stamp/advance order."
+  },
+  {
+   "id": "PROD-003",
+   "status": "MATCH",
+   "severity": "low",
+   "go_source": "internal/logshell/record.go:339, internal/logshell/record.go:352",
+   "notes": "StartRecorder seeds last at session start, before the pty and shell exist. Go's time.Now() carries a monotonic reading and Sub() uses it, so NTP steps cannot skew a delta."
+  },
+  {
+   "id": "PROD-004",
+   "status": "MATCH",
+   "severity": "high",
+   "go_source": "internal/logshell/record.go:370-384, internal/logshell/suspend.go:26-34",
+   "notes": "ttyin, ttyout, winsize and suspend all route through send(), which holds r.mu across both the delta computation and the advance."
+  },
+  {
+   "id": "PROD-005",
+   "status": "MATCH",
+   "severity": "high",
+   "go_source": "internal/logshell/record.go:381-383",
+   "notes": "r.last = now is committed before r.sink.Send(msg), so delivery time falls into the next event exactly as in C. Pinned by TestSlowDeliveryIsChargedToTheNextEventExactlyOnce."
+  },
+  {
+   "id": "PROD-006",
+   "status": "MATCH",
+   "severity": "medium",
+   "go_source": "internal/logshell/record.go:370-384",
+   "notes": "No trailing flush exists: a delay is only written as part of a following event. Pinned by TestTrailingIdleIsNotRecorded."
+  },
+  {
+   "id": "PROD-007",
+   "status": "DIVERGENT",
+   "severity": "low",
+   "go_source": "internal/logshell/relay.go:271-274",
+   "notes": "relayOutput writes the user's terminal BEFORE calling rec.TTYOut, so a blocked outer-terminal write is measured into the following chunk's delay; C logs at read time (exec_pty.c:432). Bounded skew within a record, never a displacement onto another record. Note the asymmetry: relayInput records first (relay.go:245-246)."
+  },
+  {
+   "id": "PROD-008",
+   "status": "MATCH",
+   "severity": "medium",
+   "go_source": "internal/logshell/suspend.go:26-34, internal/logshell/suspend.go:74, internal/logshell/suspend.go:92",
+   "notes": "TSTP/TTIN/TTOU recorded before stopping and CONT after resuming, both through send(). Names validated against C's sig2str set."
   }
  ]
 }

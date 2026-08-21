@@ -2,7 +2,7 @@
 # Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`
 
 > **Reference:** sudo 1.9.18 — `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19)  
-> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
+> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`07`](07-producer.md) was checked against the Go source, then every non-`MATCH` verdict was independently challenged by a second pass instructed to refute it. Verdict vocabulary is defined in [README.md](README.md#verdict-vocabulary).
 
 ## Summary
 
@@ -11,16 +11,17 @@
 | [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 14 | 1 | 17 | 5 | 6 | 2 |
 | [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 22 | 2 | 21 | 5 | 1 | 2 |
 | [Configuration Surface & Defaults](03-configuration.md) | 68 | 19 | 14 | 10 | 7 | 13 | 5 |
-| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 21 | 1 | 16 | 10 | 3 | 0 |
+| [Local I/O Log Storage Format](04-local-storage.md) | 51 | 23 | 1 | 14 | 10 | 3 | 0 |
 | [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 26 | 7 | 8 | 6 | 2 | 5 |
 | [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 12 | 2 | 15 | 3 | 8 | 1 |
-| **Total** | **312** | **114** | **27** | **87** | **36** | **33** | **15** |
+| [Producer-Side Recording & Timing](07-producer.md) | 8 | 7 | 0 | 0 | 1 | 0 | 0 |
+| **Total** | **320** | **123** | **27** | **85** | **37** | **33** | **15** |
 
-Severity of the 183 requirements that are not `MATCH`/`NA`:
+Severity of the 182 requirements that are not `MATCH`/`NA`:
 
 | breaking | high | medium | low | informational |
 |--:|--:|--:|--:|--:|
-| 0 | 0 | 0 | 154 | 29 |
+| 0 | 0 | 0 | 153 | 29 |
 
 ## Priority findings
 
@@ -45,7 +46,7 @@ Spec: [`01-architecture.md`](01-architecture.md)
 | `ARCH-007` | Daemonization | ABSENT | low | `—` | Operator-visible only: no self-backgrounding for sysvinit-style deployments; 'sudosrv &' keeps the controlling terminal and cwd. |
 | `ARCH-008` | Pidfile creation and removal | ABSENT | low | `—` | Non-systemd operators must locate the PID themselves; the shipped unit's ExecReload=/bin/kill -HUP $MAINPID covers the packaged case. |
 | `ARCH-009` | stderr diagnostics are disabled after daemonization in both… | DIVERGENT | low | `cmd/sudosrv/main.go:198, cmd/sudosrv/main.go:167-206` | Diagnostics land on stdout rather than a configured destination, and the destination silently changes mid-startup. Feeds ARCH-010. |
-| `ARCH-010` | `SIGPIPE` is ignored | PARTIAL | low | `internal/protocol/processor.go:152-164, cmd/sudosrv/main.go…` | Running the daemon with stdout on a pipe whose reader exits ('sudosrv \\| tee', a restarting container log shim) kills it on the next log line. Not reachable under the shipped unit, where s… |
+| `ARCH-010` | `SIGPIPE` is ignored | PARTIAL | low | `internal/protocol/processor.go:152-164, cmd/sudosrv/main.go…` | Running the daemon with stdout on a pipe whose reader exits ('sudosrv \\| tee', a restarting container log shim) kills it on the next log line. Not reachable under the shipped unit, where st… |
 | `ARCH-011` | No privilege dropping, no chroot | MATCH | none | `—` | — |
 | `ARCH-012` | One listener per resolved address; wildcard yields IPv4 and… | PARTIAL | low | `internal/server/server.go:77-110, internal/config/config.go…` | A multi-address hostname in listen_address binds only one of them; clients reaching the others get ECONNREFUSED and, with ignore_iolog_errors=false, have their commands refused. The loopbac… |
 | `ARCH-013` | Listener socket options and backlog | PARTIAL | informational | `internal/server/server.go:78, internal/server/server.go:104` | none observable — identical reachability for every peer; a sockopt difference with no wire, on-disk or client-visible effect. |
@@ -243,7 +244,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-018` | All I/O log opens use `O_NOFOLLOW`, with `EACCES` fallbacks | PARTIAL | low | `internal/storage/session.go:150-171,357,766` | The seq symlink is only exploitable by someone who can already write log_directory, which is root-owned - not a practical escalation. The missing swapids retry means a root-squashing NFS ex… |
 | `IOLOG-019` | On accept, seven files are created; `stdin`/`ttyin` are lazy | MATCH | none | `internal/storage/session.go:1035-1076,1082-1102,1166` | — |
 | `IOLOG-020` | The `uuid` file holds exactly 36 bytes with no terminator | DIVERGENT | low | `internal/storage/session.go:1035 (and :446 for event sessio…` | Downgraded from medium: the ONLY reader of the uuid file in the whole reference tree is verify_iolog_uuid, which runs only on the restart path - and the production client never restarts (lo… |
-| `IOLOG-021` | The legacy `log` file has a fixed three-line colon-delimite… | MATCH | none | `internal/storage/session.go` | Both divergences fixed: line 3 now appends runargv[1..] after the command, and lines/columns default to 24x80 as C seeds them. Verified byte-for-byte against the real sudo_logsrvd fed the identical session. |
+| `IOLOG-021` | The legacy `log` file has a fixed three-line colon-delimite… | MATCH | none | `internal/storage/session.go` | — |
 | `IOLOG-022` | `log.json` is pretty-printed with 4-space indent and wrappe… | DIVERGENT | low | `internal/storage/session.go:1113-1152` | Cosmetic. I verified the byte-level compatibility that matters: Go's output still ends in exactly "\n}\n", which is what C's store_exit_info_json lseek(fd,-3,SEEK_END) (logsrvd_local.c:348)… |
 | `IOLOG-023` | `log.json` field set and order are fixed | DIVERGENT | low | `internal/storage/session.go:983-1029,1113-1118` | sudoreplay still parses Go-written log.json. Go-only keys (server_log_id, submit_time, restarts, alerts, sub_commands) are unknown keys that eventlog_json_parse tolerates with a debug warni… |
 | `IOLOG-024` | The `timestamp` object holds the client's submit time in se… | MATCH | none | `internal/storage/session.go:1016-1029` | — |
@@ -273,7 +274,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-048` | An aborted session leaves its files in place, writable and… | MATCH | none | `internal/storage/session.go:1720-1765; internal/connection/…` | — |
 | `IOLOG-049` | Re-used session directories are truncated per-file, not cle… | MATCH | none | `internal/storage/session.go` | — |
 | `IOLOG-050` | Sub-commands in a session reuse the parent's `iolog_path` a… | PARTIAL | low | `internal/storage/session.go:1317-1362` | The essential property holds - no second session directory, parent's log_id reused, nothing on disk relocated. An auditor must subtract timestamps by hand to place the sub-command in the re… |
-| `IOLOG-051` | Required AcceptMessage info keys, and the defaults applied… | MATCH | none | `internal/connection/handler.go:713-728; internal/storage/se…` | The lines/columns half is fixed: both default to 24x80 as C seeds them before parsing info messages, so log.json always carries them and the legacy log line no longer ends in two empty fields. |
+| `IOLOG-051` | Required AcceptMessage info keys, and the defaults applied… | MATCH | none | `internal/connection/handler.go:713-728; internal/storage/se…` | — |
 
 ### Relay Mode & Store-and-Forward
 
@@ -383,4 +384,19 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-039` | Configuration parsing is strict: unknown sections, unknown… | PARTIAL | low | `internal/config/config.go:179-189, internal/config/config.g…` | Typos and pasted foreign keys are accepted silently and never take effect, where C fails the whole read. Values that do have setters are validated at least as strictly as C. |
 | `TLS-040` | The `-R` option randomly drops connections and is a debuggi… | ABSENT | informational | `cmd/sudosrv/main.go:76-84` | none in production — only the built-in way to exercise a client's RestartMessage/resume path against this server is missing. |
 | `TLS-041` | Listener sockets set `SO_REUSEADDR`, `IPV6_V6ONLY`, non-blo… | PARTIAL | low | `internal/server/server.go:78, internal/server/server.go:104…` | One listener instead of two, IPv4-mapped peers accepted on the v6 socket, and IPv4 clients logged as remote_addr "[::ffff:10.0.0.1]:port" rather than "10.0.0.1:port" — which will not match… |
+
+### Producer-Side Recording & Timing
+
+Spec: [`07-producer.md`](07-producer.md)
+
+| ID | Requirement | Verdict | Sev | Go source | Consequence |
+|---|---|---|---|---|---|
+| `PROD-001` | A timing record's delay is the pause before its own bytes | MATCH | none | `internal/logshell/record.go:376-383, internal/storage/sessi…` | — |
+| `PROD-002` | Measure, stamp, then advance | MATCH | none | `internal/logshell/record.go:376-383` | — |
+| `PROD-003` | The delay chain is seeded before the command produces output | MATCH | none | `internal/logshell/record.go:339, internal/logshell/record.g…` | — |
+| `PROD-004` | One delay chain spans every stream and event type | MATCH | none | `internal/logshell/record.go:370-384, internal/logshell/susp…` | — |
+| `PROD-005` | The timestamp is sampled before delivery, not after | MATCH | none | `internal/logshell/record.go:381-383` | — |
+| `PROD-006` | A trailing idle with no following event is not recorded | MATCH | none | `internal/logshell/record.go:370-384` | — |
+| `PROD-007` | I/O events are timestamped when observed, not when delivere… | DIVERGENT | low | `internal/logshell/relay.go:271-274` | relayOutput writes the user's terminal BEFORE calling rec.TTYOut, so a blocked outer-terminal write is measured into the following chunk's delay; C logs at read time (exec_pty.c:432). Bound… |
+| `PROD-008` | Suspend and resume are events on the delay chain | MATCH | none | `internal/logshell/suspend.go:26-34, internal/logshell/suspe…` | — |
 

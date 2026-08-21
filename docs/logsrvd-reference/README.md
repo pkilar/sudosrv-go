@@ -21,7 +21,7 @@ Every document here is pinned to a specific sudo revision, recorded in its heade
 | **Git revision** | `36f7128256a93571ec378daa5c209d6883036d31` (2026-07-19) |
 | **`git describe`** | `TAG-1125-g36f712825` |
 | **Source tree used** | `~/Devel/sudo` |
-| **Verified against** | `sudosrv` — all 312 requirements re-derived; see `git log docs/logsrvd-reference/` |
+| **Verified against** | `sudosrv` — all 320 requirements re-derived; see `git log docs/logsrvd-reference/` |
 
 If the header of an individual document disagrees with this table, that document is
 stale — it was not refreshed in the last pass. Trust the per-document header.
@@ -36,8 +36,9 @@ stale — it was not refreshed in the last pass. Trust the per-document header.
 | [`04-local-storage.md`](04-local-storage.md) | `IOLOG-` | 51 | On-disk I/O log format, escape expansion, sequence numbers |
 | [`05-relay.md`](05-relay.md) | `RELAY-` | 54 | Relay mode, journalling, queue, retry policy |
 | [`06-tls-and-security.md`](06-tls-and-security.md) | `TLS-` | 41 | TLS setup, peer verification, privilege posture |
-| [`CONFORMANCE.md`](CONFORMANCE.md) | — | 312 | The matrix: requirement → Go location → verdict |
-| [`conformance-data.json`](conformance-data.json) | — | 312 | The verdicts the matrix is rendered from |
+| [`07-producer.md`](07-producer.md) | `PROD-` | 8 | Producer-side delay measurement and the replay contract |
+| [`CONFORMANCE.md`](CONFORMANCE.md) | — | 320 | The matrix: requirement → Go location → verdict |
+| [`conformance-data.json`](conformance-data.json) | — | 320 | The verdicts the matrix is rendered from |
 | [`generate-conformance.py`](generate-conformance.py) | — | — | Renders `CONFORMANCE.md` from that data |
 
 `CONFORMANCE.md` is **generated**, not hand-written. To re-grade a requirement, edit its
@@ -56,12 +57,12 @@ python3 docs/logsrvd-reference/generate-conformance.py
 
 ## Where conformance stands
 
-All 312 requirements were re-verified against the current tree and every non-`MATCH`
-verdict independently challenged: **114 `MATCH`**, 27 `INTENTIONAL`, 87 `PARTIAL`,
-36 `DIVERGENT`, 33 `ABSENT`, 15 `NA`.
+All 320 requirements were re-verified against the current tree and every non-`MATCH`
+verdict independently challenged: **121 `MATCH`**, 27 `INTENTIONAL`, 87 `PARTIAL`,
+37 `DIVERGENT`, 33 `ABSENT`, 15 `NA`.
 
 **Nothing is graded `medium`, `high` or `breaking`.** Every requirement that named a defect
-has been closed. What remains is `low` (154) or `informational` (29), and the largest
+has been closed. What remains is `low` (155) or `informational` (29), and the largest
 single movement has been from `PARTIAL`/`ABSENT` into `INTENTIONAL` — divergences that are
 now deliberate and have their reasons recorded in the code they describe.
 
@@ -144,9 +145,21 @@ seemed reasonable" is `DIVERGENT`.
 
 ## Scope boundary
 
-These documents describe **`sudo_logsrvd`, the server**. Client behavior
-(`plugins/sudoers/log_client.c`, `logsrvd/sendlog.c`) appears only where it constrains
-the server — most importantly what the client blocks on during teardown. This is not a
-specification of sudo's client side, and it is not a specification of `sudosrv`'s own
-additions (the management API, the YAML config format, the password filter), which have
-no C counterpart and are documented in the top-level `README.md`.
+Documents [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) describe
+**`sudo_logsrvd`, the server**. Client behavior (`plugins/sudoers/log_client.c`,
+`logsrvd/sendlog.c`) appears there only where it constrains the server — most importantly
+what the client blocks on during teardown.
+
+[`07`](07-producer.md) is the one deliberate exception, and it was added late. `sudosrv`
+grew a **producer**: `logsh`, the recording login shell, occupies the role C fills with
+`plugins/sudoers/iolog.c`, deciding what delay each I/O record carries before anything is
+written or transmitted. The server-only corpus cannot constrain that. [IOLOG-032](04-local-storage.md)
+requires only that the server transcribe the client's `delay` unmodified — it presupposes a
+correct delay and never says what correct means — so a producer could stamp delays one
+record out of step, violate no requirement here, and still produce recordings that replay
+wrong. `PROD-` closes that hole. It specifies sudo's producer side only to the extent that
+`sudosrv` reimplements it; the rest of the client remains out of scope.
+
+None of these documents specify `sudosrv`'s own additions (the management API, the YAML
+config format, the password filter), which have no C counterpart and are documented in the
+top-level `README.md`.

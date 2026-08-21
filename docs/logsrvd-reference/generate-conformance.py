@@ -29,6 +29,7 @@ SUBSYS = [
     ("IOLOG", "04-local-storage.md",    "Local I/O Log Storage Format"),
     ("RELAY", "05-relay.md",            "Relay Mode & Store-and-Forward"),
     ("TLS",   "06-tls-and-security.md", "TLS, Authentication & Security Posture"),
+    ("PROD",  "07-producer.md",         "Producer-Side Recording & Timing"),
 ]
 STATUSES = ["MATCH", "INTENTIONAL", "PARTIAL", "DIVERGENT", "ABSENT", "NA"]
 SEVERITIES = ["breaking", "high", "medium", "low", "informational"]
@@ -58,7 +59,16 @@ def esc(s):
 
 def clip(s, n):
     s = esc(s)
-    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+    if len(s) <= n:
+        return s
+    # Values reconstructed from an earlier render are already clipped and can sit
+    # a character or two over the limit. Re-clipping those ate one more character
+    # on every regeneration, so a field that had been truncated once shrank a
+    # little further each time the matrix was rebuilt. Anything already ending in
+    # the ellipsis has had its turn.
+    if s.endswith("…"):
+        return s
+    return s[: n - 1].rstrip() + "…"
 
 
 def main():
@@ -93,7 +103,7 @@ def main():
     A("# Conformance Matrix — `sudosrv` vs. C `sudo_logsrvd`")
     A("")
     A(f"> **Reference:** {REFERENCE_VERSION} — `{REFERENCE_SHA}` ({REFERENCE_DATE})  ")
-    A("> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`06`](06-tls-and-security.md) "
+    A("> **Method:** every numbered requirement in [`01`](01-architecture.md)–[`07`](07-producer.md) "
       "was checked against the Go source, then every non-`MATCH` verdict was independently "
       "challenged by a second pass instructed to refute it. Verdict vocabulary is defined in "
       "[README.md](README.md#verdict-vocabulary).")
