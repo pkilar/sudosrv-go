@@ -4,6 +4,7 @@ package logshell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -16,6 +17,20 @@ import (
 	"testing"
 	"time"
 )
+
+// ioRecord is one session message as the server saw it: which stream it was on,
+// the delay it carried, and how many payload bytes came with it.
+//
+// The delay is kept PER RECORD on purpose. Summing the delay column, or merely
+// counting records, is invariant under sliding every delay onto its neighbour --
+// which is precisely the defect worth catching, because sudoreplay sleeps a
+// record's delay BEFORE writing that record's bytes, so a one-record slide
+// replays every burst of output one idle gap late.
+type ioRecord struct {
+	kind  string // "ttyout", "ttyin", "winsize", "suspend"
+	delay time.Duration
+	bytes int
+}
 
 // mockServer is a minimal sudo_logsrv server: enough of the protocol to accept a
 // session from logsh and record what it was told.
@@ -30,8 +45,27 @@ type mockServer struct {
 	winsizes []*pb.ChangeWindowSize
 	suspend  []string
 	exit     *pb.ExitMessage
+	io       []ioRecord
 
 	done chan struct{}
+}
+
+// records returns every I/O message the server received, in order.
+func (s *mockServer) records() []ioRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ioRecord(nil), s.io...)
+}
+
+// ofKind filters records down to one stream.
+func ofKind(recs []ioRecord, kind string) []ioRecord {
+	var out []ioRecord
+	for _, r := range recs {
+		if r.kind == kind {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func newMockServer(t *testing.T) *mockServer {
@@ -76,6 +110,7 @@ func (s *mockServer) serve() {
 		case *pb.ClientMessage_TtyoutBuf:
 			s.mu.Lock()
 			s.ttyout.Write(m.TtyoutBuf.GetData())
+			s.io = append(s.io, ioRecord{"ttyout", messageDelay(msg), len(m.TtyoutBuf.GetData())})
 			s.mu.Unlock()
 			// The real server emits a commit point on the FIRST I/O event and
 			// every ACK_FREQUENCY after (internal/storage writeIoEntry), so one
@@ -90,14 +125,17 @@ func (s *mockServer) serve() {
 		case *pb.ClientMessage_TtyinBuf:
 			s.mu.Lock()
 			s.ttyin.Write(m.TtyinBuf.GetData())
+			s.io = append(s.io, ioRecord{"ttyin", messageDelay(msg), len(m.TtyinBuf.GetData())})
 			s.mu.Unlock()
 		case *pb.ClientMessage_WinsizeEvent:
 			s.mu.Lock()
 			s.winsizes = append(s.winsizes, m.WinsizeEvent)
+			s.io = append(s.io, ioRecord{"winsize", messageDelay(msg), 0})
 			s.mu.Unlock()
 		case *pb.ClientMessage_SuspendEvent:
 			s.mu.Lock()
 			s.suspend = append(s.suspend, m.SuspendEvent.GetSignal())
+			s.io = append(s.io, ioRecord{"suspend", messageDelay(msg), 0})
 			s.mu.Unlock()
 		case *pb.ClientMessage_ExitMsg:
 			s.mu.Lock()
@@ -402,7 +440,8 @@ func TestRecorderDelaysAreDeltas(t *testing.T) {
 		t.Errorf("LogID = %q, want the id the server assigned", rec.LogID())
 	}
 
-	time.Sleep(60 * time.Millisecond)
+	const gap = 60 * time.Millisecond
+	time.Sleep(gap)
 	if err := rec.TTYOut([]byte("a")); err != nil {
 		t.Fatal(err)
 	}
@@ -413,19 +452,144 @@ func TestRecorderDelaysAreDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The second buffer follows the first immediately, so its delay must be tiny
-	// even though 60ms elapsed since the session began.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if out, _, _, exit, _ := srv.snapshot(); exit != nil && out == "ab" {
-			return
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	out, _, _, _, _ := srv.snapshot()
-	t.Errorf("server received ttyout %q, want %q", out, "ab")
+	if out, _, _, _, _ := srv.snapshot(); out != "ab" {
+		t.Fatalf("server received ttyout %q, want %q", out, "ab")
+	}
+
+	got := ofKind(srv.records(), "ttyout")
+	if len(got) != 2 {
+		t.Fatalf("server saw %d ttyout records, want 2", len(got))
+	}
+
+	// The gap PRECEDES "a", so "a" is the record that must carry it. Asserting
+	// this per record is the point: the sum is 60ms either way, so a version
+	// that stamped the gap on "b" instead -- replaying as a pause between the
+	// two characters that never happened -- passes any total-based check.
+	if got[0].delay < gap/2 {
+		t.Errorf(`delay on "a" = %v, want about %v: the idle that preceded a `+
+			`record belongs to THAT record, because sudoreplay sleeps a `+
+			`record's delay before writing its bytes`, got[0].delay, gap)
+	}
+	if got[1].delay > gap/2 {
+		t.Errorf(`delay on "b" = %v, want near zero: "b" followed "a" with no `+
+			`pause, so the 60ms belongs to "a" and must not be repeated here `+
+			`(a delay is a delta from the previous event, never an absolute `+
+			`timestamp)`, got[1].delay)
+	}
 }
 
 // discard keeps io.Writer in the import set for TerminalIO's Out field in tests
 // that do not inspect what the user saw.
 var _ io.Writer = io.Discard
+
+// blockingSink is a Sink whose delivery takes a fixed, visible amount of time,
+// standing in for a congested link or a busy daemon.
+type blockingSink struct {
+	block time.Duration
+
+	mu   sync.Mutex
+	seen []time.Duration
+}
+
+func (b *blockingSink) Start(context.Context, *pb.ClientMessage) (string, error) {
+	return "stub-log-id", nil
+}
+
+func (b *blockingSink) Send(msg *pb.ClientMessage) error {
+	time.Sleep(b.block)
+	b.mu.Lock()
+	b.seen = append(b.seen, messageDelay(msg))
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *blockingSink) Finish(context.Context, time.Duration) error { return nil }
+func (b *blockingSink) Close() error                                { return nil }
+
+func (b *blockingSink) delays() []time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]time.Duration(nil), b.seen...)
+}
+
+// TestSlowDeliveryIsChargedToTheNextEventExactlyOnce pins stamping order
+// against a sink that blocks.
+//
+// send() commits r.last = now BEFORE handing the message to the sink, so time
+// spent inside delivery falls into the NEXT event's delta. That looks like a
+// defect and is not: C does the same thing at plugins/sudoers/iolog.c:1076-1081,
+// sampling `now`, calling io_operations.log(...), and only then storing that
+// same pre-delivery timestamp into last_time. The delay a record carries is the
+// gap between when two events were OFFERED to the recorder, which is what a
+// viewer actually experienced -- a stalled recorder really does hold the relay
+// loop, so that time really did pass.
+//
+// What must not happen is the timestamp moving to after delivery. Doing that --
+// a tempting way to "stop charging backpressure to the next event" -- makes
+// every delta measure from the end of the previous write instead of its start,
+// so blocked time is silently dropped from the transcript and the replay runs
+// faster than the session did. Here that would show as near-zero delays for
+// events that were really a full block apart.
+func TestSlowDeliveryIsChargedToTheNextEventExactlyOnce(t *testing.T) {
+	const block = 150 * time.Millisecond
+
+	sink := &blockingSink{block: block}
+	now := time.Now()
+	rec := &Recorder{sink: sink, cfg: testConfig("unused"), start: now, last: now}
+
+	for range 3 {
+		if err := rec.TTYOut([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elapsed := time.Since(now)
+
+	got := sink.delays()
+	if len(got) != 3 {
+		t.Fatalf("sink saw %d messages, want 3", len(got))
+	}
+
+	// Nothing preceded the first event, so it carries no delay -- in particular
+	// it is not charged for its own delivery.
+	if got[0] > block/2 {
+		t.Errorf("delay on the first event = %v, want near zero; nothing "+
+			"preceded it", got[0])
+	}
+
+	// Each later event was offered one blocked delivery after the one before,
+	// so it carries about one block: not zero (time silently dropped) and not
+	// two (the same stall counted twice).
+	for i := 1; i < len(got); i++ {
+		if got[i] < block/2 {
+			t.Errorf("delay on event %d = %v, want about %v: %v really did pass "+
+				"between the two events being offered, and a transcript that "+
+				"omits it replays faster than the session ran", i, got[i], block, block)
+		}
+		if got[i] > 2*block {
+			t.Errorf("delay on event %d = %v, want about %v: one stall is being "+
+				"counted more than once", i, got[i], block)
+		}
+	}
+
+	// The delays are the session's clock, so they must add up to the time that
+	// actually elapsed rather than drifting from it.
+	var total time.Duration
+	for _, d := range got {
+		total += d
+	}
+	if total > elapsed {
+		t.Errorf("delays total %v but only %v elapsed; the recorded clock "+
+			"outruns real time", total, elapsed)
+	}
+	if total < elapsed/2 {
+		t.Errorf("delays total %v against %v elapsed; the recorded clock is "+
+			"losing time the session spent", total, elapsed)
+	}
+}
