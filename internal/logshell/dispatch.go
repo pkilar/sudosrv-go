@@ -14,6 +14,17 @@ import (
 // other name it looks that name up in Config.Shells.
 const AdminName = "logsh"
 
+// EntryName is the name logsh is invoked under when sshd runs it as a forced
+// command. /usr/sbin/logsh-entry is a symlink to the binary, and that path is
+// what sshd_config's ForceCommand and the force-command critical option on a
+// privileged certificate both name.
+//
+// A name rather than a flag, for two reasons. sshd invokes a forced command as
+// `$SHELL -c "<command>"`, so argv[0] is the only thing logsh controls; and
+// dispatching on it happens before any flag parsing, which keeps -config
+// unreachable on a path that runs before any user code in a root session.
+const EntryName = "logsh-entry"
+
 // Invocation is how logsh was entered, decomposed.
 type Invocation struct {
 	// Name is the basename of argv[0] with any leading "-" removed: the key to
@@ -54,6 +65,10 @@ func ParseInvocation(argv []string) Invocation {
 // IsAdmin reports whether this invocation is an administrative one rather than a
 // shell one.
 func (i Invocation) IsAdmin() bool { return i.Name == AdminName }
+
+// IsEntry reports whether sshd is running logsh as a forced command, as opposed
+// to as a login shell or an administrative invocation.
+func (i Invocation) IsEntry() bool { return i.Name == EntryName }
 
 // ResolveShell maps an invocation name to the real shell it stands for.
 //

@@ -271,3 +271,41 @@ func TestNamesInUseIgnoresShellsOutsideTheMap(t *testing.T) {
 		t.Errorf("in-use set = %v, want empty; no account uses a logsh symlink here", inUse)
 	}
 }
+
+// TestIsEntry pins the forced-command invocation name.
+//
+// sshd runs a ForceCommand through the user's login shell with -c, so argv[0]
+// is the only channel logsh controls and there is never a leading dash. The
+// name has to be recognised before any flag parsing is reached: a mode selected
+// by a flag would be a mode reachable from a config path, and this one must not
+// be.
+func TestIsEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"absolute path, as sshd invokes it", []string{"/usr/sbin/logsh-entry"}, true},
+		{"bare name", []string{"logsh-entry"}, true},
+		{"admin invocation is not the entry point", []string{"/usr/sbin/logsh"}, false},
+		{"a login shell is not the entry point", []string{"-lbash"}, false},
+		{"a lookalike does not match", []string{"logsh-entrypoint"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseInvocation(tt.argv).IsEntry(); got != tt.want {
+				t.Errorf("IsEntry(%q) = %v, want %v", tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEntryIsNotAdmin guards the dispatch order in main: the two predicates
+// must be mutually exclusive, or the entry point falls through to the flag
+// parser.
+func TestEntryIsNotAdmin(t *testing.T) {
+	inv := ParseInvocation([]string{"/usr/sbin/logsh-entry"})
+	if inv.IsAdmin() {
+		t.Error("logsh-entry must not be treated as an admin invocation")
+	}
+}

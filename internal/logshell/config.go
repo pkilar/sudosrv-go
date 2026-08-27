@@ -349,6 +349,13 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("shells[%s]: %q is not an absolute path", name, shell)
 		}
 	}
+	// One name, one meaning. EntryName selects the forced-command mode from
+	// argv[0]; a mapping under the same key would make that symlink resolvable
+	// as a login shell too, and which behaviour won would depend on the order of
+	// two predicates in main rather than on anything the operator wrote.
+	if _, ok := c.Shells[EntryName]; ok {
+		return fmt.Errorf("shells[%s]: %s names the forced-command entry point and cannot also be a shell mapping", EntryName, EntryName)
+	}
 	if c.Server.UpstreamHost == "" {
 		return fmt.Errorf("server.upstream_host: must be set")
 	}

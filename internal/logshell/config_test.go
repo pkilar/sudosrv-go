@@ -273,3 +273,18 @@ func TestClientConfigCarriesLogshClientID(t *testing.T) {
 		t.Error("logsh is announcing itself as the relay")
 	}
 }
+
+// TestValidateRejectsEntryNameAsShell stops one name meaning two things.
+//
+// logsh-entry selects the forced-command mode from argv[0]. A shells mapping
+// under the same key would make the same symlink also resolvable as a login
+// shell, and which one won would depend on the order of two predicates in main.
+func TestValidateRejectsEntryNameAsShell(t *testing.T) {
+	_, err := load(writeConfig(t, "record_users: [root]\nshells:\n  logsh-entry: /bin/bash\n"), selfUID(t))
+	if err == nil {
+		t.Fatal("want an error for shells[logsh-entry], got nil")
+	}
+	if !strings.Contains(err.Error(), EntryName) {
+		t.Errorf("error should name %q, got: %v", EntryName, err)
+	}
+}
