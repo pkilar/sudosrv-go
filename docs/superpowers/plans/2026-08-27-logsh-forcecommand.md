@@ -796,7 +796,15 @@ transport stack, since nothing here dials or accepts a connection."
   - `type SessionInfo struct { Auth AuthInfo; SSHCommand, SSHClient string }`
   - `func (m *SessionMeta) ApplyAuthInfo(info SessionInfo)`
   - `SessionMeta.Info SessionInfo` field
-  - Info keys: `logsh_auth_method`, `logsh_cert_keyid`, `logsh_cert_serial`, `logsh_cert_ca`, `logsh_cert_principals`, `logsh_ssh_command`, `logsh_ssh_client`
+  - Info keys: `logsh_auth_method`, `logsh_cert_keyid`, `logsh_cert_serial`, `logsh_cert_ca`, `logsh_cert_principals`, `logsh_ssh_command`, `logsh_ssh_client`, and `logsh_auth_key` (the credential fingerprint — see below)
+
+`logsh_auth_key` is the eighth key and the one most easily missed. The design's key table lists only the
+certificate keys, but a plain-key root login is forbidden from naming anyone in `submituser`, so this
+fingerprint is the ONLY thing in the record identifying which credential opened that session — and a
+plain-key root login is exactly what the certificate migration exists to eliminate, so a SIEM rule is
+meant to fire on it. Test it like the other seven: assert it carries the fingerprint when set, assert it
+is omitted when unset, and assert the plain-key record shape end to end (`logsh_auth_key` present AND
+`logsh_cert_keyid` absent, together, from a real `InfoMessages()` call).
 
 - [ ] **Step 1: Write the failing test**
 
