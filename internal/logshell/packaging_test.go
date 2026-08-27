@@ -590,7 +590,7 @@ func TestInstallScriptShipsTheEntrySymlink(t *testing.T) {
 		t.Errorf("install script must declare ENTRY_SYMLINKS=%q", EntryName)
 	}
 	// The /etc/shells registration loop must not reach the entry name.
-	for _, line := range strings.Split(script, "\n") {
+	for line := range strings.SplitSeq(script, "\n") {
 		if strings.Contains(line, "add_shell") && strings.Contains(line, "ENTRY_SYMLINKS") {
 			t.Errorf("the entry symlink must never be registered in /etc/shells: %q", line)
 		}

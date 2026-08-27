@@ -76,6 +76,16 @@ const (
 // success without running something: a forced command that exits 0 having
 // exec'd nothing hands the client a session that nothing recorded.
 func runSession(s session) int {
+	if s.Target == nil {
+		// Both callers resolve a target before reaching here, and passthrough
+		// and refuse each defend against nil -- but the recording path below
+		// dereferences it, so a caller that skipped resolution would panic,
+		// which is neither an exec nor a refusal. Guarding here makes the
+		// contract above true of this code rather than of its callers'
+		// discipline.
+		return refuse(s.Config, nil, "no target was resolved for this session")
+	}
+
 	if !s.Config.ShouldRecord(s.Username, s.UID) {
 		return passthrough(s.Target)
 	}

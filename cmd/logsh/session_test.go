@@ -58,8 +58,7 @@ func TestRunSessionSkipsWhenNestedInsideAnotherLogsh(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 
 			code := 0
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 				code = ee.ExitCode()
 			} else if err != nil {
 				t.Fatalf("helper subprocess: %v\noutput: %s", err, out)
@@ -113,4 +112,25 @@ func TestRunSessionNestingHelperProcess(t *testing.T) {
 		Username:   "",
 		Kind:       kindLoginShell,
 	}))
+}
+
+// TestRunSessionRefusesWithNoTarget pins the contract runSession's doc comment
+// states: every path ends in an exec or a refusal, never a panic.
+//
+// Both callers resolve a target before calling, so this is unreachable today.
+// It is pinned anyway because the recording path dereferences Target while
+// passthrough and refuse both tolerate nil -- so the one path that would panic
+// is the one a future caller is most likely to reach.
+func TestRunSessionRefusesWithNoTarget(t *testing.T) {
+	cfg := logshell.DefaultConfig()
+	cfg.RecordUsers = []string{strconv.Itoa(os.Getuid())}
+
+	if got := runSession(session{
+		Config: cfg,
+		Target: nil,
+		UID:    os.Getuid(),
+		Kind:   kindLoginShell,
+	}); got != exitRefused {
+		t.Errorf("runSession with no target = %d, want exitRefused (%d)", got, exitRefused)
+	}
 }
