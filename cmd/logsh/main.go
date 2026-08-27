@@ -103,81 +103,19 @@ func runShell(inv logshell.Invocation) int {
 	}
 
 	uid := os.Getuid()
-	username := lookupUsername(uid)
-
-	if !cfg.ShouldRecord(username, uid) {
-		return passthrough(targetFromInvocation(inv, shellPath))
-	}
-
-	// Interactive or not is decided by whether a terminal is attached, NEVER by
-	// whether "-c" was passed. `ssh -t host /bin/bash` supplies a command AND
-	// allocates a pty; keying off "-c" would classify it as non-interactive and
-	// hand the user a fully interactive, entirely unrecorded shell.
-	ctx := context.Background()
-
-	// The command log is independent of recording: its own toggle, local syslog
-	// rather than the log server, and it runs whether the session is recorded,
-	// journalled, or not recorded at all.
-	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg)
-	if cmdLogErr != nil {
-		if cfg.CommandLog.Required {
-			return refuse(cfg, targetFromInvocation(inv, shellPath), fmt.Sprintf("command log unavailable: %v", cmdLogErr))
-		}
-		logshell.Alertf(syslog.LOG_WARNING, "command log unavailable, continuing without it: %v", cmdLogErr)
-	}
-	defer func() { _ = cmdLog.Close() }()
-
-	// Something above us may already be recording these keystrokes. `sudo -i`
-	// runs the target account's passwd shell, so once logsh IS that shell the
-	// session is captured twice -- three times when the invoking account also
-	// uses logsh -- with a pseudo-terminal layer for each.
-	nesting := logshell.DetectNesting()
-
-	// Both non-interactive entry points below take this as one value. The
-	// terminal path builds its own, since it attaches a TerminalIO instead.
-	spec := logshell.RunSpec{
+	return runSession(session{
 		Config:     cfg,
+		Target:     targetFromInvocation(inv, shellPath),
 		Invocation: inv,
-		ShellPath:  shellPath,
-		Std:        logshell.StdStreams(),
-		CmdLog:     cmdLog,
-		EnvShell:   shellPath, // a login shell: $SHELL must name the real shell
-	}
-
-	var outcome logshell.Outcome
-	switch mode := cfg.NestedMode(nesting); mode {
-	case logshell.NestedModeSkip:
-		logshell.Alertf(syslog.LOG_INFO,
-			"session nested inside %s; not recording here (nested_sessions=%s)",
-			nesting.Kind, mode)
-		return passthrough(targetFromInvocation(inv, shellPath))
-
-	case logshell.NestedModeMetadata:
-		// Streams pass straight through, so no second pty and no duplicate
-		// transcript -- but the session still leaves a record, carrying both
-		// UUIDs so it joins to whatever the outer recorder stored.
-		outcome, err = logshell.RunMetadataOnly(ctx, spec, nesting)
-
-	default:
-		if logshell.IsTerminal(os.Stdin.Fd()) {
-			outcome, err = logshell.RunRecorded(ctx, spec, logshell.StdTerminal())
-		} else {
-			outcome, err = logshell.RunNonInteractive(ctx, spec)
-		}
-	}
-	if err != nil {
-		if errors.Is(err, logshell.ErrRecordingUnavailable) {
-			// No shell was ever started, so the failure policy still has a
-			// meaningful choice to make.
-			return refuse(cfg, targetFromInvocation(inv, shellPath), err.Error())
-		}
-		// The shell ran. The audit gap has already happened and cannot be
-		// undone by refusing; the user's exit status is a fact they are owed.
-		// Report loudly and pass it through.
-		logshell.Alertf(syslog.LOG_CRIT,
-			"session for uid %d ran but was NOT durably recorded: %v", uid, err)
-	}
-	return outcome.ExitCode
+		// Something above us may already be recording these keystrokes. `sudo -i`
+		// runs the target account's passwd shell, so once logsh IS that shell the
+		// session is captured twice -- three times when the invoking account also
+		// uses logsh -- with a pseudo-terminal layer for each.
+		Nesting:  logshell.DetectNesting(),
+		UID:      uid,
+		Username: lookupUsername(uid),
+		Kind:     kindLoginShell,
+	})
 }
 
 // lookupUsername resolves uid to a name, or "" if it cannot.

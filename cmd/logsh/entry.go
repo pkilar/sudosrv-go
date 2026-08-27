@@ -3,9 +3,6 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"log/syslog"
 	"os"
 	"path/filepath"
@@ -99,23 +96,9 @@ func runForceCommand(cfg *logshell.Config) int {
 
 	tgt := targetFromRoute(target)
 
-	if !cfg.ShouldRecord(username, uid) {
-		return passthrough(tgt)
-	}
-
-	ctx := context.Background()
-
-	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg)
-	if cmdLogErr != nil {
-		if cfg.CommandLog.Required {
-			return refuse(cfg, tgt, fmt.Sprintf("command log unavailable: %v", cmdLogErr))
-		}
-		logshell.Alertf(syslog.LOG_WARNING, "command log unavailable, continuing without it: %v", cmdLogErr)
-	}
-	defer func() { _ = cmdLog.Close() }()
-
-	spec := logshell.RunSpec{
+	return runSession(session{
 		Config: cfg,
+		Target: tgt,
 		// The route's argv, expressed as an Invocation so the recorders build
 		// argv[0] the one way ChildArgv0 knows.
 		Invocation: logshell.Invocation{
@@ -123,36 +106,15 @@ func runForceCommand(cfg *logshell.Config) int {
 			LoginShell: target.Kind == logshell.RouteInteractive,
 			Args:       tgt.args,
 		},
-		ShellPath: tgt.path,
-		Std:       logshell.StdStreams(),
-		CmdLog:    cmdLog,
-		Info:      info,
-		EnvShell:  tgt.envShell,
-	}
-
-	var outcome logshell.Outcome
-	var err error
-	// Interactive or not is decided by whether a terminal is attached, NEVER by
-	// the route kind. `ssh -t root@host /bin/bash` supplies a command AND
-	// allocates a pty; keying off the route would classify it as non-interactive
-	// and hand the user a fully interactive, entirely unrecorded shell. This is
-	// the same rule runShell applies, for the same reason.
-	if logshell.IsTerminal(os.Stdin.Fd()) {
-		outcome, err = logshell.RunRecorded(ctx, spec, logshell.StdTerminal())
-	} else {
-		outcome, err = logshell.RunNonInteractive(ctx, spec)
-	}
-
-	if err != nil {
-		if errors.Is(err, logshell.ErrRecordingUnavailable) {
-			// No child was ever started, so the failure policy still has a
-			// meaningful choice to make.
-			return refuse(cfg, tgt, err.Error())
-		}
-		// The child ran. The audit gap has already happened and cannot be undone
-		// by refusing; the user's exit status is a fact they are owed.
-		logshell.Alertf(syslog.LOG_CRIT,
-			"forced-command session for uid %d ran but was NOT durably recorded: %v", uid, err)
-	}
-	return outcome.ExitCode
+		Info: info,
+		// Under sshd nothing above us is recording, so this is NestedNone and
+		// NestedMode returns "record" -- the same branch this path took before
+		// it shared a runner, so the refactor changes nothing here. Consulting
+		// it anyway is what makes a logsh-entry that somehow ran inside another
+		// logsh skip rather than capture the same bytes a second time.
+		Nesting:  logshell.DetectNesting(),
+		UID:      uid,
+		Username: username,
+		Kind:     kindForceCommand,
+	})
 }
