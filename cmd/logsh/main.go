@@ -71,7 +71,7 @@ func main() {
 			// There is nothing resolved to exec, so no target.
 			os.Exit(refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err)))
 		}
-		os.Exit(runForceCommand(inv, cfg))
+		os.Exit(runForceCommand(cfg))
 	}
 	os.Exit(runShell(inv))
 }

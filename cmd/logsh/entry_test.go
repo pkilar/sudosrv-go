@@ -103,12 +103,32 @@ func TestEntryNameDispatchesAwayFromAdmin(t *testing.T) {
 // separately by TestEntryNameDispatchesAwayFromAdmin, which pins that a
 // logsh-entry invocation is recognised as IsEntry() and never reaches
 // runAdmin; what happens once runForceCommand has a config in hand is exactly
-// what this test checks, directly, with no skip and no host dependence.
+// what this test checks, directly, with no skip.
+//
+// The temp config also sets force_command.shell (see below), which is a
+// SEPARATE host dependence from the ownership gate above: without it, the
+// default and interactive routes' shell would come from THIS RUNNER's own
+// /etc/passwd entry via ResolveEntryShell, not from anything this test
+// controls, and would fail confusingly on a runner whose shell cannot run
+// "-c COMMAND".
 func TestForcedCommandRoutesExec(t *testing.T) {
 	cfgDir := t.TempDir()
 	cfgPath := filepath.Join(cfgDir, "logsh.yaml")
+	// force_command.shell pins the interactive/default routes' shell. Per
+	// ResolveEntryShell (internal/logshell/dispatch.go), a non-empty
+	// ForceCommand.Shell is consulted FIRST and the passwd branch -- the only
+	// place logshell.PasswdPath is used -- is skipped entirely, so this value
+	// never depends on logshell.PasswdPath. Without this override, three of the
+	// four subtests below would silently depend on the TEST RUNNER's own
+	// /etc/passwd shell entry instead, and fail confusingly (as unrelated-
+	// looking routing failures) on any runner whose shell does not accept
+	// "-c COMMAND", such as /sbin/nologin or /bin/false. Validate requires the
+	// override be one of the shells map's values, hence both keys below.
 	cfg := "record_users: []\n" +
+		"shells:\n" +
+		"  sh: /bin/sh\n" +
 		"force_command:\n" +
+		"  shell: /bin/sh\n" +
 		"  routes:\n" +
 		"    internal-sftp:\n" +
 		"      exec: [/bin/echo, SFTP-ROUTE]\n"
@@ -195,8 +215,7 @@ func TestForcedCommandRoutesHelperProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("test helper: LoadUnchecked: %v", err)
 	}
-	inv := logshell.Invocation{Name: logshell.EntryName}
 	// Only returns on failure; on success runForceCommand's own passthrough has
 	// already replaced this process and nothing below runs.
-	os.Exit(runForceCommand(inv, cfg))
+	os.Exit(runForceCommand(cfg))
 }

@@ -72,7 +72,7 @@ func sessionInfoFromEnv() logshell.SessionInfo {
 // an environment the client influences, at the start of a root session, and the
 // file main loads decides both which binary gets exec'd and whether the session
 // is recorded at all.
-func runForceCommand(inv logshell.Invocation, cfg *logshell.Config) int {
+func runForceCommand(cfg *logshell.Config) int {
 	// Read the credential before anything else: sshd removes the file at session
 	// end, and every later moment is another chance for it to be gone.
 	info := sessionInfoFromEnv()
