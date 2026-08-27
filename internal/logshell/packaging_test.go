@@ -599,3 +599,113 @@ func TestInstallScriptShipsTheEntrySymlink(t *testing.T) {
 		t.Error("uninstall must check sshd_config before removing the entry symlink")
 	}
 }
+
+// TestInstallCreatesTheEntrySymlinkWithoutRegisteringIt is the runtime half of
+// TestInstallScriptShipsTheEntrySymlink above: that test pins the script's
+// source shape, this one actually runs install and checks what lands on disk.
+func TestInstallCreatesTheEntrySymlinkWithoutRegisteringIt(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "logsh-entry")); err != nil {
+		t.Errorf("install did not create the logsh-entry symlink: %v", err)
+	}
+	if strings.Contains(fr.read(t, "etc/shells"), "logsh-entry") {
+		t.Error("install registered logsh-entry in /etc/shells; it is not a shell, and " +
+			"listing it there would let an account be chsh'd to it")
+	}
+}
+
+// TestUninstallRefusesWhileSshdStillReferencesTheEntrySymlink is the runtime
+// half of the lockout-prevention guard at the top of cmd_uninstall.
+//
+// Removing the package deletes /usr/sbin/logsh-entry. On a host whose
+// sshd_config still says `ForceCommand /usr/sbin/logsh-entry`, that deletion is
+// root's SSH access to the host, gone -- and unlike every other symlink this
+// script manages, no account switch is involved, so the restore-before-remove
+// ordering that protects the passwd shells does not cover it. This guard is
+// the only thing that does.
+//
+// That makes a source-text scan of the script the wrong kind of test for it: a
+// scan that only greps for the right substrings would stay green even if the
+// guard's condition got inverted, a path got dropped from SSHD_CONFIGS, or the
+// guard got moved to run after the removal loops instead of before them. Only
+// running the script against a scratch root and checking real outcomes catches
+// that, so this drives the actual binary through every branch of the guard.
+func TestUninstallRefusesWhileSshdStillReferencesTheEntrySymlink(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	entry := filepath.Join(fr.sbin, "logsh-entry")
+	forceCommand := []byte("Match User root\n    ForceCommand /usr/sbin/logsh-entry\n")
+
+	// A reference in the flat sshd_config file refuses, and refuses before
+	// anything is torn down -- not just before the entry symlink itself.
+	sshDir := filepath.Join(fr.dir, "etc", "ssh")
+	if err := os.MkdirAll(sshDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshdConfig := filepath.Join(sshDir, "sshd_config")
+	if err := os.WriteFile(sshdConfig, forceCommand, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err == nil {
+		t.Fatalf("uninstall succeeded although sshd_config still references logsh-entry:\n%s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("the refused uninstall removed the entry symlink anyway: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "lbash")); err != nil {
+		t.Errorf("the refused uninstall removed lbash too; the guard must fire before any "+
+			"teardown, not partway through it: %v", err)
+	}
+
+	// The same reference, moved to sshd_config.d/ instead of the flat file,
+	// refuses too -- exactly the case a dropped SSHD_CONFIGS entry would
+	// silently stop catching.
+	if err := os.Remove(sshdConfig); err != nil {
+		t.Fatal(err)
+	}
+	dropInDir := filepath.Join(sshDir, "sshd_config.d")
+	if err := os.MkdirAll(dropInDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dropInDir, "10-logsh.conf"), forceCommand, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err == nil {
+		t.Fatalf("uninstall succeeded with the reference only in sshd_config.d/:\n%s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("the refused uninstall (sshd_config.d) removed the entry symlink anyway: %v", err)
+	}
+
+	// --force proceeds despite the live reference.
+	if out, err := fr.run(t, "uninstall", "--force"); err != nil {
+		t.Fatalf("uninstall --force failed: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("uninstall --force left the entry symlink behind: %v", err)
+	}
+
+	// Once the reference is gone, uninstall proceeds on its own -- no flag
+	// needed -- and actually removes the symlink.
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("reinstall: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Fatalf("reinstall did not recreate the entry symlink: %v", err)
+	}
+	if err := os.RemoveAll(sshDir); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall failed once the sshd reference was gone: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the entry symlink behind after the reference was removed: %v", err)
+	}
+}
