@@ -1160,7 +1160,11 @@ func TestResolveRoutes(t *testing.T) {
 			wantKind: RouteExec, wantPath: "/usr/lib/ssh/sftp-server", wantArgs: []string{"-l", "INFO"},
 		},
 		{
-			name: "a path-qualified program matches on its basename", original: "/usr/lib/ssh/sftp-server -l INFO",
+			// Basename matching, using a path whose basename IS a route key.
+			// Note that a path-qualified REAL binary (e.g. /usr/lib/ssh/sftp-server,
+			// basename "sftp-server") is not a key here and correctly falls to the
+			// default route -- per spec 5.1, such a command needs no translation.
+			name: "a path-qualified program matches on its basename", original: "/usr/lib/ssh/internal-sftp -l INFO",
 			wantKind: RouteExec, wantPath: "/usr/lib/ssh/sftp-server", wantArgs: []string{"-l", "INFO"},
 		},
 		{
@@ -1533,7 +1537,12 @@ Expected: FAIL — the override is ignored and the passwd entry is used.
 
 - [ ] **Step 7: Wire the override into `ResolveEntryShell`**
 
-In `internal/logshell/dispatch.go`, replace the opening of `ResolveEntryShell`'s body so the passwd lookup runs only when no override is set:
+In `internal/logshell/dispatch.go`, replace the opening of `ResolveEntryShell`'s body so the passwd lookup runs only when no override is set.
+
+**Do not transcribe the snippet below over the live function verbatim.** It was written before Task 2's fix commit
+`6324b7d`, which added `strings.TrimPrefix(filepath.Base(shell), "-")` to the `Shells` lookup. Read the current
+function first and preserve that `TrimPrefix`; a literal transcription silently reverts it and breaks
+`TestResolveEntryShellUnwrapsADashPrefixedSymlink`. The change you want is only the `ForceCommand.Shell` wrapper:
 
 ```go
 func (c *Config) ResolveEntryShell(passwdPath, username string, uid int) (string, error) {
