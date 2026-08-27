@@ -107,9 +107,14 @@ func runForceCommand(cfg *logshell.Config) int {
 			Args:       tgt.args,
 		},
 		Info: info,
-		// Under sshd nothing above us is recording, so this is NestedNone and
-		// NestedMode returns "record" -- the same branch this path took before
-		// it shared a runner, so the refactor changes nothing here. Consulting
+		// Under sshd nothing above us is recording, so this is normally
+		// NestedNone and NestedMode returns "record" -- the same branch this
+		// path took before it shared a runner. "Normally" is doing real work:
+		// DetectNesting walks process ancestry, so an sshd itself started under
+		// a process named `sudo` reports NestedSudo instead. That still maps to
+		// "record" unless nested_sessions has also been set away from its
+		// default, which is why the refactor changes nothing in any shipped
+		// configuration rather than in every conceivable one. Consulting
 		// it anyway is what makes a logsh-entry that somehow ran inside another
 		// logsh skip rather than capture the same bytes a second time.
 		Nesting:  logshell.DetectNesting(),

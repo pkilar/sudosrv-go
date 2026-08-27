@@ -206,6 +206,12 @@ ok    force_command.routes[internal-sftp]: /usr/lib/ssh/sftp-server
 | `ssh root@host cmd`, `scp`, `rsync` | attributable metadata: who, what command, when, exit status |
 | sftp | metadata, plus the sftp server's own per-operation syslog at `-l INFO` |
 
+Which of the first two rows applies is decided by **whether a terminal is
+attached, never by whether a command was supplied**. `ssh -t root@host cmd`
+supplies a command *and* allocates a pty, so it gets the full transcript rather
+than a metadata record. That is deliberate: keying off the command would hand
+anyone who passed `-t` a fully interactive session that nothing recorded.
+
 Non-interactive sessions pass their streams through untouched — no pipe, no
 copying goroutine — so a large transfer is byte-exact and full speed, and does
 not produce a transcript the size of the payload.
@@ -231,7 +237,7 @@ logsh_cert_serial       20260819000137
 logsh_cert_ca           SHA256:FF270WGkZMiYH/uz…
 logsh_cert_principals   ["root-web","root-everywhere"]
 logsh_auth_method       publickey-cert
-logsh_ssh_command       internal-sftp -l INFO
+logsh_ssh_command       internal-sftp -l INFO -f AUTH
 logsh_ssh_client        10.20.30.41 51234
 ```
 
@@ -283,10 +289,23 @@ still mentions `logsh-entry`, naming the file and line. Pass `--force` only when
 automation has already removed the block. (`--force` is not listed in the
 script's `usage` output; the refusal message names it.)
 
-Note that the check is a substring match, so a commented-out `ForceCommand` line
-or a stale `.bak` file under `sshd_config.d/` will also trip it. That direction is
-deliberate — it over-refuses rather than under-refuses — and `--force` is the
-escape hatch.
+The guard refuses in two cases, and they read alike but are not:
+
+- **A reference was found.** The message names the file and line. The check is a
+  substring match, so a commented-out `ForceCommand` line or a stale `.bak` file
+  under `sshd_config.d/` will also trip it.
+- **A config could not be read.** The message says so explicitly: `cannot be read,
+  so it cannot be cleared of references`. `grep` exits differently for "no match"
+  and "could not read", and treating them alike would be fail-open on a guard
+  whose whole purpose is preventing a lockout — an unreadable `sshd_config` would
+  read as "no reference" and the symlink it still names would be deleted.
+
+Both directions over-refuse rather than under-refuse, which is the correct bias
+here. **Read which message you got before reaching for `--force`.** The second
+case usually means a permissions problem unrelated to logsh, and the fix is to
+make the file readable rather than to override the guard — `--force` on an
+unreadable config removes the symlink without anyone having established whether
+sshd still needs it.
 
 ## 11. Break-glass, and the residual
 
