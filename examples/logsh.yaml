@@ -201,3 +201,73 @@ fail_closed: true
 # sshd_config, not here. Both must be drilled before rollout; untested
 # break-glass is not break-glass.
 break_glass_marker: /etc/logsh/bypass
+
+# Forced-command mode: sshd runs logsh via `ForceCommand /usr/sbin/logsh-entry`,
+# so a session authenticating AS root produces a transcript even though sudo is
+# nowhere in the path.
+#
+# Consulted ONLY when logsh is invoked through the logsh-entry symlink. It has
+# no effect on the login-shell deployment above, and a host that does not use
+# ForceCommand can leave this section out entirely.
+#
+# See docs/logsh-forcecommand.md.
+force_command:
+  # NORMALLY LEAVE THIS UNSET.
+  #
+  # Unset means a session runs the account's OWN shell, from its /etc/passwd
+  # entry -- exactly what sshd would have exec'd had ForceCommand not been
+  # there. So enabling the recorder changes which shell runs on no host.
+  #
+  # Setting it pins one shell for every host that shares this file. root would
+  # get bash here even on a host where root's shell is zsh, and an SSH login
+  # would then differ from a console login on the same account. `logsh
+  # -validate` warns when it is set; `logsh -selftest` prints the shell that
+  # will actually run, per host, so you can check before enabling anything.
+  #
+  # When set it must be one of the VALUES in the shells map above -- that
+  # allowlist is what stops an override naming a logsh symlink, which would
+  # make logsh exec itself and record the session twice.
+  # shell: /bin/bash
+
+  # Routes map a program basename to what should run instead.
+  #
+  # This is a LITERAL ALLOWLIST, not a pattern language. A key is matched
+  # exactly against the basename of the first whitespace-separated field of
+  # $SSH_ORIGINAL_COMMAND: no globs, no regular expressions, no prefix
+  # matching, no case folding. A route's argv comes from THIS FILE and never
+  # from the client; the client's command reaches the program only through
+  # $SSH_ORIGINAL_COMMAND in the environment, which is how sshd would have
+  # delivered it and how rrsync expects to receive it.
+  #
+  # Anything that does not match runs as `<shell> -c "<the client's command>"`,
+  # which is exactly what sshd does with no ForceCommand at all. So this table
+  # is for commands that CANNOT run as-is -- not for restricting what root may
+  # do. Restriction belongs in the certificate's critical options.
+  routes:
+    # The one entry most deployments need. internal-sftp is implemented
+    # in-process inside sshd and has no binary to exec, so it must be
+    # translated. Without this, sftp and modern scp fail for forced-command
+    # sessions -- OpenSSH 9.0 and later route scp over the SFTP protocol.
+    #
+    # -l INFO is load-bearing: the default is ERROR, and sshd_config's LogLevel
+    # does NOT apply to the sftp server. At INFO you get per-operation records
+    # with paths -- a file-level audit trail, not content capture, which is the
+    # right trade for a 10 GB transfer.
+    #
+    # The binary's path differs by distribution:
+    #   /usr/libexec/openssh/sftp-server   RHEL, Fedora
+    #   /usr/lib/openssh/sftp-server       Debian, Ubuntu
+    #   /usr/lib/ssh/sftp-server           Arch
+    # `logsh -selftest` fails if the path named here is missing.
+    internal-sftp:
+      exec: [/usr/lib/ssh/sftp-server, -l, INFO]
+
+    # Optional. rrsync reads $SSH_ORIGINAL_COMMAND itself, so a fixed argv is
+    # all it needs. Note this CONFINES rsync to one subtree, which is a policy
+    # decision rather than a logging one -- leave it out unless you want that.
+    # rsync:
+    #   exec: [/usr/bin/rrsync, -no-del, /srv]
+
+    # Optional. Runs: git-shell -c "<the client's command>"
+    # git-shell:
+    #   command: /usr/bin/git-shell

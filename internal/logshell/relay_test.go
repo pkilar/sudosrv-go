@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -223,8 +224,12 @@ func TestRunRecordedCapturesOutputAndExitStatus(t *testing.T) {
 	inv := Invocation{Name: "lsh", LoginShell: true,
 		Args: []string{"-c", "printf 'HELLO-FROM-SHELL\\n'; exit 7"}}
 
-	outcome, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -271,8 +276,12 @@ func TestRunRecordedCapturesInput(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'got:%s\\n' \"$line\""}}
 
-	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -303,8 +312,12 @@ func TestRunRecordedRespectsStreamToggles(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "read line; printf 'ok\\n'"}}
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -326,8 +339,12 @@ func TestRunRecordedReportsSignalDeath(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "kill -TERM $$"}}
 
-	outcome, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -406,8 +423,12 @@ func TestRunRecordedFailsBeforeSpawningShell(t *testing.T) {
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "touch " + marker + "; sleep 30"}}
 
 	var userSaw bytes.Buffer
-	_, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	_, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err == nil {
 		t.Fatal("RunRecorded succeeded although the server never acknowledged the session")
 	}
@@ -591,5 +612,60 @@ func TestSlowDeliveryIsChargedToTheNextEventExactlyOnce(t *testing.T) {
 	if total < elapsed/2 {
 		t.Errorf("delays total %v against %v elapsed; the recorded clock is "+
 			"losing time the session spent", total, elapsed)
+	}
+}
+
+// TestPrepareEnvEmptyPathPublishesNothing.
+//
+// A forced-command route may exec sftp-server or rrsync. Neither is a shell, and
+// SHELL=/usr/lib/ssh/sftp-server is a claim that scripts testing $SHELL against
+// /etc/shells will act on.
+func TestPrepareEnvEmptyPathPublishesNothing(t *testing.T) {
+	in := []string{"SHELL=/bin/bash", "PATH=/usr/bin"}
+	got := PrepareEnv(in, "")
+	if !slices.Equal(got, in) {
+		t.Errorf("PrepareEnv(env, \"\") = %v, want the environment unchanged", got)
+	}
+}
+
+// TestPrepareEnvStillCorrectsShellWhenGivenOne guards the login-shell behaviour
+// the empty-path case must not have broken.
+func TestPrepareEnvStillCorrectsShellWhenGivenOne(t *testing.T) {
+	got := PrepareEnv([]string{"SHELL=/usr/sbin/lbash"}, "/bin/bash")
+	if !slices.Contains(got, "SHELL=/bin/bash") {
+		t.Errorf("PrepareEnv = %v, want SHELL rewritten to the real shell", got)
+	}
+}
+
+// TestRunRecordedSpecEnvShellReachesPrepareEnv pins R10: the recorded path must
+// build the child environment from spec.EnvShell, not from spec.ShellPath.
+//
+// A forced-command route resolves a ShellPath to exec -- which may not be a
+// shell at all, e.g. sftp-server -- and a separate EnvShell to publish as
+// $SHELL. Before this fix, relay.go built the child's environment from the exec
+// target instead, so the two fields could silently diverge. ShellPath and
+// EnvShell are set to different values here so a regression back to
+// spec.ShellPath is caught by the shell's own report of $SHELL, not merely by
+// inspecting the diff.
+func TestRunRecordedSpecEnvShellReachesPrepareEnv(t *testing.T) {
+	srv := newMockServer(t)
+	_, slave := outerTerminal(t)
+
+	var userSaw bytes.Buffer
+	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'SHELL=%s\\n' \"$SHELL\""}}
+
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/not/the/real/shell/marker",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
+		t.Fatalf("RunRecorded: %v", err)
+	}
+
+	out, _, _, _, _ := srv.snapshot()
+	if !strings.Contains(out, "SHELL=/not/the/real/shell/marker") {
+		t.Errorf("ttyout transcript = %q, want it to report SHELL=/not/the/real/shell/marker "+
+			"(spec.EnvShell), not spec.ShellPath (/bin/sh)", out)
 	}
 }

@@ -58,8 +58,20 @@ const (
 
 func main() {
 	inv := logshell.ParseInvocation(os.Args)
-	if inv.IsAdmin() {
+	switch {
+	case inv.IsAdmin():
 		os.Exit(runAdmin(inv))
+	case inv.IsEntry():
+		// The root-ownership gate belongs here, on the one production path, and
+		// nowhere inside runForceCommand: see that function's doc comment.
+		cfg, err := logshell.Load(logshell.DefaultConfigPath)
+		if err != nil {
+			// No configuration means we cannot tell whether this account should
+			// be recorded, so the safe answer is the same as "recording failed".
+			// There is nothing resolved to exec, so no target.
+			os.Exit(refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err)))
+		}
+		os.Exit(runForceCommand(cfg))
 	}
 	os.Exit(runShell(inv))
 }
@@ -78,7 +90,7 @@ func runShell(inv logshell.Invocation) int {
 		// recorded, so the safe answer is the same as "recording failed". Note
 		// that BreakGlassActive(nil) still works: it falls back to the
 		// compiled-in marker path precisely for this case.
-		return refuse(nil, inv, "", fmt.Sprintf("configuration is unusable: %v", err))
+		return refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err))
 	}
 
 	shellPath, err := cfg.ResolveShell(inv.Name)
@@ -91,81 +103,19 @@ func runShell(inv logshell.Invocation) int {
 	}
 
 	uid := os.Getuid()
-	username := lookupUsername(uid)
-
-	if !cfg.ShouldRecord(username, uid) {
-		return passthrough(inv, shellPath)
-	}
-
-	// Interactive or not is decided by whether a terminal is attached, NEVER by
-	// whether "-c" was passed. `ssh -t host /bin/bash` supplies a command AND
-	// allocates a pty; keying off "-c" would classify it as non-interactive and
-	// hand the user a fully interactive, entirely unrecorded shell.
-	ctx := context.Background()
-
-	// The command log is independent of recording: its own toggle, local syslog
-	// rather than the log server, and it runs whether the session is recorded,
-	// journalled, or not recorded at all.
-	cmdLog, cmdLogErr := logshell.OpenCommandLog(cfg)
-	if cmdLogErr != nil {
-		if cfg.CommandLog.Required {
-			return refuse(cfg, inv, shellPath, fmt.Sprintf("command log unavailable: %v", cmdLogErr))
-		}
-		logshell.Alertf(syslog.LOG_WARNING, "command log unavailable, continuing without it: %v", cmdLogErr)
-	}
-	defer func() { _ = cmdLog.Close() }()
-
-	// Something above us may already be recording these keystrokes. `sudo -i`
-	// runs the target account's passwd shell, so once logsh IS that shell the
-	// session is captured twice -- three times when the invoking account also
-	// uses logsh -- with a pseudo-terminal layer for each.
-	nesting := logshell.DetectNesting()
-
-	// Both non-interactive entry points below take this as one value. The
-	// terminal path builds its own, since it attaches a TerminalIO instead.
-	spec := logshell.RunSpec{
+	return runSession(session{
 		Config:     cfg,
+		Target:     targetFromInvocation(inv, shellPath),
 		Invocation: inv,
-		ShellPath:  shellPath,
-		Std:        logshell.StdStreams(),
-		CmdLog:     cmdLog,
-	}
-
-	var outcome logshell.Outcome
-	switch mode := cfg.NestedMode(nesting); mode {
-	case logshell.NestedModeSkip:
-		logshell.Alertf(syslog.LOG_INFO,
-			"session nested inside %s; not recording here (nested_sessions=%s)",
-			nesting.Kind, mode)
-		return passthrough(inv, shellPath)
-
-	case logshell.NestedModeMetadata:
-		// Streams pass straight through, so no second pty and no duplicate
-		// transcript -- but the session still leaves a record, carrying both
-		// UUIDs so it joins to whatever the outer recorder stored.
-		outcome, err = logshell.RunMetadataOnly(ctx, spec, nesting)
-
-	default:
-		if logshell.IsTerminal(os.Stdin.Fd()) {
-			outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
-				logshell.StdTerminal(), cmdLog)
-		} else {
-			outcome, err = logshell.RunNonInteractive(ctx, spec)
-		}
-	}
-	if err != nil {
-		if errors.Is(err, logshell.ErrRecordingUnavailable) {
-			// No shell was ever started, so the failure policy still has a
-			// meaningful choice to make.
-			return refuse(cfg, inv, shellPath, err.Error())
-		}
-		// The shell ran. The audit gap has already happened and cannot be
-		// undone by refusing; the user's exit status is a fact they are owed.
-		// Report loudly and pass it through.
-		logshell.Alertf(syslog.LOG_CRIT,
-			"session for uid %d ran but was NOT durably recorded: %v", uid, err)
-	}
-	return outcome.ExitCode
+		// Something above us may already be recording these keystrokes. `sudo -i`
+		// runs the target account's passwd shell, so once logsh IS that shell the
+		// session is captured twice -- three times when the invoking account also
+		// uses logsh -- with a pseudo-terminal layer for each.
+		Nesting:  logshell.DetectNesting(),
+		UID:      uid,
+		Username: lookupUsername(uid),
+		Kind:     kindLoginShell,
+	})
 }
 
 // lookupUsername resolves uid to a name, or "" if it cannot.
@@ -181,10 +131,63 @@ func lookupUsername(uid int) string {
 	return u.Username
 }
 
-// passthrough execs the real shell with no recording. It returns only on
-// failure.
-func passthrough(inv logshell.Invocation, shellPath string) int {
-	if err := logshell.ExecInvocation(inv, shellPath); err != nil {
+// execTarget is a resolved program plus the argv and $SHELL value to run it
+// with. It is what both entry points hand to passthrough and to break-glass, so
+// an unrecorded session runs exactly what a recorded one would have.
+type execTarget struct {
+	path     string
+	argv0    string
+	args     []string
+	envShell string // "" publishes no SHELL; see logshell.RunSpec.EnvShell
+}
+
+// targetFromInvocation builds the login-shell path's target.
+func targetFromInvocation(inv logshell.Invocation, shellPath string) *execTarget {
+	if shellPath == "" {
+		return nil
+	}
+	return &execTarget{
+		path:     shellPath,
+		argv0:    logshell.ChildArgv0(shellPath, inv.LoginShell),
+		args:     inv.Args,
+		envShell: shellPath,
+	}
+}
+
+// targetFromRoute builds the forced-command path's target.
+//
+// The interactive route is exec'd as a LOGIN shell -- argv[0] "-bash", not
+// "bash". sshd marks a login shell that way and every shell decides from
+// argv[0][0] alone; dropping the dash stops /etc/profile and ~/.bash_profile
+// running fleet-wide, with no error anywhere, and users notice weeks later as
+// "my PATH is wrong on the new boxes". Passing "-l" instead would work on bash
+// and fail on shells that do not accept it.
+//
+// $SHELL is published only for the two routes that actually run a shell. An
+// exec or command route may run sftp-server or rrsync, which are not shells.
+func targetFromRoute(t logshell.Target) *execTarget {
+	if t.Path == "" {
+		return nil
+	}
+	isShell := t.Kind == logshell.RouteInteractive || t.Kind == logshell.RouteDefault
+	tgt := &execTarget{
+		path:  t.Path,
+		argv0: logshell.ChildArgv0(t.Path, t.Kind == logshell.RouteInteractive),
+		args:  t.Args,
+	}
+	if isShell {
+		tgt.envShell = t.Path
+	}
+	return tgt
+}
+
+// passthrough execs the target with no recording. It returns only on failure.
+func passthrough(tgt *execTarget) int {
+	if tgt == nil {
+		logshell.Alertf(syslog.LOG_ERR, "nothing to exec")
+		return exitGeneral
+	}
+	if err := logshell.Exec(tgt.path, tgt.argv0, tgt.envShell, tgt.args, os.Environ()); err != nil {
 		logshell.Alertf(syslog.LOG_ERR, "%v", err)
 		return exitGeneral
 	}
@@ -198,21 +201,24 @@ func passthrough(inv logshell.Invocation, shellPath string) int {
 // sessions working", and is honoured without needing a marker file. The
 // break-glass marker is the escape hatch for the default posture. Only when
 // neither applies is the session actually refused.
-func refuse(cfg *logshell.Config, inv logshell.Invocation, shellPath, reason string) int {
-	canExec := shellPath != ""
-
-	if cfg != nil && !cfg.FailClosed && canExec {
+//
+// Both fallbacks exec the RESOLVED TARGET, not a shell. An sftp session that
+// degraded into an interactive shell would be a broken transfer, not a graceful
+// failure -- and for a forced command it would also hand the client something
+// they did not ask for.
+func refuse(cfg *logshell.Config, tgt *execTarget, reason string) int {
+	if cfg != nil && !cfg.FailClosed && tgt != nil {
 		logshell.Alertf(syslog.LOG_ERR,
 			"proceeding UNRECORDED because fail_closed is disabled: %s", reason)
-		return passthrough(inv, shellPath)
+		return passthrough(tgt)
 	}
 
-	if logshell.BreakGlassActive(cfg) && canExec {
+	if logshell.BreakGlassActive(cfg) && tgt != nil {
 		logshell.Alertf(syslog.LOG_CRIT,
 			"proceeding UNRECORDED via break-glass marker %s: %s",
 			logshell.BreakGlassPath(cfg), reason)
 		fmt.Fprint(os.Stderr, logshell.BreakGlassBanner)
-		return passthrough(inv, shellPath)
+		return passthrough(tgt)
 	}
 
 	logshell.Alertf(syslog.LOG_ERR, "session REFUSED for uid %d: %s", os.Getuid(), reason)
@@ -343,8 +349,13 @@ func runRecord(dir, shellOverride, configPath string, configGiven, alsoWire bool
 	fmt.Fprintf(os.Stderr, "%s: recording to %s\n", appName, dir)
 
 	inv := logshell.Invocation{Name: filepath.Base(shellPath), Args: args}
-	outcome, err := logshell.RunRecorded(context.Background(), cfg, inv, shellPath,
-		logshell.StdTerminal(), nil)
+	outcome, err := logshell.RunRecorded(context.Background(), logshell.RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  shellPath,
+		Std:        logshell.StdStreams(),
+		EnvShell:   shellPath,
+	}, logshell.StdTerminal())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {
@@ -516,6 +527,37 @@ func runSelftest(path string) int {
 		}
 		fmt.Fprintf(os.Stderr, "warn  shells[%s]: %v (no account uses it, so not fatal)\n",
 			name, resolveErr)
+	}
+
+	// The question an operator most needs answered before enabling a host: what
+	// will a forced-command root session actually run here? The shell comes from
+	// this host's passwd file, so it can differ from host to host, and printing
+	// it is what makes that visible before it matters.
+	if len(cfg.ForceCommand.Routes) > 0 || cfg.ForceCommand.Shell != "" {
+		shell, err := cfg.ResolveEntryShell(logshell.PasswdPath, "root", 0)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "FAIL  force_command: cannot resolve root's shell: %v\n", err)
+			failed = true
+		case cfg.ForceCommand.Shell != "":
+			fmt.Printf("ok    force_command: interactive shell for root: %s (from force_command.shell)\n", shell)
+		default:
+			fmt.Printf("ok    force_command: interactive shell for root: %s (from %s)\n", shell, logshell.PasswdPath)
+		}
+
+		for name, r := range cfg.ForceCommand.Routes {
+			prog := r.Command
+			if len(r.Exec) > 0 {
+				prog = r.Exec[0]
+			}
+			st, statErr := os.Stat(prog)
+			if statErr != nil || st.IsDir() || st.Mode()&0o111 == 0 {
+				fmt.Fprintf(os.Stderr, "FAIL  force_command.routes[%s]: %s is missing or not executable\n", name, prog)
+				failed = true
+				continue
+			}
+			fmt.Printf("ok    force_command.routes[%s]: %s\n", name, prog)
+		}
 	}
 
 	if len(cfg.RecordUsers) == 0 {

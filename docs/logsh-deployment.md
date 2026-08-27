@@ -8,6 +8,12 @@ It is also the only component in this repository that can lock an administrator
 out of a host. Read the rollout section before deploying to anything you cannot
 walk up to.
 
+There is a second, independent way to deploy it: attached to `sshd` as a
+`ForceCommand`, which records sessions that authenticate **as root** without
+touching root's `/etc/passwd` entry. That is a different set of trade-offs and
+has its own runbook — see
+[logsh-forcecommand.md](logsh-forcecommand.md). The two can coexist.
+
 ---
 
 ## What it does and does not record
@@ -272,13 +278,23 @@ reimplementing the policy engine.
 
 | Value | Behaviour |
 |---|---|
-| `metadata` *(default)* | No second pty, no transcript, but a record is kept: who escalated, what shell, when, exit status, and both session UUIDs. If sudo was not logging you still know the session happened. |
+| `metadata` | No second pty, no transcript, but a record is kept: who escalated, what shell, when, exit status, and both session UUIDs. If sudo was not logging you still know the session happened. |
 | `skip` | Plain exec through. Nothing recorded, nothing emitted. Only safe when **every** sudoers rule reaching a shell has `log_output` — otherwise a root session is recorded by nobody and nothing says so. |
-| `record` | Full second transcript. Never a gap, at the cost of duplication and the extra pty. De-duplicate downstream on the shared UUID. |
+| `record` *(default)* | Full second transcript. Never a gap, at the cost of duplication and the extra pty. De-duplicate downstream on the shared UUID. |
 
-The default is `metadata` rather than `skip` deliberately: a de-duplication
-feature that manufactures a silent audit gap is worse than the duplication it
-removes. `logsh -validate` warns when `skip` is set.
+The default is `record`, and it is deliberately the wasteful option. `metadata`
+was the default first, on the reasoning that it drops the duplicate transcript
+while still recording that the session happened. That reasoning fails in one
+specific and important case: on a host whose sudoers rule lacks `log_output`,
+`ordinary shell -> sudo -i -> root logsh` leaves the root session's commands and
+output captured by nothing. A de-duplication feature that manufactures a silent
+audit gap in its default configuration has made things worse, not better.
+
+Duplication is recoverable -- both copies carry the same session UUID, so a SIEM
+can drop one. A transcript nobody took is gone. Choose `metadata` or `skip` once
+you can state that every sudoers rule reaching a shell carries `log_output`;
+until then the cost of the default is disk. `logsh -validate` warns when either
+non-default value is set.
 
 **Who escalated.** Under sudo, logsh records `submituser` as the account that
 escalated (alice) and `runuser` as the account the session runs as (root),

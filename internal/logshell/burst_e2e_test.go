@@ -67,8 +67,12 @@ func TestBurstOfOutputIsNotThrottled(t *testing.T) {
 		Args: []string{"-c", "seq 1 200000"}}
 
 	started := time.Now()
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 	elapsed := time.Since(started)

@@ -52,3 +52,10 @@ Thumbs.db
 .claude.json
 CLAUDE.md
 sudosrv.code-workspace
+
+# Workspace for the superpowers spec/plan/execution-ledger flow. These are
+# working artefacts for producing a change, not part of the change: the design
+# rationale that outlives them belongs in doc comments and the runbooks under
+# docs/, and the rest is superseded by git history once the work lands.
+docs/superpowers/
+.superpowers/

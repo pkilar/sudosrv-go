@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/eventlog"
 	"sudosrv/internal/logsrvclient"
@@ -99,7 +100,7 @@ type Config struct {
 	RecordWire bool `yaml:"-"`
 
 	// NestedSessions decides what to do when logsh finds itself inside something
-	// that may already be recording: record, metadata, or skip. Default metadata.
+	// that may already be recording: record, metadata, or skip. Default record.
 	//
 	// It applies to sudo only. Nesting inside another logsh always skips, because
 	// there is nothing to weigh up -- the outer logsh is certainly capturing these
@@ -129,6 +130,11 @@ type Config struct {
 	// its own destination, and it works whether the session is recorded,
 	// journalled, or not recorded at all.
 	CommandLog CommandLogConfig `yaml:"command_log"`
+
+	// ForceCommand configures the sshd ForceCommand entry point: which shell an
+	// interactive root SSH session runs, and what a client's requested command
+	// is routed to. Only consulted when logsh is invoked as EntryName.
+	ForceCommand ForceCommandConfig `yaml:"force_command"`
 
 	// BreakGlassMarker names a root-owned file whose existence forces fail-open
 	// for the session, with a crit-priority syslog alert and a banner on the
@@ -222,8 +228,12 @@ func DefaultConfig() *Config {
 			MaxLen:         DefaultCommandLogMaxLen,
 			Required:       false,
 		},
-		NestedSessions:   NestedModeRecord,
-		FailClosed:       true,
+		NestedSessions: NestedModeRecord,
+		FailClosed:     true,
+		// ForceCommand is deliberately zero: no shell override (so the account's
+		// own passwd shell is used) and no routes (so every command reaches the
+		// default route). That is the correct posture for a host that has not
+		// enabled the forced-command entry point at all.
 		BreakGlassMarker: "/etc/logsh/bypass",
 	}
 }
@@ -349,6 +359,13 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("shells[%s]: %q is not an absolute path", name, shell)
 		}
 	}
+	// One name, one meaning. EntryName selects the forced-command mode from
+	// argv[0]; a mapping under the same key would make that symlink resolvable
+	// as a login shell too, and which behaviour won would depend on the order of
+	// two predicates in main rather than on anything the operator wrote.
+	if _, ok := c.Shells[EntryName]; ok {
+		return fmt.Errorf("shells[%s]: %s names the forced-command entry point and cannot also be a shell mapping", EntryName, EntryName)
+	}
 	if c.Server.UpstreamHost == "" {
 		return fmt.Errorf("server.upstream_host: must be set")
 	}
@@ -376,6 +393,42 @@ func (c *Config) Validate() error {
 	}
 	if c.BreakGlassMarker != "" && !filepath.IsAbs(c.BreakGlassMarker) {
 		return fmt.Errorf("break_glass_marker: %q is not an absolute path", c.BreakGlassMarker)
+	}
+	for name, r := range c.ForceCommand.Routes {
+		// The key is matched against the BASENAME of the first field of
+		// SSH_ORIGINAL_COMMAND, so a key holding whitespace or a slash can never
+		// match anything. It would look configured and route nothing, which is a
+		// silent gap rather than a visible failure -- hence an error.
+		if name == "" || strings.ContainsAny(name, " \t/") {
+			return fmt.Errorf("force_command.routes[%q]: a key is matched against the basename of the client's command, so it cannot be empty or contain whitespace or a slash", name)
+		}
+		hasExec, hasCommand := len(r.Exec) > 0, r.Command != ""
+		if hasExec == hasCommand {
+			return fmt.Errorf("force_command.routes[%s]: set exactly one of exec or command", name)
+		}
+		prog := r.Command
+		if hasExec {
+			prog = r.Exec[0]
+		}
+		if !filepath.IsAbs(prog) {
+			return fmt.Errorf("force_command.routes[%s]: %q is not an absolute path", name, prog)
+		}
+	}
+
+	// The override is a configuration value, so the shells allowlist applies to
+	// it. A passwd-derived shell is deliberately NOT gated the same way: see
+	// ResolveEntryShell.
+	if c.ForceCommand.Shell != "" {
+		allowed := false
+		for _, shell := range c.Shells {
+			if shell == c.ForceCommand.Shell {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("force_command.shell: %q is not one of the shells map's values", c.ForceCommand.Shell)
+		}
 	}
 	return nil
 }
@@ -425,6 +478,24 @@ func (c *Config) Warnings() []string {
 			w = append(w, fmt.Sprintf("shells[%s]: %s is not present on this host", name, shell))
 		} else if st.Mode()&0111 == 0 {
 			w = append(w, fmt.Sprintf("shells[%s]: %s is not executable", name, shell))
+		}
+	}
+	if c.ForceCommand.Shell != "" {
+		w = append(w, fmt.Sprintf(
+			"force_command.shell is set to %s: forced-command sessions run it instead of the "+
+				"account's own shell from %s, so they will differ from a console login on any host "+
+				"where the two disagree. Leave it unset unless that is what you want.",
+			c.ForceCommand.Shell, PasswdPath))
+	}
+	if len(c.ForceCommand.Routes) > 0 || c.ForceCommand.Shell != "" {
+		if !c.ShouldRecord("root", 0) {
+			w = append(w, "force_command is configured but record_users names neither root nor 0: "+
+				"forced-command sessions would be routed correctly and recorded not at all")
+		}
+		if _, ok := c.ForceCommand.Routes["internal-sftp"]; !ok {
+			w = append(w, "force_command.routes has no internal-sftp entry: if sshd_config says "+
+				"`Subsystem sftp internal-sftp`, sftp and modern scp will fail for forced-command "+
+				"sessions. logsh cannot read sshd_config, so this is only a warning.")
 		}
 	}
 	return w

@@ -29,16 +29,20 @@ type StdIO struct {
 // StdStreams is the production StdIO.
 func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Stderr} }
 
-// RunSpec is one non-interactive run: which shell, how it was invoked, the
-// streams to attach to it, and the command log the session is recorded against.
+// RunSpec is one session to run: which program, how it was invoked, the streams
+// to attach to it, and the command log the session is recorded against.
 //
-// These five travel together through every entry point in this file -- the two
-// exported ones differ only in the nesting and capture decisions layered on top
-// -- so they are passed as one value rather than threaded individually.
+// It is shared by BOTH recorders. It began as the non-interactive path's value
+// and kept that name; RunRecorded takes it too, so that the login-shell and
+// forced-command entry points can hand either recorder the same thing.
+//
+// These fields travel together through every entry point in this package --
+// the recorders differ only in the nesting and capture decisions layered on
+// top -- so they are passed as one value rather than threaded individually.
 //
 // The zero value is not usable, and the fields do not fail alike: a missing
 // Config panics on entry, while a missing Std is accepted and records the wrong
-// thing. Positional arguments used to oblige the caller to name all five; a
+// thing. Positional arguments used to oblige the caller to name all of them; a
 // struct does not, so which is which is written down per field.
 type RunSpec struct {
 	// Config is required. RunNonInteractive dereferences it on entry, to decide
@@ -62,6 +66,25 @@ type RunSpec struct {
 	// CmdLog is optional. SessionID, Bind and End are each nil-safe, which is
 	// what lets the tests here record a session with no command log open.
 	CmdLog *CommandLog
+
+	// Info is what sshd told us about this session: the credential that
+	// authenticated it, the client's requested command, the source address. Its
+	// zero value stamps nothing, which is what leaves the login-shell path
+	// unchanged.
+	Info SessionInfo
+
+	// EnvShell is the value to publish as $SHELL, or "" to leave the inherited
+	// value alone.
+	//
+	// It is NOT simply ShellPath. A forced-command route may exec something that
+	// is not a shell at all -- sftp-server, rrsync -- and publishing
+	// SHELL=/usr/lib/ssh/sftp-server to it would be a lie that scripts read.
+	//
+	// Like Std, this is a field whose absence does not announce itself: leaving
+	// it empty on a shell session silently stops $SHELL being corrected, which
+	// is the bug PrepareEnv exists to prevent. Set it whenever ShellPath is a
+	// shell.
+	EnvShell string
 }
 
 // recordsAnyStream reports whether any of the non-tty streams is being captured.
@@ -111,6 +134,7 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 	meta := CollectMeta(TTYNameOf(spec.Std.In.Fd()), WinSize{}, spec.ShellPath, argv)
 	meta.SessionID = spec.CmdLog.SessionID()
 	meta.ApplyNesting(nesting)
+	meta.ApplyAuthInfo(spec.Info)
 
 	rec, err := StartEventRecorder(ctx, spec.Config, meta, captureStreams)
 	if err != nil {
@@ -132,7 +156,7 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 		closers = nil
 		cmd = exec.Command(spec.ShellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		cmd.Args = argv
-		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.ShellPath), spec.CmdLog.SessionID())
+		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), spec.CmdLog.SessionID())
 		closers, wireErr = spec.wireStreams(cmd, rec, &wg, captureStreams)
 		return cmd
 	}

@@ -573,3 +573,297 @@ func TestNoRecipeInstallsAnUntrackedConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallScriptShipsTheEntrySymlink.
+//
+// The forced-command entry point is a symlink like lbash, with one critical
+// difference: it must NOT be registered in /etc/shells. It is not a shell, and
+// listing it there would let an account be chsh'd to it.
+func TestInstallScriptShipsTheEntrySymlink(t *testing.T) {
+	raw, err := os.ReadFile("../../packaging/logsh/logsh-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+
+	if !strings.Contains(script, "ENTRY_SYMLINKS=\""+EntryName+"\"") {
+		t.Errorf("install script must declare ENTRY_SYMLINKS=%q", EntryName)
+	}
+	// The /etc/shells registration loop must not reach the entry name.
+	for line := range strings.SplitSeq(script, "\n") {
+		if strings.Contains(line, "add_shell") && strings.Contains(line, "ENTRY_SYMLINKS") {
+			t.Errorf("the entry symlink must never be registered in /etc/shells: %q", line)
+		}
+	}
+	if !strings.Contains(script, "sshd_config") {
+		t.Error("uninstall must check sshd_config before removing the entry symlink")
+	}
+}
+
+// TestInstallCreatesTheEntrySymlinkWithoutRegisteringIt is the runtime half of
+// TestInstallScriptShipsTheEntrySymlink above: that test pins the script's
+// source shape, this one actually runs install and checks what lands on disk.
+func TestInstallCreatesTheEntrySymlinkWithoutRegisteringIt(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "logsh-entry")); err != nil {
+		t.Errorf("install did not create the logsh-entry symlink: %v", err)
+	}
+	if strings.Contains(fr.read(t, "etc/shells"), "logsh-entry") {
+		t.Error("install registered logsh-entry in /etc/shells; it is not a shell, and " +
+			"listing it there would let an account be chsh'd to it")
+	}
+}
+
+// TestUninstallRefusesWhileSshdStillReferencesTheEntrySymlink is the runtime
+// half of the lockout-prevention guard at the top of cmd_uninstall.
+//
+// Removing the package deletes /usr/sbin/logsh-entry. On a host whose
+// sshd_config still says `ForceCommand /usr/sbin/logsh-entry`, that deletion is
+// root's SSH access to the host, gone -- and unlike every other symlink this
+// script manages, no account switch is involved, so the restore-before-remove
+// ordering that protects the passwd shells does not cover it. This guard is
+// the only thing that does.
+//
+// That makes a source-text scan of the script the wrong kind of test for it: a
+// scan that only greps for the right substrings would stay green even if the
+// guard's condition got inverted, a path got dropped from SSHD_CONFIGS, or the
+// guard got moved to run after the removal loops instead of before them. Only
+// running the script against a scratch root and checking real outcomes catches
+// that, so this drives the actual binary through every branch of the guard.
+func TestUninstallRefusesWhileSshdStillReferencesTheEntrySymlink(t *testing.T) {
+	fr := newFakeRoot(t)
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	entry := filepath.Join(fr.sbin, "logsh-entry")
+	forceCommand := []byte("Match User root\n    ForceCommand /usr/sbin/logsh-entry\n")
+
+	// A reference in the flat sshd_config file refuses, and refuses before
+	// anything is torn down -- not just before the entry symlink itself.
+	sshDir := filepath.Join(fr.dir, "etc", "ssh")
+	if err := os.MkdirAll(sshDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshdConfig := filepath.Join(sshDir, "sshd_config")
+	if err := os.WriteFile(sshdConfig, forceCommand, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err == nil {
+		t.Fatalf("uninstall succeeded although sshd_config still references logsh-entry:\n%s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("the refused uninstall removed the entry symlink anyway: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(fr.sbin, "lbash")); err != nil {
+		t.Errorf("the refused uninstall removed lbash too; the guard must fire before any "+
+			"teardown, not partway through it: %v", err)
+	}
+
+	// The same reference, moved to sshd_config.d/ instead of the flat file,
+	// refuses too -- exactly the case a dropped SSHD_CONFIGS entry would
+	// silently stop catching.
+	if err := os.Remove(sshdConfig); err != nil {
+		t.Fatal(err)
+	}
+	dropInDir := filepath.Join(sshDir, "sshd_config.d")
+	if err := os.MkdirAll(dropInDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dropInDir, "10-logsh.conf"), forceCommand, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err == nil {
+		t.Fatalf("uninstall succeeded with the reference only in sshd_config.d/:\n%s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("the refused uninstall (sshd_config.d) removed the entry symlink anyway: %v", err)
+	}
+
+	// --force proceeds despite the live reference.
+	if out, err := fr.run(t, "uninstall", "--force"); err != nil {
+		t.Fatalf("uninstall --force failed: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("uninstall --force left the entry symlink behind: %v", err)
+	}
+
+	// Once the reference is gone, uninstall proceeds on its own -- no flag
+	// needed -- and actually removes the symlink.
+	if out, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("reinstall: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Fatalf("reinstall did not recreate the entry symlink: %v", err)
+	}
+	if err := os.RemoveAll(sshDir); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall failed once the sshd reference was gone: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the entry symlink behind after the reference was removed: %v", err)
+	}
+}
+
+// TestUninstallRefusesWhenSshdConfigCannotBeRead pins the guard's failure
+// direction.
+//
+// The guard greps sshd's configuration for a reference to the entry symlink. A
+// grep that cannot READ the file exits 2, which is easy to conflate with the
+// exit 1 that means "no match" -- and conflating them is fail-OPEN on a check
+// whose only purpose is preventing a lockout: an unreadable sshd_config would
+// read as "no reference", uninstall would proceed, and it would delete the
+// symlink that file still names.
+//
+// Skipped when running as root, which can read the file regardless of its mode
+// and so cannot produce the condition under test.
+func TestUninstallRefusesWhenSshdConfigCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-000 file, so the condition cannot be created")
+	}
+	fr := newFakeRoot(t)
+	if _, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	entry := filepath.Join(fr.sbin, "logsh-entry")
+
+	sshDir := filepath.Join(fr.dir, "etc", "ssh")
+	if err := os.MkdirAll(sshDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(sshDir, "sshd_config")
+	// Deliberately contains NO reference. If the guard could read it, it would
+	// find nothing and allow the uninstall -- so a refusal here can only come
+	// from the unreadability, not from a match.
+	if err := os.WriteFile(cfg, []byte("# nothing to see here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg, 0o644) }) // so TempDir cleanup can proceed
+
+	out, err := fr.run(t, "uninstall")
+	if err == nil {
+		t.Fatalf("uninstall succeeded although sshd_config could not be read\noutput: %s", out)
+	}
+	if !strings.Contains(out, "cannot be read") {
+		t.Errorf("refusal should say the file could not be read, got: %s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("entry symlink was removed despite the refusal: %v", err)
+	}
+
+	// Control: once readable, the same file has no reference and uninstall
+	// proceeds. Without this, the test above would pass even if the guard had
+	// simply started refusing everything.
+	if err := os.Chmod(cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall refused a readable config with no reference: %v\noutput: %s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("entry symlink survived a permitted uninstall: %v", err)
+	}
+}
+
+// TestUninstallFollowsSshdIncludeDirectives covers the gap a fixed search list
+// leaves.
+//
+// sshd_config pulls in more files with Include, whose targets may be globs and
+// may live anywhere on the filesystem -- on most distributions the drop-in
+// directory is itself reached that way rather than by convention. A guard that
+// searched only the two conventional paths would miss a ForceCommand in an
+// included file and let uninstall delete the binary sshd still names, which is
+// the exact lockout the guard exists to prevent.
+//
+// The reference here is deliberately placed OUTSIDE /etc/ssh, so nothing but
+// following the Include can find it.
+func TestUninstallFollowsSshdIncludeDirectives(t *testing.T) {
+	write := func(t *testing.T, fr *fakeRoot, rel, body string) string {
+		t.Helper()
+		p := filepath.Join(fr.dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	tests := []struct {
+		name       string
+		sshdConfig string
+		extra      map[string]string
+		wantRefuse bool
+	}{
+		{
+			name:       "reference in a file included from outside /etc/ssh",
+			sshdConfig: "Include /opt/ssh-extra/logsh.conf\n",
+			extra:      map[string]string{"opt/ssh-extra/logsh.conf": "ForceCommand /usr/sbin/logsh-entry\n"},
+			wantRefuse: true,
+		},
+		{
+			name:       "reference two Include levels down",
+			sshdConfig: "Include /opt/ssh-extra/a.conf\n",
+			extra: map[string]string{
+				"opt/ssh-extra/a.conf": "Include /opt/ssh-extra/b.conf\n",
+				"opt/ssh-extra/b.conf": "ForceCommand /usr/sbin/logsh-entry\n",
+			},
+			wantRefuse: true,
+		},
+		{
+			name:       "relative Include, which sshd resolves against /etc/ssh",
+			sshdConfig: "Include local.conf\n",
+			extra:      map[string]string{"etc/ssh/local.conf": "ForceCommand /usr/sbin/logsh-entry\n"},
+			wantRefuse: true,
+		},
+		{
+			// The control. Same Include machinery, no reference anywhere, so a
+			// refusal here would mean the guard had started refusing everything
+			// rather than finding what it claims to find.
+			name:       "included files with no reference still permit uninstall",
+			sshdConfig: "Include /opt/ssh-extra/*.conf\n",
+			extra:      map[string]string{"opt/ssh-extra/other.conf": "PermitRootLogin no\n"},
+			wantRefuse: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fr := newFakeRoot(t)
+			if _, err := fr.run(t, "install"); err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			entry := filepath.Join(fr.sbin, "logsh-entry")
+			write(t, fr, "etc/ssh/sshd_config", tt.sshdConfig)
+			for rel, body := range tt.extra {
+				write(t, fr, rel, body)
+			}
+
+			out, err := fr.run(t, "uninstall")
+			if tt.wantRefuse {
+				if err == nil {
+					t.Fatalf("uninstall succeeded although an included config references logsh-entry\noutput: %s", out)
+				}
+				if _, statErr := os.Lstat(entry); statErr != nil {
+					t.Errorf("entry symlink was removed despite the refusal: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("uninstall refused although nothing references logsh-entry: %v\noutput: %s", err, out)
+			}
+			if _, statErr := os.Lstat(entry); !os.IsNotExist(statErr) {
+				t.Errorf("entry symlink survived a permitted uninstall: %v", statErr)
+			}
+		})
+	}
+}

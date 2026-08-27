@@ -170,8 +170,12 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 	inv := Invocation{Name: "lbash", LoginShell: true,
 		Args: []string{"-c", "printf 'END-TO-END-MARKER\\n'; exit 9"}}
 
-	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}

@@ -82,8 +82,12 @@ func TestJournalledSessionSurvivesAServerOutage(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'WORK-GOT-DONE\\n'; exit 3"}}
 
-	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 
 	// The shell must have run to completion with its real exit status.
 	if outcome.ExitCode != 3 {
@@ -131,8 +135,12 @@ func TestJournalledSessionIsDeliveredAndRemoved(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'SPOOLED\\n'"}}
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -174,8 +182,12 @@ func TestStreamingFallbackWhenSpoolIsUnusable(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'STREAMED\\n'"}}
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("an unwritable spool should fall back to the server, got: %v", err)
 	}
 
@@ -205,9 +217,12 @@ func TestFailClosedRequiresBothPathsToFail(t *testing.T) {
 	cfg.Server.JournalDirectory = filepath.Join(locked, "spool")
 
 	var userSaw bytes.Buffer
-	_, err := RunRecorded(t.Context(), cfg,
-		Invocation{Name: "lsh", Args: []string{"-c", "true"}}, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	_, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: Invocation{Name: "lsh", Args: []string{"-c", "true"}},
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err == nil {
 		t.Fatal("a session with no spool and no server was recorded successfully")
 	}

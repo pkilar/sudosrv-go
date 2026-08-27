@@ -50,6 +50,21 @@ SYMLINKS="lsh lbash lzsh"
 # exact failure the ordering in cmd_uninstall exists to prevent.
 LEGACY_SYMLINKS="ldash"
 
+# The forced-command entry point. Installed as a symlink like the shell names
+# above, but deliberately NOT registered in /etc/shells: it is not a shell, and
+# listing it there would let an account be chsh'd to it.
+ENTRY_SYMLINKS="logsh-entry"
+
+# Where the search for a live ForceCommand reference starts. The full set of
+# files is RESOLVED from these, not assumed -- see entry_in_sshd_config.
+SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
+SSHD_CONFIG_DIR="${SSHD_CONFIG_DIR:-/etc/ssh/sshd_config.d}"
+# sshd_config(5): "Files without absolute paths are assumed to be in /etc/ssh."
+SSHD_INCLUDE_BASE="${SSHD_INCLUDE_BASE:-/etc/ssh}"
+# OpenSSH refuses to nest Include beyond this depth. Matching it means a config
+# that includes itself terminates here too instead of recursing forever.
+SSHD_INCLUDE_MAX_DEPTH=16
+
 r() { printf '%s%s' "$ROOT" "$1"; }
 
 die() { printf 'logsh-install: %s\n' "$*" >&2; exit 1; }
@@ -133,6 +148,10 @@ cmd_install() {
 		add_shell "$SBINDIR/$name"
 	done
 
+	for name in $ENTRY_SYMLINKS; do
+		ln -sf logsh "$(r "$SBINDIR/$name")"
+	done
+
 	mkdir -p "$(r "$CONFDIR")"
 	chmod 0755 "$(r "$CONFDIR")"
 	if [ ! -f "$(r "$CONFIG")" ]; then
@@ -171,6 +190,109 @@ cmd_disable() {
 	set_shell "$1" "$2"
 }
 
+# entry_in_sshd_config prints every sshd config line naming the entry symlink.
+#
+# Removing the package deletes /usr/sbin/logsh-entry. On a host whose sshd_config
+# says `ForceCommand /usr/sbin/logsh-entry`, that is root's SSH access to the
+# host, gone -- and unlike the passwd-shell case, no account is switched, so the
+# existing restore-before-remove ordering does not cover it.
+sshd_include_targets() {
+	_file="$1"
+	_depth="$2"
+
+	# Every guard is an explicit `if` rather than `[ ... ] && return`: this
+	# script runs under `set -e`, and a trailing && list that evaluates false
+	# becomes the function's exit status and aborts the caller.
+	if [ "$_depth" -ge "$SSHD_INCLUDE_MAX_DEPTH" ]; then
+		return 0
+	fi
+	if [ ! -f "$_file" ]; then
+		return 0
+	fi
+	if [ ! -r "$_file" ]; then
+		# Unreadable, so its Include directives cannot be enumerated. The
+		# caller greps this path too and reports it as a hit, so the
+		# uninstall refuses rather than proceeding on a partial picture.
+		return 0
+	fi
+
+	# One Include may name several paths, each of which may be a glob.
+	sed -n 's/^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]][[:space:]]*//p' "$_file" |
+		while IFS= read -r _spec; do
+			for _pat in $_spec; do
+				case "$_pat" in
+				/*) _abs="$_pat" ;;
+				*) _abs="$SSHD_INCLUDE_BASE/$_pat" ;;
+				esac
+				# Unquoted so the shell expands the glob, and prefixed so a
+				# scratch root under $ROOT is searched rather than the real
+				# system config. A pattern that matches nothing survives
+				# literally and is dropped by the existence check.
+				_glob="$(r "$_abs")"
+				for _hit in $_glob; do
+					if [ -e "$_hit" ]; then
+						printf '%s\n' "$_hit"
+						sshd_include_targets "$_hit" "$((_depth + 1))"
+					fi
+				done
+			done
+		done
+	return 0
+}
+
+entry_in_sshd_config() {
+	# The set of files sshd reads is not a fixed list. sshd_config pulls in
+	# more with Include, whose targets may be globs and may live anywhere on
+	# the filesystem -- and on most distributions the drop-in directory is
+	# reached that way rather than by convention. Searching only the two
+	# conventional paths would miss a ForceCommand in an included file and let
+	# uninstall delete the binary sshd still names, which is precisely the
+	# lockout this guard exists to prevent. So the list is resolved by
+	# following Include from the top-level config, keeping the drop-in
+	# directory as a seed for configs that do not include it themselves.
+	#
+	# This over-refuses by design: it greps text rather than evaluating sshd's
+	# effective configuration, so a commented-out or Match-scoped directive
+	# trips it too. `sshd -T -C user=root,host=...,addr=...` is the
+	# authoritative view of what sshd would actually apply; --force is the
+	# override once an operator has checked.
+	_top="$(r "$SSHD_CONFIG")"
+	_paths="$(
+		printf '%s\n%s\n' "$_top" "$(r "$SSHD_CONFIG_DIR")"
+		sshd_include_targets "$_top" 0
+	)"
+
+	# sort -u so a file reached both as a seed and via Include is reported once.
+	for _p in $(printf '%s\n' "$_paths" | sort -u); do
+		if [ ! -e "$_p" ]; then
+			continue
+		fi
+
+		# grep's exit status carries three cases and they must not be
+		# conflated: 0 is a match, 1 is a clean no-match, anything above 1 is
+		# an error -- most plausibly a config this process cannot read.
+		# Discarding stderr and forcing success would make that third case
+		# look identical to the second, so an unreadable sshd_config would
+		# read as "no reference" and uninstall would proceed to delete the
+		# symlink that config still names. That is fail-OPEN on a guard whose
+		# whole purpose is preventing a lockout, so an unreadable path is
+		# reported as a hit instead: refuse, and let --force be the deliberate
+		# override.
+		#
+		# The assignment sits in an `if` condition deliberately: under `set -e`
+		# a bare assignment from a failing command substitution would abort the
+		# whole uninstall the moment grep reported no-match. A condition is
+		# exempt from that.
+		if _out="$(grep -rn "logsh-entry" "$_p" 2>&1)"; then
+			printf '%s\n' "$_out"
+		elif [ $? -ne 1 ]; then
+			printf '%s: cannot be read, so it cannot be cleared of references (%s)\n' \
+				"$_p" "$_out"
+		fi
+	done
+	return 0
+}
+
 # cmd_uninstall restores every account BEFORE removing anything.
 #
 # The other order is a fleet-wide lockout: delete the symlinks first and every
@@ -178,6 +300,14 @@ cmd_disable() {
 # removal must never be able to do that, which is why this runs from prerm and
 # not postrm.
 cmd_uninstall() {
+	_hits="$(entry_in_sshd_config)"
+	if [ -n "$_hits" ] && [ "${1:-}" != "--force" ]; then
+		printf 'logsh-install: refusing to uninstall: sshd still references logsh-entry\n' >&2
+		printf '%s\n' "$_hits" >&2
+		printf 'logsh-install: remove the Match block and reload sshd first, or pass --force\n' >&2
+		exit 1
+	fi
+
 	_fallback="${FALLBACK_SHELL:-/bin/sh}"
 
 	for name in $SYMLINKS $LEGACY_SYMLINKS; do
@@ -190,6 +320,9 @@ cmd_uninstall() {
 
 	for name in $SYMLINKS $LEGACY_SYMLINKS; do
 		remove_shell "$SBINDIR/$name"
+		rm -f "$(r "$SBINDIR/$name")"
+	done
+	for name in $ENTRY_SYMLINKS; do
 		rm -f "$(r "$SBINDIR/$name")"
 	done
 	note "uninstalled; $CONFIG and any spooled journals were left in place"

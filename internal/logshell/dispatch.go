@@ -3,9 +3,11 @@
 package logshell
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -13,6 +15,17 @@ import (
 // administrative subcommands instead of acting as a shell; invoked under any
 // other name it looks that name up in Config.Shells.
 const AdminName = "logsh"
+
+// EntryName is the name logsh is invoked under when sshd runs it as a forced
+// command. /usr/sbin/logsh-entry is a symlink to the binary, and that path is
+// what sshd_config's ForceCommand and the force-command critical option on a
+// privileged certificate both name.
+//
+// A name rather than a flag, for two reasons. sshd invokes a forced command as
+// `$SHELL -c "<command>"`, so argv[0] is the only thing logsh controls; and
+// dispatching on it happens before any flag parsing, which keeps -config
+// unreachable on a path that runs before any user code in a root session.
+const EntryName = "logsh-entry"
 
 // Invocation is how logsh was entered, decomposed.
 type Invocation struct {
@@ -54,6 +67,10 @@ func ParseInvocation(argv []string) Invocation {
 // IsAdmin reports whether this invocation is an administrative one rather than a
 // shell one.
 func (i Invocation) IsAdmin() bool { return i.Name == AdminName }
+
+// IsEntry reports whether sshd is running logsh as a forced command, as opposed
+// to as a login shell or an administrative invocation.
+func (i Invocation) IsEntry() bool { return i.Name == EntryName }
 
 // ResolveShell maps an invocation name to the real shell it stands for.
 //
@@ -127,4 +144,100 @@ func (c *Config) NamesInUse(passwdPath string) (map[string]bool, error) {
 		}
 	}
 	return inUse, nil
+}
+
+// ErrNoPasswdEntry reports that an account has no line in the passwd file.
+var ErrNoPasswdEntry = errors.New("no passwd entry")
+
+// PasswdShell returns an account's login shell field.
+//
+// os/user cannot supply this: user.User carries Uid, Gid, Username, Name and
+// HomeDir, and no shell. So the file is parsed directly, which this package
+// already does in NamesInUse.
+//
+// The account is matched by name OR by uid, the same accommodation ShouldRecord
+// makes and for the same reason: logsh is built CGO_ENABLED=0, so os/user cannot
+// resolve an NSS account and the caller may reach here with no name at all.
+// Matching on the uid keeps the lookup working with an empty name, which is what
+// stops an unresolvable name becoming a refused login.
+//
+// An account whose shell field is EMPTY returns "" and no error. That is a
+// distinct state from an absent account, and sshd handles it specifically.
+func PasswdShell(passwdPath, username string, uid int) (string, error) {
+	raw, err := os.ReadFile(passwdPath) // #nosec G304 -- caller-supplied, root-owned system file
+	if err != nil {
+		return "", err
+	}
+	want := strconv.Itoa(uid)
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) != 7 {
+			continue
+		}
+		if (username != "" && fields[0] == username) || fields[2] == want {
+			return fields[6], nil
+		}
+	}
+	return "", fmt.Errorf("%w for %q (uid %d) in %s", ErrNoPasswdEntry, username, uid, passwdPath)
+}
+
+// ResolveEntryShell picks the shell a forced-command session runs.
+//
+// ForceCommand.Shell is consulted FIRST; only when it is unset -- the normal
+// case -- does the passwd entry become authoritative.
+//
+// With no override, this is the account's OWN shell, not a configured one.
+// §4.10 of the session-logging design commits that this deployment does not
+// change root's login shell -- that is its central advantage over installing
+// logsh as the passwd shell. A shell named in logsh.yaml would be applied to
+// every host sharing that file and would silently replace root's shell
+// wherever the two disagreed, leaving a console login and an SSH login giving
+// different shells for the same account. Reading the passwd entry is exactly
+// what sshd would have done without ForceCommand, so enabling the recorder
+// changes which shell runs on no host.
+//
+// The shells allowlist is deliberately NOT applied to a passwd-derived result.
+// That list exists to stop a stray symlink becoming an exec primitive by
+// INFERENCE; there is no inference here, the value is read from a root-owned
+// field, and gating on it would refuse root's login on any host whose shell
+// simply has no mapping -- a lockout for no security gain.
+func (c *Config) ResolveEntryShell(passwdPath, username string, uid int) (string, error) {
+	shell := c.ForceCommand.Shell
+	if shell == "" {
+		var err error
+		shell, err = PasswdShell(passwdPath, username, uid)
+		if err != nil {
+			return "", err
+		}
+		if shell == "" {
+			// sshd's own fallback: session.c substitutes _PATH_BSHELL when
+			// pw_shell is empty rather than failing the session.
+			shell = "/bin/sh"
+		}
+		// The account's shell may itself be a logsh multi-call symlink, on a
+		// host that also runs the login-shell deployment. Exec'ing it would
+		// start a second recorder and a second pty for one session. Resolving
+		// the basename through the shells map yields the real shell, so the two
+		// deployments compose instead of nesting -- and this is the same
+		// basename-against-Shells test NamesInUse uses to decide the very same
+		// question.
+		//
+		// The unwrap applies only to a passwd-derived value. An override is
+		// already a real shell path, checked against the allowlist by Validate.
+		shellName := strings.TrimPrefix(filepath.Base(shell), "-")
+		if real, ok := c.Shells[shellName]; ok {
+			shell = real
+		}
+	}
+	if !filepath.IsAbs(shell) {
+		return "", fmt.Errorf("shell %q for %q is not an absolute path", shell, username)
+	}
+	st, err := os.Stat(shell)
+	if err != nil {
+		return "", fmt.Errorf("shell %s for %q: %w", shell, username, err)
+	}
+	if st.IsDir() || st.Mode()&0111 == 0 {
+		return "", fmt.Errorf("shell %s for %q is not executable", shell, username)
+	}
+	return shell, nil
 }

@@ -68,15 +68,6 @@ var ErrRecordingUnavailable = errors.New("recording could not be started")
 
 func unavailable(err error) error { return fmt.Errorf("%w: %w", ErrRecordingUnavailable, err) }
 
-// RunRecorded runs the shell on its own pseudo-terminal, relaying bytes between
-// the user's terminal and the shell while streaming a transcript to the log
-// server. It returns once the shell has exited and the server has confirmed the
-// session is durable.
-//
-// The ordering here is deliberate and load-bearing: the recorder is started
-// BEFORE the shell. If recording cannot begin, no shell has been spawned yet and
-// the caller can apply its fail-closed policy on a session that never started,
-// rather than having to kill a shell the user is already typing into.
 // TerminalIO is the user's end of the session: the terminal logsh inherited from
 // sshd. It is a parameter rather than os.Stdin/os.Stdout directly so a test can
 // drive the relay through a pty pair of its own.
@@ -90,7 +81,22 @@ type TerminalIO struct {
 // StdTerminal is the production TerminalIO.
 func StdTerminal() TerminalIO { return TerminalIO{In: os.Stdin, Out: os.Stdout} }
 
-func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath string, tio TerminalIO, cmdLog *CommandLog) (Outcome, error) {
+// RunRecorded records an interactive session through a second pty, relaying
+// bytes between the user's terminal and the shell while streaming a transcript
+// to the log server. It returns once the shell has exited and the server has
+// confirmed the session is durable.
+//
+// The ordering here is deliberate and load-bearing: the recorder is started
+// BEFORE the shell. If recording cannot begin, no shell has been spawned yet and
+// the caller can apply its fail-closed policy on a session that never started,
+// rather than having to kill a shell the user is already typing into.
+//
+// It takes a RunSpec rather than positional arguments for the same reason the
+// non-interactive path does: the two entry points -- a login shell and an sshd
+// forced command -- differ only in how they resolve what to run, and threading
+// each new field through six positional parameters is how the two drift apart.
+func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, error) {
+	cfg, inv, shellPath, cmdLog := spec.Config, spec.Invocation, spec.ShellPath, spec.CmdLog
 	stdin := tio.In
 
 	size, err := GetWinSize(stdin.Fd())
@@ -117,6 +123,7 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	meta := CollectMeta(pty.Name, size, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
 	meta.ApplyNesting(DetectNesting())
+	meta.ApplyAuthInfo(spec.Info)
 
 	rec, err := StartRecorder(ctx, cfg, meta)
 	if err != nil {
@@ -136,7 +143,7 @@ func RunRecorded(ctx context.Context, cfg *Config, inv Invocation, shellPath str
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		c.Args = argv
-		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), shellPath), cmdLog.SessionID())
+		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), cmdLog.SessionID())
 		c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
 		// Setsid puts the shell in its own session with the INNER pty as
 		// controlling terminal, which is what makes job control, ^C and ^Z work

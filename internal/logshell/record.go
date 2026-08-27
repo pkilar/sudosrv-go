@@ -14,6 +14,26 @@ import (
 	"time"
 )
 
+// SessionInfo is what the forced-command entry point learns from sshd.
+//
+// It is separate from SessionMeta because it arrives from a different place --
+// sshd's environment rather than the process's own identity -- and because the
+// login-shell path has none of it. A zero value stamps nothing, which is what
+// keeps every existing caller unchanged.
+type SessionInfo struct {
+	// Auth is the credential that opened the session.
+	Auth AuthInfo
+
+	// SSHCommand is the client's requested command, verbatim, truncated by
+	// ApplyAuthInfo. It answers R-5's "what command" for a non-interactive
+	// session, and is kept separate from `command`/`runargv` so those keep
+	// meaning what they mean for a sudo record: the program actually exec'd.
+	SSHCommand string
+
+	// SSHClient is the source address and port from SSH_CONNECTION.
+	SSHClient string
+}
+
 // SessionMeta is everything the log server needs to describe a session. The
 // field set is exactly the info keys internal/storage consumes, so a session
 // recorded by logsh produces the same on-disk shape as one recorded by sudo and
@@ -90,6 +110,10 @@ type SessionMeta struct {
 	// info key so a recorded session carries the same identifier the command log
 	// stamps on every line, and the two can be joined.
 	SessionID string
+
+	// Info is what sshd told us about this session, when logsh was invoked as a
+	// forced command. Zero for a login-shell session.
+	Info SessionInfo
 }
 
 // CollectMeta gathers session metadata for the current process.
@@ -207,6 +231,40 @@ func (m *SessionMeta) ApplyNesting(n Nesting) {
 	}
 }
 
+// ApplyAuthInfo records what sshd reported and, for a certificate, names the
+// human in submituser.
+//
+// The same correction ApplyNesting makes under sudo, for the same reason: the
+// session RUNS as root, but a person authenticated it, and a record naming root
+// in both fields cannot answer the only question anybody asks of it. Under a
+// certificate that person is the key ID.
+//
+// SubmitUID is deliberately NOT changed. There is no local uid for
+// jsmith@CORP.EXAMPLE.COM, so the numeric ids go on describing the process while
+// the name describes the authenticated identity. This is a real asymmetry with
+// sudo's records, where submituid is the invoking human's uid, and consumers
+// joining on submituid must not read it as identifying a person.
+func (m *SessionMeta) ApplyAuthInfo(info SessionInfo) {
+	info.SSHCommand = truncateForRecord(info.SSHCommand)
+	m.Info = info
+
+	if info.Auth.Method == AuthMethodCert && info.Auth.KeyID != "" {
+		m.SubmitUser = info.Auth.KeyID
+	}
+}
+
+// truncateForRecord bounds an attacker-controlled string, visibly.
+//
+// SSH_ORIGINAL_COMMAND has no length limit worth relying on, and this value goes
+// into every session record. The budget is the command log's, so one over-long
+// value cannot be recorded two different ways by the two paths.
+func truncateForRecord(s string) string {
+	if len(s) <= DefaultCommandLogMaxLen {
+		return s
+	}
+	return s[:DefaultCommandLogMaxLen-3] + "..."
+}
+
 func strInfo(key, val string) *pb.InfoMessage {
 	return &pb.InfoMessage{Key: key, Value: &pb.InfoMessage_Strval{Strval: val}}
 }
@@ -280,6 +338,38 @@ func (m SessionMeta) InfoMessages() []*pb.InfoMessage {
 		msgs = append(msgs, &pb.InfoMessage{Key: "runenv", Value: &pb.InfoMessage_Strlistval{
 			Strlistval: &pb.InfoMessage_StringList{Strings: m.RunEnv},
 		}})
+	}
+
+	// Attribution. Each key is OMITTED when unset, for the same reason `source`
+	// is: the server copies every key it receives into log.json, so an empty
+	// value asserts "determined to be nothing" rather than "not determined".
+	if m.Info.Auth.Method != "" {
+		msgs = append(msgs, strInfo("logsh_auth_method", m.Info.Auth.Method))
+	}
+	if m.Info.Auth.KeyID != "" {
+		msgs = append(msgs, strInfo("logsh_cert_keyid", m.Info.Auth.KeyID))
+	}
+	if m.Info.Auth.Serial != 0 {
+		// A string, not a numval: serials are uint64 and numInfo takes int64, so
+		// a serial past 2^63 would silently wrap into a negative number.
+		msgs = append(msgs, strInfo("logsh_cert_serial", strconv.FormatUint(m.Info.Auth.Serial, 10)))
+	}
+	if m.Info.Auth.CAFingerprint != "" {
+		msgs = append(msgs, strInfo("logsh_cert_ca", m.Info.Auth.CAFingerprint))
+	}
+	if m.Info.Auth.KeyFingerprint != "" {
+		msgs = append(msgs, strInfo("logsh_auth_key", m.Info.Auth.KeyFingerprint))
+	}
+	if len(m.Info.Auth.Principals) > 0 {
+		msgs = append(msgs, &pb.InfoMessage{Key: "logsh_cert_principals", Value: &pb.InfoMessage_Strlistval{
+			Strlistval: &pb.InfoMessage_StringList{Strings: m.Info.Auth.Principals},
+		}})
+	}
+	if m.Info.SSHCommand != "" {
+		msgs = append(msgs, strInfo("logsh_ssh_command", m.Info.SSHCommand))
+	}
+	if m.Info.SSHClient != "" {
+		msgs = append(msgs, strInfo("logsh_ssh_client", m.Info.SSHClient))
 	}
 
 	// submitenv is sent ALWAYS, and always empty. That is the opposite rule to
