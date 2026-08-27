@@ -3,6 +3,7 @@
 package logshell
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -307,5 +308,136 @@ func TestEntryIsNotAdmin(t *testing.T) {
 	inv := ParseInvocation([]string{"/usr/sbin/logsh-entry"})
 	if inv.IsAdmin() {
 		t.Error("logsh-entry must not be treated as an admin invocation")
+	}
+}
+
+// writePasswd drops a passwd fixture into a temp dir and returns its path.
+func writePasswd(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestPasswdShell reads the field os/user cannot supply.
+//
+// user.User has no Shell member, so there is no standard-library route to this
+// value. Matching on the uid as well as the name is the same accommodation
+// ShouldRecord makes: logsh is built CGO_ENABLED=0, so os/user cannot resolve an
+// NSS account and the caller may have no name to pass.
+func TestPasswdShell(t *testing.T) {
+	body := "root:x:0:0:root:/root:/bin/zsh\n" +
+		"noshell:x:1001:1001::/home/noshell:\n" +
+		"alice:x:1002:1002::/home/alice:/bin/bash\n"
+	path := writePasswd(t, body)
+
+	tests := []struct {
+		name     string
+		username string
+		uid      int
+		want     string
+		wantErr  bool
+	}{
+		{"by name", "root", 0, "/bin/zsh", false},
+		{"by uid when the name is unknown", "", 1002, "/bin/bash", false},
+		{"empty shell field is not an error", "noshell", 1001, "", false},
+		{"absent account", "nobody-here", 4242, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PasswdShell(path, tt.username, tt.uid)
+			if tt.wantErr {
+				if !errors.Is(err, ErrNoPasswdEntry) {
+					t.Fatalf("want ErrNoPasswdEntry, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("PasswdShell = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveEntryShellUsesTheAccountsOwnShell is the whole point of §7.3.
+//
+// A configured fleet-wide shell would silently replace root's shell on every
+// host where root's shell is something else -- and would leave a console login
+// and an SSH login giving different shells for the same account. Reading the
+// passwd entry is what sshd itself would have done, so enabling the recorder
+// changes which shell runs on no host.
+func TestResolveEntryShellUsesTheAccountsOwnShell(t *testing.T) {
+	cfg := DefaultConfig()
+	path := writePasswd(t, "root:x:0:0:root:/root:/bin/sh\n")
+
+	got, err := cfg.ResolveEntryShell(path, "root", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/bin/sh" {
+		t.Errorf("ResolveEntryShell = %q, want /bin/sh", got)
+	}
+}
+
+// TestResolveEntryShellUnwrapsALogshSymlink covers the host that runs BOTH
+// deployments: ForceCommand here, and logsh as root's passwd shell.
+//
+// Left alone, the forced command would exec /usr/sbin/lbash, which is logsh
+// again -- a second recorder and a second pty for one session. Resolving the
+// basename through the shells map yields the real shell instead, so the two
+// deployments compose. Matching a passwd basename against Shells is the same
+// test NamesInUse already performs.
+func TestResolveEntryShellUnwrapsALogshSymlink(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Shells = map[string]string{"lbash": "/bin/sh"} // /bin/sh so the test does not need bash
+	path := writePasswd(t, "root:x:0:0:root:/root:/usr/sbin/lbash\n")
+
+	got, err := cfg.ResolveEntryShell(path, "root", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/bin/sh" {
+		t.Errorf("ResolveEntryShell = %q, want the mapped shell /bin/sh", got)
+	}
+}
+
+// TestResolveEntryShellEmptyFieldFallsBackToSh matches sshd, which uses
+// _PATH_BSHELL when pw_shell is empty.
+func TestResolveEntryShellEmptyFieldFallsBackToSh(t *testing.T) {
+	cfg := DefaultConfig()
+	path := writePasswd(t, "root:x:0:0:root:/root:\n")
+
+	got, err := cfg.ResolveEntryShell(path, "root", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/bin/sh" {
+		t.Errorf("ResolveEntryShell = %q, want /bin/sh", got)
+	}
+}
+
+// TestResolveEntryShellRejectsAnUnusableShell.
+//
+// There is nothing to fall back to here, so the caller exits rather than
+// exec'ing something else. Substituting a different shell would be worse than
+// refusing: the operator would get a working login running the wrong thing, and
+// sshd would equally have failed to exec this entry.
+func TestResolveEntryShellRejectsAnUnusableShell(t *testing.T) {
+	cfg := DefaultConfig()
+	for _, tt := range []struct{ name, body string }{
+		{"missing binary", "root:x:0:0:root:/root:/nonexistent/shell\n"},
+		{"relative path", "root:x:0:0:root:/root:bash\n"},
+		{"a directory", "root:x:0:0:root:/root:/tmp\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := cfg.ResolveEntryShell(writePasswd(t, tt.body), "root", 0); err == nil {
+				t.Error("want an error, got nil")
+			}
+		})
 	}
 }
