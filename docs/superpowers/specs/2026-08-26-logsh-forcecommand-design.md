@@ -95,7 +95,9 @@ warning in §7.2.
 ### 3.1 Measured cost of D-2
 
 `golang.org/x/crypto v0.55.0` plus indirect `golang.org/x/sys v0.47.0`.
-`logsh` grows **8.37 MB → ≈10.3 MB** (`CGO_ENABLED=0`, `-ldflags="-s -w"`).
+`logsh` grows **8.37 MB → 8.43 MB** (`CGO_ENABLED=0`, `-ldflags="-s -w"`) — measured at implementation, +64 KB.
+
+An earlier estimate here said ≈10.3 MB. That was wrong: it added a standalone probe binary's *total* size to logsh's total, rather than measuring the marginal cost. `logsh` already links `crypto/tls` for its mTLS connection to the log server, so ed25519, RSA, ECDSA and SHA-256 are present either way; `x/crypto/ssh` contributes only the SSH wire format and key-type dispatch, and the linker drops the transport, cipher and key-exchange machinery because nothing here dials or accepts a connection.
 Only the certificate parser is reached; no transport or network code is
 reachable from `logsh`.
 

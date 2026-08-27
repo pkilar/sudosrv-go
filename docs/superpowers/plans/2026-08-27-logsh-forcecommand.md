@@ -763,7 +763,7 @@ Expected: PASS, all subtests.
 ```bash
 CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/logsh-sized ./cmd/logsh && ls -l /tmp/logsh-sized
 ```
-Expected: builds clean; roughly 10.3 MB, up from 8.37 MB. A materially larger figure means something beyond the certificate parser got linked in — investigate before continuing.
+Expected: builds clean, at roughly 8.43 MB, up from 8.37 MB — about +64 KB. Only the SSH wire format and key-type dispatch link in; `logsh` already pulls `crypto/tls`, so the underlying primitives are present either way, and the linker drops the ssh transport because nothing here dials or accepts a connection. A figure near 10 MB would mean the transport stack got linked in after all — investigate before continuing.
 
 - [ ] **Step 8: Commit**
 
@@ -777,7 +777,9 @@ live inside the base64 certificate blob, which is why this cannot be done in
 shell. A plain key is recorded as a fact rather than an error: under the
 certificate design it is the break-glass account or a missed key.
 
-Adds golang.org/x/crypto for certificate parsing; logsh grows 8.4 to 10.3 MB."
+Adds golang.org/x/crypto for certificate parsing; logsh grows 8.37 to 8.43 MB.
+The linker only pulls in public-key parsing and fingerprinting, not the ssh
+transport stack, since nothing here dials or accepts a connection."
 ```
 
 ---
@@ -3015,7 +3017,7 @@ gofmt -l cmd internal
 go vet ./...
 ```
 
-Expected: all tests pass; `logsh` builds statically at roughly 10.3 MB; `gofmt -l` prints nothing; `go vet` is clean.
+Expected: all tests pass; `logsh` builds statically at roughly 8.43 MB; `gofmt -l` prints nothing; `go vet` is clean.
 
 **Acceptance tests from the source document that this plan covers:** T-1, T-2 (Task 5 and Task 9 step 5), T-3 (Task 8), T-4 (Tasks 3 and 4), T-9 (Task 9), plus `-validate`/`-selftest` coverage (Task 6).
 
