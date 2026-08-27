@@ -573,3 +573,29 @@ func TestNoRecipeInstallsAnUntrackedConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallScriptShipsTheEntrySymlink.
+//
+// The forced-command entry point is a symlink like lbash, with one critical
+// difference: it must NOT be registered in /etc/shells. It is not a shell, and
+// listing it there would let an account be chsh'd to it.
+func TestInstallScriptShipsTheEntrySymlink(t *testing.T) {
+	raw, err := os.ReadFile("../../packaging/logsh/logsh-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+
+	if !strings.Contains(script, "ENTRY_SYMLINKS=\""+EntryName+"\"") {
+		t.Errorf("install script must declare ENTRY_SYMLINKS=%q", EntryName)
+	}
+	// The /etc/shells registration loop must not reach the entry name.
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "add_shell") && strings.Contains(line, "ENTRY_SYMLINKS") {
+			t.Errorf("the entry symlink must never be registered in /etc/shells: %q", line)
+		}
+	}
+	if !strings.Contains(script, "sshd_config") {
+		t.Error("uninstall must check sshd_config before removing the entry symlink")
+	}
+}

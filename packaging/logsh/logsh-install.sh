@@ -50,6 +50,15 @@ SYMLINKS="lsh lbash lzsh"
 # exact failure the ordering in cmd_uninstall exists to prevent.
 LEGACY_SYMLINKS="ldash"
 
+# The forced-command entry point. Installed as a symlink like the shell names
+# above, but deliberately NOT registered in /etc/shells: it is not a shell, and
+# listing it there would let an account be chsh'd to it.
+ENTRY_SYMLINKS="logsh-entry"
+
+# Files searched for a live ForceCommand reference before the entry symlink is
+# removed. See cmd_uninstall.
+SSHD_CONFIGS="/etc/ssh/sshd_config /etc/ssh/sshd_config.d"
+
 r() { printf '%s%s' "$ROOT" "$1"; }
 
 die() { printf 'logsh-install: %s\n' "$*" >&2; exit 1; }
@@ -133,6 +142,10 @@ cmd_install() {
 		add_shell "$SBINDIR/$name"
 	done
 
+	for name in $ENTRY_SYMLINKS; do
+		ln -sf logsh "$(r "$SBINDIR/$name")"
+	done
+
 	mkdir -p "$(r "$CONFDIR")"
 	chmod 0755 "$(r "$CONFDIR")"
 	if [ ! -f "$(r "$CONFIG")" ]; then
@@ -171,6 +184,20 @@ cmd_disable() {
 	set_shell "$1" "$2"
 }
 
+# entry_in_sshd_config prints every sshd config line naming the entry symlink.
+#
+# Removing the package deletes /usr/sbin/logsh-entry. On a host whose sshd_config
+# says `ForceCommand /usr/sbin/logsh-entry`, that is root's SSH access to the
+# host, gone -- and unlike the passwd-shell case, no account is switched, so the
+# existing restore-before-remove ordering does not cover it.
+entry_in_sshd_config() {
+	for path in $SSHD_CONFIGS; do
+		_p="$(r "$path")"
+		[ -e "$_p" ] || continue
+		grep -rn "logsh-entry" "$_p" 2>/dev/null || true
+	done
+}
+
 # cmd_uninstall restores every account BEFORE removing anything.
 #
 # The other order is a fleet-wide lockout: delete the symlinks first and every
@@ -178,6 +205,14 @@ cmd_disable() {
 # removal must never be able to do that, which is why this runs from prerm and
 # not postrm.
 cmd_uninstall() {
+	_hits="$(entry_in_sshd_config)"
+	if [ -n "$_hits" ] && [ "${1:-}" != "--force" ]; then
+		printf 'logsh-install: refusing to uninstall: sshd still references logsh-entry\n' >&2
+		printf '%s\n' "$_hits" >&2
+		printf 'logsh-install: remove the Match block and reload sshd first, or pass --force\n' >&2
+		exit 1
+	fi
+
 	_fallback="${FALLBACK_SHELL:-/bin/sh}"
 
 	for name in $SYMLINKS $LEGACY_SYMLINKS; do
@@ -190,6 +225,9 @@ cmd_uninstall() {
 
 	for name in $SYMLINKS $LEGACY_SYMLINKS; do
 		remove_shell "$SBINDIR/$name"
+		rm -f "$(r "$SBINDIR/$name")"
+	done
+	for name in $ENTRY_SYMLINKS; do
 		rm -f "$(r "$SBINDIR/$name")"
 	done
 	note "uninstalled; $CONFIG and any spooled journals were left in place"
