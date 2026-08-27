@@ -58,10 +58,33 @@ const (
 
 func main() {
 	inv := logshell.ParseInvocation(os.Args)
-	if inv.IsAdmin() {
+	switch {
+	case inv.IsAdmin():
 		os.Exit(runAdmin(inv))
+	case inv.IsEntry():
+		os.Exit(runForceCommand(inv, configPathForEntry()))
 	}
 	os.Exit(runShell(inv))
+}
+
+// configPathForEntry returns the configuration the forced-command path reads.
+//
+// The compiled-in path in every real build. The override exists solely so
+// cmd/logsh's own subprocess tests can exercise routing without installing a
+// system configuration, and it is read ONLY when the compiled-in path does not
+// exist -- so it can never shadow a deployed file, and on any host where logsh
+// is actually installed it is dead code.
+//
+// It is read here in main rather than inside runForceCommand so that the
+// function which runs on the authentication path takes its config path as an
+// argument and consults no environment at all.
+func configPathForEntry() string {
+	if _, err := os.Stat(logshell.DefaultConfigPath); err != nil {
+		if p := os.Getenv("LOGSH_CONFIG_FOR_TEST"); p != "" {
+			return p
+		}
+	}
+	return logshell.DefaultConfigPath
 }
 
 // runShell is the login-shell path.
