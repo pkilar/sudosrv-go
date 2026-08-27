@@ -143,7 +143,7 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		c.Args = argv
-		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), shellPath), cmdLog.SessionID())
+		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), cmdLog.SessionID())
 		c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
 		// Setsid puts the shell in its own session with the INNER pty as
 		// controlling terminal, which is what makes job control, ^C and ^Z work

@@ -237,7 +237,7 @@ func passthrough(tgt *execTarget) int {
 		logshell.Alertf(syslog.LOG_ERR, "nothing to exec")
 		return exitGeneral
 	}
-	if err := logshell.Exec(tgt.path, tgt.argv0, tgt.args, os.Environ()); err != nil {
+	if err := logshell.Exec(tgt.path, tgt.argv0, tgt.envShell, tgt.args, os.Environ()); err != nil {
 		logshell.Alertf(syslog.LOG_ERR, "%v", err)
 		return exitGeneral
 	}

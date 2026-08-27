@@ -636,3 +636,36 @@ func TestPrepareEnvStillCorrectsShellWhenGivenOne(t *testing.T) {
 		t.Errorf("PrepareEnv = %v, want SHELL rewritten to the real shell", got)
 	}
 }
+
+// TestRunRecordedSpecEnvShellReachesPrepareEnv pins R10: the recorded path must
+// build the child environment from spec.EnvShell, not from spec.ShellPath.
+//
+// A forced-command route resolves a ShellPath to exec -- which may not be a
+// shell at all, e.g. sftp-server -- and a separate EnvShell to publish as
+// $SHELL. Before this fix, relay.go built the child's environment from the exec
+// target instead, so the two fields could silently diverge. ShellPath and
+// EnvShell are set to different values here so a regression back to
+// spec.ShellPath is caught by the shell's own report of $SHELL, not merely by
+// inspecting the diff.
+func TestRunRecordedSpecEnvShellReachesPrepareEnv(t *testing.T) {
+	srv := newMockServer(t)
+	_, slave := outerTerminal(t)
+
+	var userSaw bytes.Buffer
+	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf 'SHELL=%s\\n' \"$SHELL\""}}
+
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/not/the/real/shell/marker",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
+		t.Fatalf("RunRecorded: %v", err)
+	}
+
+	out, _, _, _, _ := srv.snapshot()
+	if !strings.Contains(out, "SHELL=/not/the/real/shell/marker") {
+		t.Errorf("ttyout transcript = %q, want it to report SHELL=/not/the/real/shell/marker "+
+			"(spec.EnvShell), not spec.ShellPath (/bin/sh)", out)
+	}
+}

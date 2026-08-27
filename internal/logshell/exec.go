@@ -4,7 +4,6 @@ package logshell
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"syscall"
@@ -55,9 +54,9 @@ func PrepareEnv(env []string, shellPath string) []string {
 	return out
 }
 
-// Exec replaces the current process image with the real shell.
+// Exec replaces the current process image with path.
 //
-// This is execve, not fork-and-wait, for the pass-through path: the shell
+// This is execve, not fork-and-wait, for the pass-through path: the child
 // inherits our pid, our file descriptors, our controlling terminal and our
 // process group, so exit status, signal delivery and job control are correct by
 // construction rather than by careful proxying. A session that is not being
@@ -65,13 +64,19 @@ func PrepareEnv(env []string, shellPath string) []string {
 // which is the property that makes it safe to set logsh as a system-wide shell
 // before deciding whose sessions to record.
 //
+// envShell is published as $SHELL and is deliberately independent of path:
+// a forced-command route may exec sftp-server or rrsync, neither of which is a
+// shell, and asserting SHELL=/usr/lib/ssh/sftp-server would be a claim scripts
+// act on -- see PrepareEnv. An empty envShell publishes nothing, leaving
+// whatever sshd already put in the environment.
+//
 // It returns only on failure; on success the process is gone.
-func Exec(shellPath, argv0 string, args, env []string) error {
+func Exec(path, argv0, envShell string, args, env []string) error {
 	argv := make([]string, 0, len(args)+1)
 	argv = append(argv, argv0)
 	argv = append(argv, args...)
-	if err := syscall.Exec(shellPath, argv, PrepareEnv(env, shellPath)); err != nil {
-		return fmt.Errorf("exec %s: %w", shellPath, err)
+	if err := syscall.Exec(path, argv, PrepareEnv(env, envShell)); err != nil {
+		return fmt.Errorf("exec %s: %w", path, err)
 	}
 	return nil // unreachable
 }
@@ -93,11 +98,4 @@ func WithSessionEnv(env []string, sessionID string) []string {
 		out = append(out, kv)
 	}
 	return append(out, LogshSessionEnv+"="+sessionID)
-}
-
-// ExecInvocation runs the resolved shell for an invocation with no recording.
-// It is a free function rather than a Config method because the break-glass path
-// reaches it with no usable configuration at all.
-func ExecInvocation(inv Invocation, shellPath string) error {
-	return Exec(shellPath, ChildArgv0(shellPath, inv.LoginShell), inv.Args, os.Environ())
 }
