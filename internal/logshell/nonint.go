@@ -29,8 +29,12 @@ type StdIO struct {
 // StdStreams is the production StdIO.
 func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Stderr} }
 
-// RunSpec is one non-interactive run: which shell, how it was invoked, the
-// streams to attach to it, and the command log the session is recorded against.
+// RunSpec is one session to run: which program, how it was invoked, the streams
+// to attach to it, and the command log the session is recorded against.
+//
+// It is shared by BOTH recorders. It began as the non-interactive path's value
+// and kept that name; RunRecorded takes it too, so that the login-shell and
+// forced-command entry points can hand either recorder the same thing.
 //
 // These fields travel together through every entry point in this package --
 // the recorders differ only in the nesting and capture decisions layered on

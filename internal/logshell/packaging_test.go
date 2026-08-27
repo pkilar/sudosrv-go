@@ -709,3 +709,66 @@ func TestUninstallRefusesWhileSshdStillReferencesTheEntrySymlink(t *testing.T) {
 		t.Errorf("uninstall left the entry symlink behind after the reference was removed: %v", err)
 	}
 }
+
+// TestUninstallRefusesWhenSshdConfigCannotBeRead pins the guard's failure
+// direction.
+//
+// The guard greps sshd's configuration for a reference to the entry symlink. A
+// grep that cannot READ the file exits 2, which is easy to conflate with the
+// exit 1 that means "no match" -- and conflating them is fail-OPEN on a check
+// whose only purpose is preventing a lockout: an unreadable sshd_config would
+// read as "no reference", uninstall would proceed, and it would delete the
+// symlink that file still names.
+//
+// Skipped when running as root, which can read the file regardless of its mode
+// and so cannot produce the condition under test.
+func TestUninstallRefusesWhenSshdConfigCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-000 file, so the condition cannot be created")
+	}
+	fr := newFakeRoot(t)
+	if _, err := fr.run(t, "install"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	entry := filepath.Join(fr.sbin, "logsh-entry")
+
+	sshDir := filepath.Join(fr.dir, "etc", "ssh")
+	if err := os.MkdirAll(sshDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(sshDir, "sshd_config")
+	// Deliberately contains NO reference. If the guard could read it, it would
+	// find nothing and allow the uninstall -- so a refusal here can only come
+	// from the unreadability, not from a match.
+	if err := os.WriteFile(cfg, []byte("# nothing to see here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg, 0o644) }) // so TempDir cleanup can proceed
+
+	out, err := fr.run(t, "uninstall")
+	if err == nil {
+		t.Fatalf("uninstall succeeded although sshd_config could not be read\noutput: %s", out)
+	}
+	if !strings.Contains(out, "cannot be read") {
+		t.Errorf("refusal should say the file could not be read, got: %s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("entry symlink was removed despite the refusal: %v", err)
+	}
+
+	// Control: once readable, the same file has no reference and uninstall
+	// proceeds. Without this, the test above would pass even if the guard had
+	// simply started refusing everything.
+	if err := os.Chmod(cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fr.run(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall refused a readable config with no reference: %v\noutput: %s", err, out)
+	}
+	if _, err := os.Lstat(entry); !os.IsNotExist(err) {
+		t.Errorf("entry symlink survived a permitted uninstall: %v", err)
+	}
+}

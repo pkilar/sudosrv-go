@@ -194,7 +194,25 @@ entry_in_sshd_config() {
 	for path in $SSHD_CONFIGS; do
 		_p="$(r "$path")"
 		[ -e "$_p" ] || continue
-		grep -rn "logsh-entry" "$_p" 2>/dev/null || true
+
+		# grep's exit status carries three cases and they must not be conflated:
+		# 0 is a match, 1 is a clean no-match, anything above 1 is an error --
+		# most plausibly a config this process cannot read. Discarding stderr and
+		# forcing success would make that third case look identical to the
+		# second, so an unreadable sshd_config would read as "no reference" and
+		# uninstall would proceed to delete the symlink that config still names.
+		# That is fail-OPEN on a guard whose whole purpose is preventing a
+		# lockout, so an unreadable path is reported as a hit instead: refuse,
+		# and let --force be the deliberate override.
+		# The assignment sits in an `if` condition deliberately: this script runs
+		# under `set -e`, which would abort the whole uninstall the moment grep
+		# reported no-match. A condition is exempt from that.
+		if _out="$(grep -rn "logsh-entry" "$_p" 2>&1)"; then
+			printf '%s\n' "$_out"
+		elif [ $? -ne 1 ]; then
+			printf '%s: cannot be read, so it cannot be cleared of references (%s)\n' \
+				"$_p" "$_out"
+		fi
 	done
 }
 
