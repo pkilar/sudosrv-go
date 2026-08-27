@@ -209,7 +209,28 @@ exit 0
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 
 %changelog
-* Tue Aug 19 2026 Paul Kilar <pkilar@gmail.com> - 0.2.0-1
+* Thu Aug 27 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
+- logsh can run as an sshd ForceCommand, via a new /usr/sbin/logsh-entry
+  multi-call name, so SSH sessions authenticating as root are recorded without
+  changing root's login shell in /etc/passwd
+- The client's requested command is routed through a literal allowlist, so sftp
+  and modern scp keep working: internal-sftp is translated to the real
+  sftp-server binary, and anything unmatched runs exactly as it would with no
+  ForceCommand configured
+- A session authenticated by an SSH certificate records the human in submituser
+  rather than only root, alongside the certificate's serial, CA fingerprint and
+  principals; a root login presenting a plain key is recorded as such
+- The session runs the account's own shell from /etc/passwd, so enabling the
+  recorder changes which shell runs on no host
+- logsh -validate and -selftest check the new force_command section, and
+  -selftest prints the shell a forced-command root session will actually run
+- Uninstall refuses to remove /usr/sbin/logsh-entry while sshd's configuration
+  still names it, following Include directives to find references outside
+  /etc/ssh; --force overrides once the reference is gone
+- Fix: the documentation said nested_sessions defaults to metadata, while the
+  default is and always was record
+
+* Wed Aug 19 2026 Paul Kilar <pkilar@gmail.com> - 0.2.0-1
 - logsh records standalone with -record, writing a sudoreplay-compatible I/O
   log locally and contacting no server; -wire additionally keeps the raw stream
 - New wiredump command for decoding a journal or relay cache file
