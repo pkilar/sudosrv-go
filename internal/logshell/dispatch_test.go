@@ -406,6 +406,24 @@ func TestResolveEntryShellUnwrapsALogshSymlink(t *testing.T) {
 	}
 }
 
+// TestResolveEntryShellUnwrapsADashPrefixedSymlink exercises the same basename
+// normalization that NamesInUse applies: a passwd shell field recorded in the
+// dash-prefixed form that NamesInUse recognizes as "this mapping is in use"
+// must also unwrap through the shells map in ResolveEntryShell.
+func TestResolveEntryShellUnwrapsADashPrefixedSymlink(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Shells = map[string]string{"lbash": "/bin/sh"} // /bin/sh so the test does not need bash
+	path := writePasswd(t, "root:x:0:0:root:/root:-lbash\n")
+
+	got, err := cfg.ResolveEntryShell(path, "root", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/bin/sh" {
+		t.Errorf("ResolveEntryShell = %q, want the mapped shell /bin/sh", got)
+	}
+}
+
 // TestResolveEntryShellEmptyFieldFallsBackToSh matches sshd, which uses
 // _PATH_BSHELL when pw_shell is empty.
 func TestResolveEntryShellEmptyFieldFallsBackToSh(t *testing.T) {

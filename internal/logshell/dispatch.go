@@ -213,7 +213,8 @@ func (c *Config) ResolveEntryShell(passwdPath, username string, uid int) (string
 	// through the shells map yields the real shell, so the two deployments
 	// compose instead of nesting -- and this is the same basename-against-Shells
 	// test NamesInUse uses to decide the very same question.
-	if real, ok := c.Shells[filepath.Base(shell)]; ok {
+	shellName := strings.TrimPrefix(filepath.Base(shell), "-")
+	if real, ok := c.Shells[shellName]; ok {
 		shell = real
 	}
 	if !filepath.IsAbs(shell) {
