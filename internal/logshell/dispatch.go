@@ -183,39 +183,51 @@ func PasswdShell(passwdPath, username string, uid int) (string, error) {
 
 // ResolveEntryShell picks the shell a forced-command session runs.
 //
-// The account's OWN shell, not a configured one. §4.10 of the session-logging
-// design commits that this deployment does not change root's login shell -- that
-// is its central advantage over installing logsh as the passwd shell. A shell
-// named in logsh.yaml would be applied to every host sharing that file and would
-// silently replace root's shell wherever the two disagreed, leaving a console
-// login and an SSH login giving different shells for the same account. Reading
-// the passwd entry is exactly what sshd would have done without ForceCommand, so
-// enabling the recorder changes which shell runs on no host.
+// ForceCommand.Shell is consulted FIRST; only when it is unset -- the normal
+// case -- does the passwd entry become authoritative.
 //
-// The shells allowlist is deliberately NOT applied to the result. That list
-// exists to stop a stray symlink becoming an exec primitive by INFERENCE; there
-// is no inference here, the value is read from a root-owned field, and gating on
-// it would refuse root's login on any host whose shell simply has no mapping --
-// a lockout for no security gain.
+// With no override, this is the account's OWN shell, not a configured one.
+// §4.10 of the session-logging design commits that this deployment does not
+// change root's login shell -- that is its central advantage over installing
+// logsh as the passwd shell. A shell named in logsh.yaml would be applied to
+// every host sharing that file and would silently replace root's shell
+// wherever the two disagreed, leaving a console login and an SSH login giving
+// different shells for the same account. Reading the passwd entry is exactly
+// what sshd would have done without ForceCommand, so enabling the recorder
+// changes which shell runs on no host.
+//
+// The shells allowlist is deliberately NOT applied to a passwd-derived result.
+// That list exists to stop a stray symlink becoming an exec primitive by
+// INFERENCE; there is no inference here, the value is read from a root-owned
+// field, and gating on it would refuse root's login on any host whose shell
+// simply has no mapping -- a lockout for no security gain.
 func (c *Config) ResolveEntryShell(passwdPath, username string, uid int) (string, error) {
-	shell, err := PasswdShell(passwdPath, username, uid)
-	if err != nil {
-		return "", err
-	}
+	shell := c.ForceCommand.Shell
 	if shell == "" {
-		// sshd's own fallback: session.c substitutes _PATH_BSHELL when pw_shell
-		// is empty rather than failing the session.
-		shell = "/bin/sh"
-	}
-	// The account's shell may itself be a logsh multi-call symlink, on a host
-	// that also runs the login-shell deployment. Exec'ing it would start a
-	// second recorder and a second pty for one session. Resolving the basename
-	// through the shells map yields the real shell, so the two deployments
-	// compose instead of nesting -- and this is the same basename-against-Shells
-	// test NamesInUse uses to decide the very same question.
-	shellName := strings.TrimPrefix(filepath.Base(shell), "-")
-	if real, ok := c.Shells[shellName]; ok {
-		shell = real
+		var err error
+		shell, err = PasswdShell(passwdPath, username, uid)
+		if err != nil {
+			return "", err
+		}
+		if shell == "" {
+			// sshd's own fallback: session.c substitutes _PATH_BSHELL when
+			// pw_shell is empty rather than failing the session.
+			shell = "/bin/sh"
+		}
+		// The account's shell may itself be a logsh multi-call symlink, on a
+		// host that also runs the login-shell deployment. Exec'ing it would
+		// start a second recorder and a second pty for one session. Resolving
+		// the basename through the shells map yields the real shell, so the two
+		// deployments compose instead of nesting -- and this is the same
+		// basename-against-Shells test NamesInUse uses to decide the very same
+		// question.
+		//
+		// The unwrap applies only to a passwd-derived value. An override is
+		// already a real shell path, checked against the allowlist by Validate.
+		shellName := strings.TrimPrefix(filepath.Base(shell), "-")
+		if real, ok := c.Shells[shellName]; ok {
+			shell = real
+		}
 	}
 	if !filepath.IsAbs(shell) {
 		return "", fmt.Errorf("shell %q for %q is not an absolute path", shell, username)

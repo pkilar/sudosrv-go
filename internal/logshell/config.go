@@ -130,6 +130,11 @@ type Config struct {
 	// journalled, or not recorded at all.
 	CommandLog CommandLogConfig `yaml:"command_log"`
 
+	// ForceCommand configures the sshd ForceCommand entry point: which shell an
+	// interactive root SSH session runs, and what a client's requested command
+	// is routed to. Only consulted when logsh is invoked as EntryName.
+	ForceCommand ForceCommandConfig `yaml:"force_command"`
+
 	// BreakGlassMarker names a root-owned file whose existence forces fail-open
 	// for the session, with a crit-priority syslog alert and a banner on the
 	// terminal. It is the recovery path for "the box is reachable but recording
@@ -222,8 +227,12 @@ func DefaultConfig() *Config {
 			MaxLen:         DefaultCommandLogMaxLen,
 			Required:       false,
 		},
-		NestedSessions:   NestedModeRecord,
-		FailClosed:       true,
+		NestedSessions: NestedModeRecord,
+		FailClosed:     true,
+		// ForceCommand is deliberately zero: no shell override (so the account's
+		// own passwd shell is used) and no routes (so every command reaches the
+		// default route). That is the correct posture for a host that has not
+		// enabled the forced-command entry point at all.
 		BreakGlassMarker: "/etc/logsh/bypass",
 	}
 }

@@ -459,3 +459,35 @@ func TestResolveEntryShellRejectsAnUnusableShell(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveEntryShellHonoursTheOverride.
+//
+// force_command.shell is the escape hatch for a host whose passwd shell is
+// unsuitable. It wins over the passwd entry, which is exactly why Warnings
+// flags it: applied fleet-wide it silently replaces the account's real shell.
+func TestResolveEntryShellHonoursTheOverride(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ForceCommand.Shell = "/bin/sh"
+	path := writePasswd(t, "root:x:0:0:root:/root:/nonexistent/zsh\n")
+
+	got, err := cfg.ResolveEntryShell(path, "root", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/bin/sh" {
+		t.Errorf("ResolveEntryShell = %q, want the override /bin/sh", got)
+	}
+}
+
+// TestResolveEntryShellOverrideIsStillChecked. An override naming something
+// unexecutable must fail like any other unusable shell, not be trusted because
+// an operator wrote it down.
+func TestResolveEntryShellOverrideIsStillChecked(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ForceCommand.Shell = "/nonexistent/shell"
+	path := writePasswd(t, "root:x:0:0:root:/root:/bin/sh\n")
+
+	if _, err := cfg.ResolveEntryShell(path, "root", 0); err == nil {
+		t.Error("want an error for an unexecutable override, got nil")
+	}
+}
