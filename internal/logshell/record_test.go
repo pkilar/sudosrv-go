@@ -255,14 +255,32 @@ func TestApplyAuthInfoNamesTheHumanInSubmituser(t *testing.T) {
 
 // TestApplyAuthInfoPlainKeyDoesNotRewriteSubmituser.
 //
-// A plain key names nobody. Putting a fingerprint in submituser would assert an
-// identity the credential does not carry.
+// A plain key names nobody, so submituser must stay untouched -- putting a
+// fingerprint there would assert an identity the credential does not carry.
+// But the record must not go silent instead: logsh_auth_key is the ONLY
+// identifier a plain-key session leaves behind (this is the break-glass account,
+// or a key the certificate-fallback audit missed), so it must actually carry the
+// fingerprint, and logsh_cert_keyid -- which would claim a key ID nobody has --
+// must be absent. Asserting the pair together is what pins the exact record
+// shape a plain-key session has to produce.
 func TestApplyAuthInfoPlainKeyDoesNotRewriteSubmituser(t *testing.T) {
 	meta := SessionMeta{User: "root", SubmitUser: "root"}
 	meta.ApplyAuthInfo(SessionInfo{Auth: AuthInfo{Method: AuthMethodKey, KeyFingerprint: "SHA256:xyz"}})
 
 	if meta.SubmitUser != "root" {
 		t.Errorf("SubmitUser = %q, want root", meta.SubmitUser)
+	}
+
+	msgs := meta.InfoMessages()
+	got, ok := authInfoValue(t, msgs, "logsh_auth_key")
+	if !ok {
+		t.Fatal("logsh_auth_key is missing; it is the only identifier this session leaves behind")
+	}
+	if got != "SHA256:xyz" {
+		t.Errorf("logsh_auth_key = %q, want SHA256:xyz", got)
+	}
+	if _, ok := authInfoValue(t, msgs, "logsh_cert_keyid"); ok {
+		t.Error("logsh_cert_keyid is present for a plain key, which has no key ID")
 	}
 }
 
@@ -324,7 +342,7 @@ func TestInfoMessagesOmitEmptyAuthKeys(t *testing.T) {
 	msgs := SessionMeta{User: "root", SubmitUser: "root"}.InfoMessages()
 	for _, key := range []string{
 		"logsh_auth_method", "logsh_cert_keyid", "logsh_cert_serial",
-		"logsh_cert_ca", "logsh_cert_principals", "logsh_ssh_command", "logsh_ssh_client",
+		"logsh_cert_ca", "logsh_auth_key", "logsh_cert_principals", "logsh_ssh_command", "logsh_ssh_client",
 	} {
 		if _, ok := authInfoValue(t, msgs, key); ok {
 			t.Errorf("info key %q must be omitted when unset", key)
