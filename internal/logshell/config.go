@@ -100,7 +100,7 @@ type Config struct {
 	RecordWire bool `yaml:"-"`
 
 	// NestedSessions decides what to do when logsh finds itself inside something
-	// that may already be recording: record, metadata, or skip. Default metadata.
+	// that may already be recording: record, metadata, or skip. Default record.
 	//
 	// It applies to sudo only. Nesting inside another logsh always skips, because
 	// there is nothing to weigh up -- the outer logsh is certainly capturing these
