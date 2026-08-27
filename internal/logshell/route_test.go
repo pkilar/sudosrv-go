@@ -3,6 +3,7 @@
 package logshell
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -48,6 +49,16 @@ func TestResolveRoutes(t *testing.T) {
 		{
 			name: "a path-qualified program matches on its basename", original: "/usr/lib/ssh/internal-sftp -l INFO",
 			wantKind: RouteExec, wantPath: "/usr/lib/ssh/sftp-server", wantArgs: []string{"-l", "INFO"},
+		},
+		{
+			// There is only ONE key space: the table's keys (internal-sftp,
+			// rsync, git-shell), never a route's own realized Exec[0]. The
+			// sftp route's exec target -- /usr/lib/ssh/sftp-server -- is not
+			// itself a matching key, so a client naming it directly gets no
+			// translation and falls to the default route, same as any other
+			// ordinary command.
+			name: "a route's own exec target is not itself a matching key", original: "/usr/lib/ssh/sftp-server -l INFO",
+			wantKind: RouteDefault, wantPath: "", wantArgs: []string{"-c", "/usr/lib/ssh/sftp-server -l INFO"},
 		},
 		{
 			// rrsync reads $SSH_ORIGINAL_COMMAND itself, so a fixed argv suffices.
@@ -122,6 +133,11 @@ func TestResolveHostileCommands(t *testing.T) {
 		"FOO=1 rsync --server",
 		"../../bin/sh",
 		"rsync\x00--server",
+		// The one branch that legitimately places client text into an argv --
+		// RouteCommand -- had no hostile coverage at all before this case: no
+		// other entry here has field 0 "git-shell". This proves "one argv
+		// element, never re-split" rather than just asserting it in a comment.
+		"git-shell -c x\nrm -rf /; $(id)",
 		strings.Repeat("A", 64*1024),
 		"   ",
 		"\t\t",
@@ -139,12 +155,31 @@ func TestResolveHostileCommands(t *testing.T) {
 				}
 				return
 			}
-			// A matched route: its argv must be byte-identical to the config's,
-			// with nothing from the client anywhere in it.
-			for _, arg := range got.Args {
-				if strings.Contains(original, arg) && !slices.Contains([]string{"-l", "INFO", "-no-del", "/srv"}, arg) {
-					t.Errorf("client text leaked into route argv: %q", arg)
-				}
+			// A matched route: the full argv (Path plus Args) must equal
+			// EXACTLY what the config named for the key that matched, and
+			// Original must be the client's string verbatim. Comparing against
+			// the live table -- rather than a fixed exception list of "known
+			// safe" substrings -- means a new route added to testRoutes can
+			// never quietly widen what counts as acceptable leakage, and this
+			// also catches a Path bug (e.g. Path: fields[0]) that a check of
+			// Args alone would miss.
+			route, ok := f.Routes[filepath.Base(strings.Fields(original)[0])]
+			if !ok {
+				t.Fatalf("Resolve reported a match (%v) but no table entry accounts for %q", got.Kind, original)
+			}
+			wantArgv := route.Exec
+			if len(wantArgv) == 0 {
+				// A Command route's argv is [Command, "-c", original] -- the one
+				// shape that legitimately carries client text, as a single
+				// opaque argv element that logsh never re-splits or hands to a
+				// shell.
+				wantArgv = []string{route.Command, "-c", original}
+			}
+			if gotArgv := append([]string{got.Path}, got.Args...); !slices.Equal(gotArgv, wantArgv) {
+				t.Errorf("matched-route argv = %q, want %q", gotArgv, wantArgv)
+			}
+			if got.Original != original {
+				t.Errorf("Original = %q, want %q", got.Original, original)
 			}
 		})
 	}
@@ -179,5 +214,34 @@ func TestResolveWithNoRoutesAlwaysReachesTheDefault(t *testing.T) {
 	}
 	if got := f.Resolve("internal-sftp"); got.Kind != RouteDefault {
 		t.Errorf("unmatched command with no routes: Kind = %v, want default", got.Kind)
+	}
+}
+
+// TestResolveMalformedRouteFallsThroughToDefault.
+//
+// A route with neither Exec nor Command set -- a "exce:" typo in yaml, say --
+// is malformed. Config.Validate is meant to reject it before Resolve ever sees
+// it, but Resolve must not assume Validate ran: treating the match as usable
+// would produce Kind: RouteCommand with Path: "", which breaks Target's own
+// documented invariant (Path is empty only for RouteInteractive and
+// RouteDefault) and would report NeedsShell() == true for a route the caller
+// believes was matched. So a match with nothing runnable behind it must behave
+// exactly like no match at all.
+func TestResolveMalformedRouteFallsThroughToDefault(t *testing.T) {
+	f := ForceCommandConfig{Routes: map[string]Route{
+		"broken": {}, // neither Exec nor Command set
+	}}
+	got := f.Resolve("broken -x")
+	if got.Kind != RouteDefault {
+		t.Errorf("Kind = %v, want RouteDefault", got.Kind)
+	}
+	if got.Path != "" {
+		t.Errorf("Path = %q, want empty", got.Path)
+	}
+	if !slices.Equal(got.Args, []string{"-c", "broken -x"}) {
+		t.Errorf("Args = %q, want [-c broken -x]", got.Args)
+	}
+	if got.Original != "broken -x" {
+		t.Errorf("Original = %q, want %q", got.Original, "broken -x")
 	}
 }

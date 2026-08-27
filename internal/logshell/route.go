@@ -133,7 +133,8 @@ func (f ForceCommandConfig) Resolve(original string) Target {
 	// command and the shell should see exactly what they sent.
 	if fields := strings.Fields(original); len(fields) > 0 {
 		if r, ok := f.Routes[filepath.Base(fields[0])]; ok {
-			if len(r.Exec) > 0 {
+			switch {
+			case len(r.Exec) > 0:
 				// The argv is the CONFIG's, verbatim. Nothing from the client
 				// appears in it; the client's string travels in the inherited
 				// SSH_ORIGINAL_COMMAND, as sshd would have delivered it.
@@ -143,13 +144,22 @@ func (f ForceCommandConfig) Resolve(original string) Target {
 					Args:     append([]string(nil), r.Exec[1:]...),
 					Original: original,
 				}
+			case r.Command != "":
+				return Target{
+					Kind:     RouteCommand,
+					Path:     r.Command,
+					Args:     []string{"-c", original},
+					Original: original,
+				}
 			}
-			return Target{
-				Kind:     RouteCommand,
-				Path:     r.Command,
-				Args:     []string{"-c", original},
-				Original: original,
-			}
+			// r has neither Exec nor Command: a malformed entry (a "exce:" typo
+			// in yaml would produce exactly this) that Config.Validate is meant
+			// to reject before Resolve ever sees it. Resolve must not assume
+			// Validate ran, and must not return a Target that breaks its own
+			// documented invariant -- Path empty only for RouteInteractive and
+			// RouteDefault. So a match with nothing runnable is treated as no
+			// match at all, falling through to the same default route an
+			// unrecognised command reaches.
 		}
 	}
 	return Target{Kind: RouteDefault, Args: []string{"-c", original}, Original: original}
