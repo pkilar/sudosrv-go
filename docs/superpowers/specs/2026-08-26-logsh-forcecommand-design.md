@@ -90,6 +90,7 @@ warning in §7.2.
 | D-2 | Certificates parsed with `golang.org/x/crypto/ssh` | Verified against ed25519, RSA and ECDSA certificates issued by `ssh-keygen`. Handles every algorithm including `sk-*`, and distinguishes plain keys from certificates. Cost measured below. |
 | D-3 | `submituser` carries the certificate key ID | `SessionMeta` already separates `SubmitUser` from `User`, and `ApplyNesting` already rewrites it to the escalating human under `sudo -i`. A certificate-authenticated root session is the same shape, so R-2 and R-4 are satisfied together and `sudolens` needs no change. |
 | D-4 | Routing is a configurable literal allowlist | Operator-extensible without a code change (`rrsync`, `git-shell`, future subsystems). Constrained to exact basename matching against a root-owned table so it is not a pattern engine on the authentication path — see §5.2. |
+| D-5 | The interactive and default routes run **the account's own `/etc/passwd` shell**, not a configured one | §4.10 commits that this design does not change root's login shell — that is Option C's central advantage over Option B. A fleet-wide configured shell silently breaks that commitment on any host where root's shell is not the configured value, and splits behaviour by entry route (console gives zsh, SSH gives bash, same account). See §7.3. |
 
 ### 3.1 Measured cost of D-2
 
@@ -110,10 +111,14 @@ reachable from `logsh`.
 - **Default-deny routing.** §1.6 and R-8 are explicit that this is a logging
   control and not containment; containment is `-O clear` at the certificate
   layer. A deny list evaluated before any user code runs is a lockout generator.
-- **Resolving the interactive shell from `/etc/passwd`.** Faithful — §4.10 leaves
-  root's passwd shell alone, so it is safe to read — but less predictable and
-  less auditable than an explicit configured value, and it needs a loop guard
-  against a passwd entry that points back at a `logsh` symlink.
+- **A single configured interactive shell, with no passwd lookup.** Considered
+  first and rejected: see D-5 and §7.3. The objection that killed it is that
+  `force_command.shell: /bin/bash` applied fleet-wide silently replaces root's
+  shell on every host where root's shell is something else, which is precisely
+  the change §4.10 promises this design does not make. The "loop guard"
+  argument raised in its favour turns out to argue the other way — a passwd
+  entry pointing at a `logsh` symlink resolves cleanly through the existing
+  `shells` map, so the two deployments compose (§7.3).
 
 ---
 
@@ -312,10 +317,18 @@ defeatable by that same process.
 
 ```yaml
 force_command:
-  # Shell for the interactive branch and for the default route.
-  # Must appear as a VALUE in the `shells` map: the existing allowlist is
-  # reused so a typo here cannot become an arbitrary exec primitive.
-  shell: /bin/bash
+  # OPTIONAL OVERRIDE, normally left unset.
+  #
+  # Unset (the default) means the interactive and default routes run the
+  # account's own shell from /etc/passwd -- exactly what sshd would have
+  # exec'd without ForceCommand. See §7.3.
+  #
+  # Setting it pins one shell for every host sharing this file, which will
+  # differ from the account's real shell wherever the two disagree, and from
+  # what a console login gives. -validate warns when it is set. When set it
+  # must appear as a VALUE in the `shells` map, reusing that allowlist so a
+  # typo cannot become an arbitrary exec primitive.
+  # shell: /bin/bash
 
   routes:
     # internal-sftp is in-process inside sshd and has no binary, so it is the
@@ -333,9 +346,10 @@ force_command:
     #   command: /usr/bin/git-shell
 ```
 
-Defaults: `force_command.shell` is `/bin/bash`; `routes` is empty. An empty
-`force_command` section is valid and means "interactive plus the default route" —
-correct for a host whose `sshd_config` names an external `sftp-server` binary.
+Defaults: `force_command.shell` is unset (§7.3); `routes` is empty. An empty or
+absent `force_command` section is valid and means "the account's own shell, plus
+the default route" — correct for a host whose `sshd_config` names an external
+`sftp-server` binary.
 
 The `sftp-server` path is **not** auto-detected at runtime. Packaging picks the
 correct path for the distribution when it writes the example configuration; a
@@ -349,15 +363,20 @@ Errors — these prevent a working deployment or create a silent recording gap:
   matching is on the basename of field 0)
 - a route with both `exec` and `command`, or with neither
 - a route program that is not an absolute path
-- `force_command.shell` not present among the values of `shells`
+- `force_command.shell`, **when set**, not present among the values of `shells`
 - `shells["logsh-entry"]` present
 
 Errors under `-selftest` only, where the host is the one being enabled:
 
 - a route program that is missing or not executable
-- `force_command.shell` missing or not executable
+- the resolved interactive shell (§7.3) missing or not executable
 
 Warnings:
+
+- `force_command.shell` is set. It pins one shell for every host sharing this
+  configuration, so it will differ from the account's real shell wherever the two
+  disagree, and from what a console login gives. Name the account and both
+  shells in the warning.
 
 - `force_command` is configured but `record_users` contains neither `root` nor
   `0` — the most likely single misconfiguration, and silent: sessions would be
@@ -366,6 +385,55 @@ Warnings:
 - no `internal-sftp` route is defined — harmless if `sshd_config` names an
   external `sftp-server`, and a broken SFTP subsystem if it does not. `logsh`
   cannot read `sshd_config`, so this can only be a warning.
+
+`-selftest` additionally **prints the resolved interactive shell and where it came
+from**, so an operator can see what will actually run before enabling the host:
+
+```
+ok    force_command: interactive shell for root: /bin/zsh (from /etc/passwd)
+ok    force_command: routes[internal-sftp]: /usr/lib/ssh/sftp-server -l INFO
+```
+
+### 7.3 Which shell the interactive and default routes run
+
+The problem this solves: root's shell is `/bin/zsh` on one host and `/bin/bash`
+on another. A single configured value silently replaces it on one of them, which
+is the change §4.10 promises this design does not make (D-5).
+
+Resolution order:
+
+1. **`force_command.shell`, if set** — the explicit override. Must be a value in
+   `shells`; warned about at validation.
+2. **Otherwise, the invoking account's shell field in `/etc/passwd`.** This is
+   exactly what `sshd` would have exec'd with no `ForceCommand` present, so
+   enabling the recorder changes which shell runs on no host.
+   - If its basename is a key in `shells` — root's shell is itself a `logsh`
+     symlink, i.e. the host also runs the Option B deployment — resolve it
+     **through the `shells` map** to the real shell. The two deployments then
+     compose: one recorder, one PTY, the right shell. This is the loop guard,
+     and it is the same map lookup `runShell` already performs.
+   - If the passwd shell field is empty, use `/bin/sh`. This matches `sshd`,
+     which falls back to `_PATH_BSHELL` when `pw_shell` is empty.
+3. If the result is not an absolute path, or is missing or not executable, log at
+   `LOG_ERR` and exit `exitConfig` **without** exec'ing anything. This matches
+   `runShell`'s existing treatment of an unresolvable shell: there is nothing to
+   fall back to, so neither fail-open nor break-glass can rescue it. It also
+   matches the baseline — `sshd` would equally have failed to exec that shell.
+
+The `shells` allowlist is deliberately **not** applied to a passwd-derived shell.
+The allowlist exists to stop a stray symlink becoming an exec primitive by
+*inference*; there is no inference here, the value is read from a root-owned
+field, and gating on it would refuse root's login on any host whose shell simply
+has no mapping — a lockout for no security gain. It **is** applied to the
+`force_command.shell` override, which is a config value like any other.
+
+**Implementation note.** `os/user.User` has no `Shell` field, so this requires
+parsing `/etc/passwd` directly. `dispatch.go` already defines `PasswdPath` and
+parses that file in `NamesInUse`; the field extractor belongs beside it.
+
+This also removes work elsewhere: `PrepareEnv` sets `SHELL=<resolved shell>`,
+which now agrees with what `sshd` set from the same passwd entry, instead of
+overwriting it with a different shell's path.
 
 ---
 
@@ -383,10 +451,10 @@ runForceCommand():
   4. if !cfg.ShouldRecord(user, uid) -> exec the route, unrecorded
   5. open command log (policy identical to runShell)
   6. dispatch:
-       interactive -> RunRecorded, Invocation{LoginShell: true}
+       interactive -> resolve shell (§7.3); RunRecorded, Invocation{LoginShell: true}
        exec        -> RunNonInteractive, fixed argv from config
        command     -> RunNonInteractive, prog -c "<original>"
-       default     -> RunNonInteractive, shell -c "<original>"
+       default     -> resolve shell (§7.3); RunNonInteractive, shell -c "<original>"
   7. error handling identical to runShell
 ```
 
@@ -410,7 +478,8 @@ nothing outside `cmd/logsh/main.go` and the two entry points changes shape.
 - **`PrepareEnv` must not rewrite `SHELL` for a non-shell route.** It currently
   sets `SHELL=<ShellPath>` unconditionally, which for an `exec` route would
   publish `SHELL=/usr/lib/ssh/sftp-server`. The rewrite applies only when the
-  target is `force_command.shell`.
+  target is the resolved shell (§7.3), where it is a no-op anyway because `sshd`
+  already set `SHELL` from the same passwd entry.
 - **`RunNonInteractive` itself needs no change.** An `exec` route is expressed as
   `RunSpec{ShellPath: "/usr/lib/ssh/sftp-server", Invocation: {Name: "sftp-server",
   Args: ["-l","INFO"]}}`, and `runPassthrough` already builds argv from exactly
@@ -494,7 +563,8 @@ them to this implementation:
 |---|---|
 | T-1 | Table-driven router unit tests: every route kind, every branch |
 | T-2 | Hostile `SSH_ORIGINAL_COMMAND`: `;`, `$(…)`, backticks, single and double quotes, embedded newlines and NULs, leading and trailing whitespace, tabs, `FOO=1 rsync`, `./sftp-server`, `../../bin/sh`, a 64 KB string, and the empty-vs-unset distinction. Asserts the §5.3 property: unmatched input reaches the default route as one `-c` argument, never a matched branch and never a bare shell |
-| T-3 | e2e: interactive branch execs with `argv[0] == "-bash"` |
+| T-3 | e2e: interactive branch execs with `argv[0] == "-<shell basename>"` |
+| — | Shell resolution (§7.3), against a fixture `/etc/passwd`: a bash account, a zsh account, an account whose shell is a `logsh` symlink (resolves through `shells`), an empty shell field (→ `/bin/sh`), a missing account, a nonexistent shell (→ `exitConfig`, nothing exec'd), and the `force_command.shell` override winning over all of them |
 | T-4 | Certificate fixtures (ed25519, RSA, ECDSA, plus a plain key) → asserted info keys |
 | T-8, T-9 | Extends the existing `e2e_test.go` harness for `exec` and default routes |
 | T-13, T-14 | Already covered by existing journal/refuse tests; extended to the entry path |
