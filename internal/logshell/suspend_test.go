@@ -97,8 +97,12 @@ func TestRecordsBinaryDataVerbatim(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "printf '" + sb.String() + "'"}}
-	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -145,8 +149,12 @@ func TestRecordsHugeOutputWithoutLoss(t *testing.T) {
 		"i=0; while [ $i -lt " + itoa(lines) + " ]; do printf '0123456789abcdefghijklmnopqrstuvwxyz012345678901234567890123\\n'; i=$((i+1)); done"}}
 
 	var userSaw bytes.Buffer
-	if _, err := RunRecorded(t.Context(), testConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     testConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 

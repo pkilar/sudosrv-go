@@ -72,8 +72,13 @@ func TestCommandLogRecordsEveryExec(t *testing.T) {
 	cl := newCaptureLog(t)
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "/bin/echo ONE; /bin/echo TWO; /usr/bin/env true"}}
-	if _, err := RunRecorded(t.Context(), tracingConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &bytes.Buffer{}}, cl.CommandLog); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     tracingConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+		CmdLog:     cl.CommandLog,
+	}, TerminalIO{In: slave, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -115,8 +120,13 @@ func TestCommandLogCatchesCommandsRunFromAScript(t *testing.T) {
 	}
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", script}}
-	if _, err := RunRecorded(t.Context(), tracingConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &bytes.Buffer{}}, cl.CommandLog); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     tracingConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+		CmdLog:     cl.CommandLog,
+	}, TerminalIO{In: slave, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -150,8 +160,13 @@ func TestTracedSessionKeepsGroupStopWorking(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := RunRecorded(t.Context(), tracingConfig(srv.addr), inv, "/bin/sh",
-			TerminalIO{In: slave, Out: &bytes.Buffer{}}, cl.CommandLog)
+		_, err := RunRecorded(t.Context(), RunSpec{
+			Config:     tracingConfig(srv.addr),
+			Invocation: inv,
+			ShellPath:  "/bin/sh",
+			EnvShell:   "/bin/sh",
+			CmdLog:     cl.CommandLog,
+		}, TerminalIO{In: slave, Out: &bytes.Buffer{}})
 		done <- err
 	}()
 
@@ -193,8 +208,13 @@ func TestTracedSessionPassesSignalsThrough(t *testing.T) {
 	cl := newCaptureLog(t)
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "kill -TERM $$"}}
-	outcome, err := RunRecorded(t.Context(), tracingConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &bytes.Buffer{}}, cl.CommandLog)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     tracingConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+		CmdLog:     cl.CommandLog,
+	}, TerminalIO{In: slave, Out: &bytes.Buffer{}})
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -215,8 +235,13 @@ func TestSessionUUIDReachesTheRecordedSession(t *testing.T) {
 	cl := newCaptureLog(t)
 
 	inv := Invocation{Name: "lsh", Args: []string{"-c", "/bin/echo hi"}}
-	if _, err := RunRecorded(t.Context(), tracingConfig(srv.addr), inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &bytes.Buffer{}}, cl.CommandLog); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     tracingConfig(srv.addr),
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+		CmdLog:     cl.CommandLog,
+	}, TerminalIO{In: slave, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 

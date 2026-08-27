@@ -5,6 +5,7 @@ package logshell
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -26,7 +27,18 @@ import (
 // Nothing else in the environment is touched. logsh is not a privilege boundary
 // -- it runs as the very user whose environment this is -- so sanitizing it
 // would buy no security and would break legitimate setups.
+//
+// An empty shellPath means "publish nothing": the caller is exec'ing something
+// that is not a shell -- sftp-server, rrsync -- and asserting SHELL for it would
+// be worse than leaving sshd's own value in place.
 func PrepareEnv(env []string, shellPath string) []string {
+	// An empty shellPath means "publish nothing": the caller is exec'ing
+	// something that is not a shell, and asserting SHELL=/usr/lib/ssh/sftp-server
+	// would be worse than leaving sshd's own value in place.
+	if shellPath == "" {
+		return slices.Clone(env)
+	}
+
 	out := make([]string, 0, len(env)+1)
 	replaced := false
 	for _, kv := range env {

@@ -41,8 +41,12 @@ func TestLocalRecordingIsAReplayableSession(t *testing.T) {
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf LOCAL-MARKER; sleep 1; printf DONE"}}
 
 	started := time.Now()
-	outcome, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil)
+	outcome, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw})
 	if err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
@@ -206,8 +210,12 @@ func TestLocalRecordingAlsoWritesTheWireCopy(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf WIRE-MARKER; sleep 1; printf DONE"}}
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -404,8 +412,12 @@ func TestIdleLandsOnTheRecordThatFollowsIt(t *testing.T) {
 
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf BEFORE; sleep 1; printf AFTER"}}
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 
@@ -457,8 +469,12 @@ func TestTrailingIdleIsNotRecorded(t *testing.T) {
 	var userSaw bytes.Buffer
 	inv := Invocation{Name: "sh", Args: []string{"-c", "printf ONLY; sleep 1"}}
 	started := time.Now()
-	if _, err := RunRecorded(t.Context(), cfg, inv, "/bin/sh",
-		TerminalIO{In: slave, Out: &userSaw}, nil); err != nil {
+	if _, err := RunRecorded(t.Context(), RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  "/bin/sh",
+		EnvShell:   "/bin/sh",
+	}, TerminalIO{In: slave, Out: &userSaw}); err != nil {
 		t.Fatalf("RunRecorded: %v", err)
 	}
 	realTime := time.Since(started)

@@ -129,6 +129,7 @@ func runShell(inv logshell.Invocation) int {
 		ShellPath:  shellPath,
 		Std:        logshell.StdStreams(),
 		CmdLog:     cmdLog,
+		EnvShell:   shellPath, // a login shell: $SHELL must name the real shell
 	}
 
 	var outcome logshell.Outcome
@@ -147,8 +148,7 @@ func runShell(inv logshell.Invocation) int {
 
 	default:
 		if logshell.IsTerminal(os.Stdin.Fd()) {
-			outcome, err = logshell.RunRecorded(ctx, cfg, inv, shellPath,
-				logshell.StdTerminal(), cmdLog)
+			outcome, err = logshell.RunRecorded(ctx, spec, logshell.StdTerminal())
 		} else {
 			outcome, err = logshell.RunNonInteractive(ctx, spec)
 		}
@@ -343,8 +343,13 @@ func runRecord(dir, shellOverride, configPath string, configGiven, alsoWire bool
 	fmt.Fprintf(os.Stderr, "%s: recording to %s\n", appName, dir)
 
 	inv := logshell.Invocation{Name: filepath.Base(shellPath), Args: args}
-	outcome, err := logshell.RunRecorded(context.Background(), cfg, inv, shellPath,
-		logshell.StdTerminal(), nil)
+	outcome, err := logshell.RunRecorded(context.Background(), logshell.RunSpec{
+		Config:     cfg,
+		Invocation: inv,
+		ShellPath:  shellPath,
+		Std:        logshell.StdStreams(),
+		EnvShell:   shellPath,
+	}, logshell.StdTerminal())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", appName, err)
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {
