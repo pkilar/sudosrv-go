@@ -98,15 +98,14 @@ warning in §7.2.
 `logsh` grows **8.37 MB → 8.43 MB** (`CGO_ENABLED=0`, `-ldflags="-s -w"`) — measured at implementation, +64 KB.
 
 An earlier estimate here said ≈10.3 MB. That was wrong: it added a standalone probe binary's *total* size to logsh's total, rather than measuring the marginal cost. `logsh` already links `crypto/tls` for its mTLS connection to the log server, so ed25519, RSA, ECDSA and SHA-256 are present either way; `x/crypto/ssh` contributes only the SSH wire format and key-type dispatch, and the linker drops the transport, cipher and key-exchange machinery because nothing here dials or accepts a connection.
-Only the certificate parser is reached; no transport or network code is
-reachable from `logsh`.
 
 ### 3.2 Rejected alternatives
 
-- **Hand-rolled certificate parser.** Avoids the dependency and ~2 MB, but
+- **Hand-rolled certificate parser.** Avoids the dependency, but
   requires a per-algorithm table of key-field counts that is silently wrong when
   an unlisted algorithm appears. Rejected: correctness on the authentication path
-  outweighs binary size.
+  outweighs binary size — and the measured size cost turned out to be +64 KB, so
+  there was less to weigh than the rejection assumed.
 - **Auto-detecting force-command mode from `SSH_CONNECTION`.** Takes an authority
   decision from the environment and would change behaviour for existing
   login-shell deployments.
