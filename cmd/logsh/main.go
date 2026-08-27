@@ -518,6 +518,37 @@ func runSelftest(path string) int {
 			name, resolveErr)
 	}
 
+	// The question an operator most needs answered before enabling a host: what
+	// will a forced-command root session actually run here? The shell comes from
+	// this host's passwd file, so it can differ from host to host, and printing
+	// it is what makes that visible before it matters.
+	if len(cfg.ForceCommand.Routes) > 0 || cfg.ForceCommand.Shell != "" {
+		shell, err := cfg.ResolveEntryShell(logshell.PasswdPath, "root", 0)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "FAIL  force_command: cannot resolve root's shell: %v\n", err)
+			failed = true
+		case cfg.ForceCommand.Shell != "":
+			fmt.Printf("ok    force_command: interactive shell for root: %s (from force_command.shell)\n", shell)
+		default:
+			fmt.Printf("ok    force_command: interactive shell for root: %s (from %s)\n", shell, logshell.PasswdPath)
+		}
+
+		for name, r := range cfg.ForceCommand.Routes {
+			prog := r.Command
+			if len(r.Exec) > 0 {
+				prog = r.Exec[0]
+			}
+			st, statErr := os.Stat(prog)
+			if statErr != nil || st.IsDir() || st.Mode()&0o111 == 0 {
+				fmt.Fprintf(os.Stderr, "FAIL  force_command.routes[%s]: %s is missing or not executable\n", name, prog)
+				failed = true
+				continue
+			}
+			fmt.Printf("ok    force_command.routes[%s]: %s\n", name, prog)
+		}
+	}
+
 	if len(cfg.RecordUsers) == 0 {
 		fmt.Fprintf(os.Stderr, "warn  record_users is empty: no session would be recorded\n")
 	}

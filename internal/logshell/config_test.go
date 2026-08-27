@@ -5,6 +5,7 @@ package logshell
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -286,5 +287,113 @@ func TestValidateRejectsEntryNameAsShell(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), EntryName) {
 		t.Errorf("error should name %q, got: %v", EntryName, err)
+	}
+}
+
+// TestValidateForceCommandRoutes.
+//
+// Each of these is an error rather than a warning because each produces a
+// SILENT recording gap or a broken session: a route that can never match, a
+// route with no program, or a program logsh cannot exec.
+func TestValidateForceCommandRoutes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			// Matching is on the basename of field 0, so a key containing a
+			// slash could never match anything. It would look configured and
+			// route nothing.
+			name: "key with a slash",
+			body: "record_users: [root]\nforce_command:\n  routes:\n    /usr/bin/rsync:\n      command: /bin/sh\n",
+			want: "basename",
+		},
+		{
+			name: "key with whitespace",
+			body: "record_users: [root]\nforce_command:\n  routes:\n    \"rsync --server\":\n      command: /bin/sh\n",
+			want: "basename",
+		},
+		{
+			name: "neither exec nor command",
+			body: "record_users: [root]\nforce_command:\n  routes:\n    rsync: {}\n",
+			want: "exactly one",
+		},
+		{
+			name: "both exec and command",
+			body: "record_users: [root]\nforce_command:\n  routes:\n    rsync:\n      exec: [/usr/bin/rrsync]\n      command: /bin/sh\n",
+			want: "exactly one",
+		},
+		{
+			name: "relative program",
+			body: "record_users: [root]\nforce_command:\n  routes:\n    rsync:\n      exec: [rrsync, -no-del]\n",
+			want: "absolute path",
+		},
+		{
+			// The override is a config value like any other, so the shells
+			// allowlist applies to it -- unlike a passwd-derived shell, where
+			// applying it would be a lockout for no gain.
+			name: "shell override outside the allowlist",
+			body: "record_users: [root]\nforce_command:\n  shell: /bin/evil\n",
+			want: "shells",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := load(writeConfig(t, tt.body), selfUID(t))
+			if err == nil {
+				t.Fatal("want an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error should mention %q, got: %v", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsAGoodForceCommandConfig, so the errors above are not
+// simply rejecting everything.
+func TestValidateAcceptsAGoodForceCommandConfig(t *testing.T) {
+	body := "record_users: [root]\n" +
+		"force_command:\n" +
+		"  routes:\n" +
+		"    internal-sftp:\n" +
+		"      exec: [/usr/lib/ssh/sftp-server, -l, INFO]\n" +
+		"    git-shell:\n" +
+		"      command: /usr/bin/git-shell\n"
+	cfg, err := load(writeConfig(t, body), selfUID(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.ForceCommand.Routes) != 2 {
+		t.Errorf("got %d routes, want 2", len(cfg.ForceCommand.Routes))
+	}
+}
+
+// TestWarningsForceCommandWithoutRootRecorded is the likeliest single
+// misconfiguration, and the most silent: sessions would be routed correctly and
+// recorded not at all.
+func TestWarningsForceCommandWithoutRootRecorded(t *testing.T) {
+	body := "record_users: [alice]\n" +
+		"force_command:\n  routes:\n    internal-sftp:\n      exec: [/usr/lib/ssh/sftp-server]\n"
+	cfg, err := load(writeConfig(t, body), selfUID(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.ContainsFunc(cfg.Warnings(), func(w string) bool { return strings.Contains(w, "record_users") }) {
+		t.Errorf("want a record_users warning, got %v", cfg.Warnings())
+	}
+}
+
+// TestWarningsShellOverride makes the footgun visible: pinning one shell
+// fleet-wide diverges from the account's real shell and from a console login.
+func TestWarningsShellOverride(t *testing.T) {
+	body := "record_users: [root]\nforce_command:\n  shell: /bin/bash\n"
+	cfg, err := load(writeConfig(t, body), selfUID(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.ContainsFunc(cfg.Warnings(), func(w string) bool { return strings.Contains(w, "force_command.shell") }) {
+		t.Errorf("want a force_command.shell warning, got %v", cfg.Warnings())
 	}
 }

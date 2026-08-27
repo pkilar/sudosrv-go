@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/eventlog"
 	"sudosrv/internal/logsrvclient"
@@ -393,6 +394,42 @@ func (c *Config) Validate() error {
 	if c.BreakGlassMarker != "" && !filepath.IsAbs(c.BreakGlassMarker) {
 		return fmt.Errorf("break_glass_marker: %q is not an absolute path", c.BreakGlassMarker)
 	}
+	for name, r := range c.ForceCommand.Routes {
+		// The key is matched against the BASENAME of the first field of
+		// SSH_ORIGINAL_COMMAND, so a key holding whitespace or a slash can never
+		// match anything. It would look configured and route nothing, which is a
+		// silent gap rather than a visible failure -- hence an error.
+		if name == "" || strings.ContainsAny(name, " \t/") {
+			return fmt.Errorf("force_command.routes[%q]: a key is matched against the basename of the client's command, so it cannot be empty or contain whitespace or a slash", name)
+		}
+		hasExec, hasCommand := len(r.Exec) > 0, r.Command != ""
+		if hasExec == hasCommand {
+			return fmt.Errorf("force_command.routes[%s]: set exactly one of exec or command", name)
+		}
+		prog := r.Command
+		if hasExec {
+			prog = r.Exec[0]
+		}
+		if !filepath.IsAbs(prog) {
+			return fmt.Errorf("force_command.routes[%s]: %q is not an absolute path", name, prog)
+		}
+	}
+
+	// The override is a configuration value, so the shells allowlist applies to
+	// it. A passwd-derived shell is deliberately NOT gated the same way: see
+	// ResolveEntryShell.
+	if c.ForceCommand.Shell != "" {
+		allowed := false
+		for _, shell := range c.Shells {
+			if shell == c.ForceCommand.Shell {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("force_command.shell: %q is not one of the shells map's values", c.ForceCommand.Shell)
+		}
+	}
 	return nil
 }
 
@@ -441,6 +478,24 @@ func (c *Config) Warnings() []string {
 			w = append(w, fmt.Sprintf("shells[%s]: %s is not present on this host", name, shell))
 		} else if st.Mode()&0111 == 0 {
 			w = append(w, fmt.Sprintf("shells[%s]: %s is not executable", name, shell))
+		}
+	}
+	if c.ForceCommand.Shell != "" {
+		w = append(w, fmt.Sprintf(
+			"force_command.shell is set to %s: forced-command sessions run it instead of the "+
+				"account's own shell from %s, so they will differ from a console login on any host "+
+				"where the two disagree. Leave it unset unless that is what you want.",
+			c.ForceCommand.Shell, PasswdPath))
+	}
+	if len(c.ForceCommand.Routes) > 0 || c.ForceCommand.Shell != "" {
+		if !c.ShouldRecord("root", 0) {
+			w = append(w, "force_command is configured but record_users names neither root nor 0: "+
+				"forced-command sessions would be routed correctly and recorded not at all")
+		}
+		if _, ok := c.ForceCommand.Routes["internal-sftp"]; !ok {
+			w = append(w, "force_command.routes has no internal-sftp entry: if sshd_config says "+
+				"`Subsystem sftp internal-sftp`, sftp and modern scp will fail for forced-command "+
+				"sessions. logsh cannot read sshd_config, so this is only a warning.")
 		}
 	}
 	return w
