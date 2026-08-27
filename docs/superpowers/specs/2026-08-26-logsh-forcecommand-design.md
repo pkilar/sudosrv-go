@@ -274,6 +274,7 @@ precedent, so an absent value never asserts "unknown"):
 | `logsh_cert_ca` | `SHA256:FF270WGkZMiYH/uz…` |
 | `logsh_cert_principals` | `["root-web","root-everywhere"]` — sent as a `strlistval`, matching `runargv`/`runenv`, so it lands in `log.json` as a JSON array rather than a string needing re-splitting |
 | `logsh_auth_method` | `publickey-cert` |
+| `logsh_auth_key` | `SHA256:TRyUrlFfj1iRUfiWrBFpJhvgnscxCv0ZCKtnyctN000` — the presented credential's own fingerprint. For a certificate this is redundant with the keys above; for a **plain key** it is the only identifier in the record, since §6.2 forbids naming anyone in `submituser`. That makes it the whole audit trail for the case this migration exists to eliminate, so it is recorded unconditionally rather than only for certificates. |
 | `logsh_ssh_command` | `internal-sftp -l INFO -f AUTH` |
 | `logsh_ssh_client` | `10.20.30.41 51234` (from `SSH_CONNECTION`) |
 
