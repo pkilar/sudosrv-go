@@ -5,7 +5,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sudosrv/internal/logshell"
 	"testing"
 )
 
@@ -145,5 +147,83 @@ func TestRecordShellFallsBackWhenEnvIsEmpty(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "/sh") {
 		t.Errorf("recordShell fell back to %q, want a /bin/sh-style default", got)
+	}
+}
+
+// TestTargetFromRouteBuildsTheRightArgv.
+//
+// The interactive route must produce a LOGIN argv[0] -- "-bash", not "bash".
+// sshd marks a login shell that way and every shell decides from argv[0][0]
+// alone, so getting it wrong stops /etc/profile and ~/.bash_profile running,
+// fleet-wide, with no error anywhere. This is acceptance test T-3's mechanism.
+func TestTargetFromRouteBuildsTheRightArgv(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    logshell.Target
+		wantArgv0 string
+		wantArgs  []string
+		wantEnv   string
+	}{
+		{
+			name:      "interactive is a login shell",
+			target:    logshell.Target{Kind: logshell.RouteInteractive, Path: "/bin/bash"},
+			wantArgv0: "-bash",
+			wantArgs:  nil,
+			wantEnv:   "/bin/bash",
+		},
+		{
+			name:      "default route runs the shell with -c",
+			target:    logshell.Target{Kind: logshell.RouteDefault, Path: "/bin/bash", Args: []string{"-c", "id"}},
+			wantArgv0: "bash",
+			wantArgs:  []string{"-c", "id"},
+			wantEnv:   "/bin/bash",
+		},
+		{
+			// Not a shell. Publishing SHELL=/usr/lib/ssh/sftp-server would be a
+			// lie, so envShell stays empty.
+			name:      "exec route is not a shell",
+			target:    logshell.Target{Kind: logshell.RouteExec, Path: "/usr/lib/ssh/sftp-server", Args: []string{"-l", "INFO"}},
+			wantArgv0: "sftp-server",
+			wantArgs:  []string{"-l", "INFO"},
+			wantEnv:   "",
+		},
+		{
+			name:      "command route is not a shell either",
+			target:    logshell.Target{Kind: logshell.RouteCommand, Path: "/usr/bin/git-shell", Args: []string{"-c", "git-upload-pack x"}},
+			wantArgv0: "git-shell",
+			wantArgs:  []string{"-c", "git-upload-pack x"},
+			wantEnv:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := targetFromRoute(tt.target)
+			if got.path != tt.target.Path {
+				t.Errorf("path = %q, want %q", got.path, tt.target.Path)
+			}
+			if got.argv0 != tt.wantArgv0 {
+				t.Errorf("argv0 = %q, want %q", got.argv0, tt.wantArgv0)
+			}
+			if !slices.Equal(got.args, tt.wantArgs) {
+				t.Errorf("args = %q, want %q", got.args, tt.wantArgs)
+			}
+			if got.envShell != tt.wantEnv {
+				t.Errorf("envShell = %q, want %q", got.envShell, tt.wantEnv)
+			}
+		})
+	}
+}
+
+// TestRefuseWithNoTargetRefuses.
+//
+// A nil target means there is nothing to exec, so neither fail-open nor
+// break-glass can rescue the session. It must refuse rather than return success,
+// because a forced command that exits 0 on an unhandled branch silently grants
+// an unrecorded root session.
+func TestRefuseWithNoTargetRefuses(t *testing.T) {
+	cfg := logshell.DefaultConfig()
+	cfg.FailClosed = false // even fail-open cannot help with nothing to run
+	if got := refuse(cfg, nil, "test"); got != exitRefused {
+		t.Errorf("refuse(cfg, nil) = %d, want exitRefused (%d)", got, exitRefused)
 	}
 }
