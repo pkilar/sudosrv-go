@@ -5,6 +5,7 @@ package logshell
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -200,5 +201,149 @@ func TestInfoMessagesOmitAnUnknownSource(t *testing.T) {
 	}
 	if infoOf(msgs, "runenv") != nil {
 		t.Error("an empty RunEnv was still sent; it should be omitted entirely")
+	}
+}
+
+// authInfoValue pulls a scalar info key out of a rendered message set.
+//
+// Named apart from nonint_test.go's infoValue (which reads an *AcceptMessage
+// directly) because that name is already taken in this package and this helper
+// takes the already-rendered []*pb.InfoMessage instead.
+func authInfoValue(t *testing.T, msgs []*pb.InfoMessage, key string) (string, bool) {
+	t.Helper()
+	for _, m := range msgs {
+		if m.Key != key {
+			continue
+		}
+		if s, ok := m.Value.(*pb.InfoMessage_Strval); ok {
+			return s.Strval, true
+		}
+		t.Fatalf("info key %q is not a strval", key)
+	}
+	return "", false
+}
+
+// TestApplyAuthInfoNamesTheHumanInSubmituser is R-2 and R-4 together.
+//
+// The session RUNS as root; a person authenticated it. This is the same
+// correction ApplyNesting makes under `sudo -i`, where the session runs as root
+// but alice is at the keyboard -- and it is why sudolens shows the human with no
+// change to the frontend. A record naming root in both fields cannot answer the
+// only question anybody asks of it.
+func TestApplyAuthInfoNamesTheHumanInSubmituser(t *testing.T) {
+	meta := SessionMeta{User: "root", UID: 0, SubmitUser: "root", SubmitUID: 0}
+	meta.ApplyAuthInfo(SessionInfo{Auth: AuthInfo{
+		Method:        AuthMethodCert,
+		KeyID:         "jsmith@CORP.EXAMPLE.COM",
+		Serial:        20260819000137,
+		Principals:    []string{"root-web"},
+		CAFingerprint: "SHA256:abc",
+	}})
+
+	if meta.SubmitUser != "jsmith@CORP.EXAMPLE.COM" {
+		t.Errorf("SubmitUser = %q, want the certificate key ID", meta.SubmitUser)
+	}
+	if meta.User != "root" {
+		t.Errorf("User = %q, want root: the session still RUNS as root", meta.User)
+	}
+	// There is no local uid for the human, so the ids keep describing the
+	// process. Consumers joining on submituid must not read it as a person.
+	if meta.SubmitUID != 0 {
+		t.Errorf("SubmitUID = %d, want 0", meta.SubmitUID)
+	}
+}
+
+// TestApplyAuthInfoPlainKeyDoesNotRewriteSubmituser.
+//
+// A plain key names nobody. Putting a fingerprint in submituser would assert an
+// identity the credential does not carry.
+func TestApplyAuthInfoPlainKeyDoesNotRewriteSubmituser(t *testing.T) {
+	meta := SessionMeta{User: "root", SubmitUser: "root"}
+	meta.ApplyAuthInfo(SessionInfo{Auth: AuthInfo{Method: AuthMethodKey, KeyFingerprint: "SHA256:xyz"}})
+
+	if meta.SubmitUser != "root" {
+		t.Errorf("SubmitUser = %q, want root", meta.SubmitUser)
+	}
+}
+
+// TestInfoMessagesCarryCertificateKeys.
+func TestInfoMessagesCarryCertificateKeys(t *testing.T) {
+	meta := SessionMeta{User: "root", SubmitUser: "root"}
+	meta.ApplyAuthInfo(SessionInfo{
+		Auth: AuthInfo{
+			Method:        AuthMethodCert,
+			KeyID:         "jsmith@CORP.EXAMPLE.COM",
+			Serial:        20260819000137,
+			Principals:    []string{"root-web", "root-everywhere"},
+			CAFingerprint: "SHA256:abc",
+		},
+		SSHCommand: "internal-sftp -l INFO",
+		SSHClient:  "10.20.30.41 51234",
+	})
+	msgs := meta.InfoMessages()
+
+	for key, want := range map[string]string{
+		"logsh_auth_method": AuthMethodCert,
+		"logsh_cert_keyid":  "jsmith@CORP.EXAMPLE.COM",
+		"logsh_cert_serial": "20260819000137",
+		"logsh_cert_ca":     "SHA256:abc",
+		"logsh_ssh_command": "internal-sftp -l INFO",
+		"logsh_ssh_client":  "10.20.30.41 51234",
+	} {
+		got, ok := authInfoValue(t, msgs, key)
+		if !ok {
+			t.Errorf("info key %q is missing", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("info key %q = %q, want %q", key, got, want)
+		}
+	}
+
+	// Principals are a list, matching runargv and runenv, so log.json holds a
+	// JSON array rather than a string a consumer has to re-split.
+	var principals []string
+	for _, m := range msgs {
+		if m.Key == "logsh_cert_principals" {
+			if l, ok := m.Value.(*pb.InfoMessage_Strlistval); ok {
+				principals = l.Strlistval.Strings
+			}
+		}
+	}
+	if len(principals) != 2 || principals[1] != "root-everywhere" {
+		t.Errorf("logsh_cert_principals = %v, want [root-web root-everywhere]", principals)
+	}
+}
+
+// TestInfoMessagesOmitEmptyAuthKeys.
+//
+// The server copies every key it receives straight into log.json, so an empty
+// string would assert "this session had no certificate key ID" rather than "this
+// was not determined". The existing `source` key omits for exactly this reason.
+func TestInfoMessagesOmitEmptyAuthKeys(t *testing.T) {
+	msgs := SessionMeta{User: "root", SubmitUser: "root"}.InfoMessages()
+	for _, key := range []string{
+		"logsh_auth_method", "logsh_cert_keyid", "logsh_cert_serial",
+		"logsh_cert_ca", "logsh_cert_principals", "logsh_ssh_command", "logsh_ssh_client",
+	} {
+		if _, ok := authInfoValue(t, msgs, key); ok {
+			t.Errorf("info key %q must be omitted when unset", key)
+		}
+	}
+}
+
+// TestApplyAuthInfoTruncatesTheClientCommand.
+//
+// SSH_ORIGINAL_COMMAND is attacker-controlled and unbounded. An enormous value
+// must not bloat every session record.
+func TestApplyAuthInfoTruncatesTheClientCommand(t *testing.T) {
+	meta := SessionMeta{}
+	meta.ApplyAuthInfo(SessionInfo{SSHCommand: strings.Repeat("x", DefaultCommandLogMaxLen*3)})
+
+	if len(meta.Info.SSHCommand) > DefaultCommandLogMaxLen {
+		t.Errorf("SSHCommand length %d, want <= %d", len(meta.Info.SSHCommand), DefaultCommandLogMaxLen)
+	}
+	if !strings.HasSuffix(meta.Info.SSHCommand, "...") {
+		t.Error("truncation must be visible in the value")
 	}
 }
