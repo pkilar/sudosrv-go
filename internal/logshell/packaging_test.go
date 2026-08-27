@@ -772,3 +772,98 @@ func TestUninstallRefusesWhenSshdConfigCannotBeRead(t *testing.T) {
 		t.Errorf("entry symlink survived a permitted uninstall: %v", err)
 	}
 }
+
+// TestUninstallFollowsSshdIncludeDirectives covers the gap a fixed search list
+// leaves.
+//
+// sshd_config pulls in more files with Include, whose targets may be globs and
+// may live anywhere on the filesystem -- on most distributions the drop-in
+// directory is itself reached that way rather than by convention. A guard that
+// searched only the two conventional paths would miss a ForceCommand in an
+// included file and let uninstall delete the binary sshd still names, which is
+// the exact lockout the guard exists to prevent.
+//
+// The reference here is deliberately placed OUTSIDE /etc/ssh, so nothing but
+// following the Include can find it.
+func TestUninstallFollowsSshdIncludeDirectives(t *testing.T) {
+	write := func(t *testing.T, fr *fakeRoot, rel, body string) string {
+		t.Helper()
+		p := filepath.Join(fr.dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	tests := []struct {
+		name       string
+		sshdConfig string
+		extra      map[string]string
+		wantRefuse bool
+	}{
+		{
+			name:       "reference in a file included from outside /etc/ssh",
+			sshdConfig: "Include /opt/ssh-extra/logsh.conf\n",
+			extra:      map[string]string{"opt/ssh-extra/logsh.conf": "ForceCommand /usr/sbin/logsh-entry\n"},
+			wantRefuse: true,
+		},
+		{
+			name:       "reference two Include levels down",
+			sshdConfig: "Include /opt/ssh-extra/a.conf\n",
+			extra: map[string]string{
+				"opt/ssh-extra/a.conf": "Include /opt/ssh-extra/b.conf\n",
+				"opt/ssh-extra/b.conf": "ForceCommand /usr/sbin/logsh-entry\n",
+			},
+			wantRefuse: true,
+		},
+		{
+			name:       "relative Include, which sshd resolves against /etc/ssh",
+			sshdConfig: "Include local.conf\n",
+			extra:      map[string]string{"etc/ssh/local.conf": "ForceCommand /usr/sbin/logsh-entry\n"},
+			wantRefuse: true,
+		},
+		{
+			// The control. Same Include machinery, no reference anywhere, so a
+			// refusal here would mean the guard had started refusing everything
+			// rather than finding what it claims to find.
+			name:       "included files with no reference still permit uninstall",
+			sshdConfig: "Include /opt/ssh-extra/*.conf\n",
+			extra:      map[string]string{"opt/ssh-extra/other.conf": "PermitRootLogin no\n"},
+			wantRefuse: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fr := newFakeRoot(t)
+			if _, err := fr.run(t, "install"); err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			entry := filepath.Join(fr.sbin, "logsh-entry")
+			write(t, fr, "etc/ssh/sshd_config", tt.sshdConfig)
+			for rel, body := range tt.extra {
+				write(t, fr, rel, body)
+			}
+
+			out, err := fr.run(t, "uninstall")
+			if tt.wantRefuse {
+				if err == nil {
+					t.Fatalf("uninstall succeeded although an included config references logsh-entry\noutput: %s", out)
+				}
+				if _, statErr := os.Lstat(entry); statErr != nil {
+					t.Errorf("entry symlink was removed despite the refusal: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("uninstall refused although nothing references logsh-entry: %v\noutput: %s", err, out)
+			}
+			if _, statErr := os.Lstat(entry); !os.IsNotExist(statErr) {
+				t.Errorf("entry symlink survived a permitted uninstall: %v", statErr)
+			}
+		})
+	}
+}
