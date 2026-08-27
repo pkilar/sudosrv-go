@@ -117,7 +117,8 @@ func TestForcedCommandRoutesExec(t *testing.T) {
 	// force_command.shell pins the interactive/default routes' shell. Per
 	// ResolveEntryShell (internal/logshell/dispatch.go), a non-empty
 	// ForceCommand.Shell is consulted FIRST and the passwd branch -- the only
-	// place logshell.PasswdPath is used -- is skipped entirely, so this value
+	// place ResolveEntryShell touches its passwdPath argument -- is skipped
+	// entirely, so this value
 	// never depends on logshell.PasswdPath. Without this override, three of the
 	// four subtests below would silently depend on the TEST RUNNER's own
 	// /etc/passwd shell entry instead, and fail confusingly (as unrelated-
