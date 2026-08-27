@@ -96,33 +96,47 @@ func TestEntryNameDispatchesAwayFromAdmin(t *testing.T) {
 	}
 }
 
-// buildEntry builds logsh and returns a logsh-entry symlink to it, so the
-// binary dispatches through the forced-command path exactly as sshd would make
-// it.
-func buildEntry(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "logsh")
-	build := exec.Command("go", "build", "-o", bin, "sudosrv/cmd/logsh")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	entry := filepath.Join(dir, "logsh-entry")
-	if err := os.Symlink(bin, entry); err != nil {
-		t.Fatal(err)
-	}
-	return entry
-}
-
-// TestForcedCommandRoutesExec is acceptance tests T-1 and T-2 against the real
-// binary: every branch execs what it should, no branch falls through to an
-// unrecorded shell, and hostile input never reaches a route's argv.
+// TestForcedCommandRoutesExec is acceptance tests T-1 and T-2 against
+// runForceCommand: every branch execs what it should, no branch falls through
+// to an unrecorded shell, and hostile input never reaches a route's argv.
 //
 // record_users is empty, so each session takes the unrecorded passthrough --
 // which is the path that proves routing, since it execs the resolved target
-// directly with nothing in between.
+// directly with nothing in between. That passthrough ends in syscall.Exec,
+// which replaces the calling process on success, so each case is driven
+// through the os.Args[0] re-exec idiom already established by
+// TestPassthroughForwardsTargetEnvShell / TestPassthroughHelperProcess in
+// main_test.go: the parent re-execs this test binary with -test.run anchored
+// exactly to the helper below, and the helper calls runForceCommand directly
+// with the config path it was given.
+//
+// This deliberately does NOT build the binary and drive it through a
+// logsh-entry symlink the way an earlier version of this test did.
+// runForceCommand takes its config path as a parameter specifically so tests
+// do not need a config-selecting hook anywhere near the code that decides which
+// binary a root session execs -- and this host has a real, root-owned
+// /etc/logsh/logsh.yaml installed, unrelated to this test, that any such hook
+// would have to out-rank. Going through main's actual argv0 dispatch is covered
+// separately and sufficiently by TestEntryNameDispatchesAwayFromAdmin, which
+// pins that a logsh-entry invocation is recognised as IsEntry() and never
+// reaches runAdmin; what happens once runForceCommand is called is exactly what
+// this test checks, directly.
+//
+// runForceCommand's first step is logshell.Load(configPath), which enforces
+// logshell.RequiredOwnerUID: the config file AND its directory must be owned by
+// uid 0 (internal/logshell/config.go's CheckPerms). No unprivileged process can
+// produce that -- chown to a uid you do not hold requires CAP_CHOWN -- so this
+// test can only reach a successful load while actually running as root. That is
+// not new here: no cmd/logsh test has ever exercised Load's success path, and
+// even internal/logshell's own suite, which has package-internal access to a
+// load(path, ownerUID) test seam Load itself does not expose, never manufactures
+// a root-owned file either -- see TestLoadRequiresRootOwnership, which tests the
+// same boundary from the rejection side and skips for the mirror reason.
 func TestForcedCommandRoutesExec(t *testing.T) {
-	entry := buildEntry(t)
+	if os.Getuid() != 0 {
+		t.Skip("needs a root-owned config: runForceCommand calls logshell.Load, " +
+			"which requires uid 0 and an unprivileged test cannot manufacture that")
+	}
 
 	cfgDir := t.TempDir()
 	cfgPath := filepath.Join(cfgDir, "logsh.yaml")
@@ -167,11 +181,12 @@ func TestForcedCommandRoutesExec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.Command(entry)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestForcedCommandRoutesHelperProcess$")
 			cmd.Env = append(os.Environ(),
+				"LOGSH_WANT_FORCECOMMAND_HELPER=1",
+				"LOGSH_FORCECOMMAND_HELPER_CONFIG="+cfgPath,
 				"SSH_ORIGINAL_COMMAND="+tt.original,
 				"SSH_USER_AUTH=",
-				"LOGSH_CONFIG_FOR_TEST="+cfgPath,
 			)
 			out, err := cmd.CombinedOutput()
 
@@ -192,4 +207,21 @@ func TestForcedCommandRoutesExec(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestForcedCommandRoutesHelperProcess is not a real test. Run under a normal
+// `go test`, it checks LOGSH_WANT_FORCECOMMAND_HELPER and returns immediately,
+// so it contributes nothing and shows as a trivial pass. It only does anything
+// when spawned as a subprocess by TestForcedCommandRoutesExec, which sets that
+// variable -- because runForceCommand's unrecorded routes end in an execve that
+// must replace a disposable process, not the test binary running the actual
+// assertions.
+func TestForcedCommandRoutesHelperProcess(t *testing.T) {
+	if os.Getenv("LOGSH_WANT_FORCECOMMAND_HELPER") != "1" {
+		return
+	}
+	inv := logshell.Invocation{Name: logshell.EntryName}
+	// Only returns on failure; on success runForceCommand's own passthrough has
+	// already replaced this process and nothing below runs.
+	os.Exit(runForceCommand(inv, os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG")))
 }

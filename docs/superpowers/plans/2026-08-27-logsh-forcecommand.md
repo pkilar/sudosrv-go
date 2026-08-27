@@ -2595,39 +2595,40 @@ Expected: PASS
 
 - [ ] **Step 5: Add a subprocess test that actually execs each route**
 
-`runForceCommand` ends in `syscall.Exec` for the unrecorded path, which would replace the test process. So the exec paths are exercised by running the built binary as a subprocess, the pattern `e2e_test.go` already uses. `record_users` is left empty so every session takes the unrecorded passthrough and no log server is needed.
+`runForceCommand` ends in `syscall.Exec` for the unrecorded path, which would replace the test process. `record_users` is left empty so every session takes the unrecorded passthrough and no log server is needed.
+
+**Defect found during Task 9's implementation, fixed here.** The original version of this step built the `logsh` binary, symlinked it as `logsh-entry`, and drove `main`'s own dispatch through a `configPathForEntry()` hook that read `$LOGSH_CONFIG_FOR_TEST` -- but only when the compiled-in `/etc/logsh/logsh.yaml` was *absent*, "so it can never shadow a deployed file". That precondition makes the test's own outcome depend on whether the host running it happens to have logsh installed: on a machine with a real `/etc/logsh/logsh.yaml` already in place (this repo's own dev host has one, unrelated to this plan), the override is silently ignored, the test's own routes are never read, and the `exec route ignores the client's arguments` subtest fails for a reason that has nothing to do with the code being tested. That is the wrong property for a test to have, and worse, it required an environment-readable config selector to exist on `main`'s authentication path at all -- exactly what the preamble above already says must not exist.
+
+The fix drops `configPathForEntry` entirely and never builds a binary or touches `main`'s dispatch here. `runForceCommand` already takes its config path as a parameter, which is the seam: drive it through the `os.Args[0]` re-exec idiom `cmd/logsh/main_test.go` already established for the same reason (`TestPassthroughForwardsTargetEnvShell` / `TestPassthroughHelperProcess` -- `passthrough` also ends in an exec that would replace the test binary). The parent process re-execs the test binary with `-test.run` anchored exactly to a helper test, passes the temp config path and `SSH_ORIGINAL_COMMAND` through the environment, and the helper calls `runForceCommand` directly. This costs the "exercises the real `main` dispatch through a `logsh-entry` symlink" property; `TestEntryNameDispatchesAwayFromAdmin` already covers that a `logsh-entry` invocation is recognised and never reaches `runAdmin`, which is what that dispatch actually decides.
 
 Append to `cmd/logsh/entry_test.go`:
 
 ```go
-// buildEntry builds logsh and returns a logsh-entry symlink to it, so the
-// binary dispatches through the forced-command path exactly as sshd would make
-// it.
-func buildEntry(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "logsh")
-	build := exec.Command("go", "build", "-o", bin, "sudosrv/cmd/logsh")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	entry := filepath.Join(dir, "logsh-entry")
-	if err := os.Symlink(bin, entry); err != nil {
-		t.Fatal(err)
-	}
-	return entry
-}
-
-// TestForcedCommandRoutesExec is acceptance tests T-1 and T-2 against the real
-// binary: every branch execs what it should, no branch falls through to an
-// unrecorded shell, and hostile input never reaches a route's argv.
+// TestForcedCommandRoutesExec is acceptance tests T-1 and T-2 against
+// runForceCommand: every branch execs what it should, no branch falls through
+// to an unrecorded shell, and hostile input never reaches a route's argv.
 //
 // record_users is empty, so each session takes the unrecorded passthrough --
 // which is the path that proves routing, since it execs the resolved target
-// directly with nothing in between.
+// directly with nothing in between. That passthrough ends in syscall.Exec,
+// which replaces the calling process on success, so each case is driven
+// through the os.Args[0] re-exec idiom already established by
+// TestPassthroughForwardsTargetEnvShell / TestPassthroughHelperProcess in
+// main_test.go: the parent re-execs this test binary with -test.run anchored
+// exactly to the helper below, and the helper calls runForceCommand directly
+// with the config path it was given.
+//
+// This deliberately does NOT build the binary and drive it through a
+// logsh-entry symlink. runForceCommand takes its config path as a parameter
+// specifically so tests do not need a config-selecting hook anywhere near the
+// code that decides which binary a root session execs -- and a host with a
+// real, root-owned /etc/logsh/logsh.yaml already installed (this dev host has
+// one) would out-rank any such hook. Going through main's actual argv0
+// dispatch is covered separately by TestEntryNameDispatchesAwayFromAdmin, which
+// pins that a logsh-entry invocation is recognised as IsEntry() and never
+// reaches runAdmin; what happens once runForceCommand is called is exactly
+// what this test checks, directly.
 func TestForcedCommandRoutesExec(t *testing.T) {
-	entry := buildEntry(t)
-
 	cfgDir := t.TempDir()
 	cfgPath := filepath.Join(cfgDir, "logsh.yaml")
 	cfg := "record_users: []\n" +
@@ -2671,17 +2672,17 @@ func TestForcedCommandRoutesExec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.Command(entry)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestForcedCommandRoutesHelperProcess$")
 			cmd.Env = append(os.Environ(),
+				"LOGSH_WANT_FORCECOMMAND_HELPER=1",
+				"LOGSH_FORCECOMMAND_HELPER_CONFIG="+cfgPath,
 				"SSH_ORIGINAL_COMMAND="+tt.original,
 				"SSH_USER_AUTH=",
-				"LOGSH_CONFIG_FOR_TEST="+cfgPath,
 			)
 			out, err := cmd.CombinedOutput()
 
 			code := 0
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 				code = ee.ExitCode()
 			} else if err != nil {
 				t.Fatalf("run: %v\n%s", err, out)
@@ -2698,33 +2699,26 @@ func TestForcedCommandRoutesExec(t *testing.T) {
 		})
 	}
 }
-```
 
-This test needs `main` to accept a config path from somewhere. Add it to `main` only, never to `runForceCommand`, and gate it on the build being a test build:
-
-```go
-// configPathForEntry returns the configuration the forced-command path reads.
-//
-// The compiled-in path in every real build. The override exists solely so
-// cmd/logsh's own subprocess tests can exercise routing without installing a
-// system configuration, and it is read ONLY when the compiled-in path does not
-// exist -- so it can never shadow a deployed file, and on any host where logsh
-// is actually installed it is dead code.
-//
-// It is read here in main rather than inside runForceCommand so that the
-// function which runs on the authentication path takes its config path as an
-// argument and consults no environment at all.
-func configPathForEntry() string {
-	if _, err := os.Stat(logshell.DefaultConfigPath); err != nil {
-		if p := os.Getenv("LOGSH_CONFIG_FOR_TEST"); p != "" {
-			return p
-		}
+// TestForcedCommandRoutesHelperProcess is not a real test. Run under a normal
+// `go test`, it checks LOGSH_WANT_FORCECOMMAND_HELPER and returns immediately,
+// so it contributes nothing and shows as a trivial pass. It only does anything
+// when spawned as a subprocess by TestForcedCommandRoutesExec, which sets that
+// variable -- because runForceCommand's unrecorded routes end in an execve that
+// must replace a disposable process, not the test binary running the actual
+// assertions.
+func TestForcedCommandRoutesHelperProcess(t *testing.T) {
+	if os.Getenv("LOGSH_WANT_FORCECOMMAND_HELPER") != "1" {
+		return
 	}
-	return logshell.DefaultConfigPath
+	inv := logshell.Invocation{Name: logshell.EntryName}
+	// Only returns on failure; on success runForceCommand's own passthrough has
+	// already replaced this process and nothing below runs.
+	os.Exit(runForceCommand(inv, os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG")))
 }
 ```
 
-and `main`'s entry case becomes `os.Exit(runForceCommand(inv, configPathForEntry()))`.
+`main`'s entry case is simply `os.Exit(runForceCommand(inv, logshell.DefaultConfigPath))` -- no hook, no override, matching the preamble above exactly. There is nothing to add to `main` for this step.
 
 Add `"errors"`, `"os"`, `"os/exec"` and `"strings"` to `entry_test.go`'s imports.
 
