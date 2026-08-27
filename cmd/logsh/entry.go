@@ -58,21 +58,21 @@ func sessionInfoFromEnv() logshell.SessionInfo {
 // fall-through: a forced command that returns 0 without exec'ing anything hands
 // the client a session that nothing recorded.
 //
-// configPath is a parameter so tests can supply their own, and main passes
-// logshell.DefaultConfigPath. There is deliberately NO environment override:
-// this runs with an environment the client influences, at the start of a root
-// session, and the file decides both which binary gets exec'd and whether the
-// session is recorded at all.
-func runForceCommand(inv logshell.Invocation, configPath string) int {
-	cfg, err := logshell.Load(configPath)
-	if err != nil {
-		// No configuration means we cannot tell whether this account should be
-		// recorded, so the safe answer is the same as "recording failed". There
-		// is also nothing resolved to exec, so no target -- BreakGlassActive(nil)
-		// still works, but with nothing to run it cannot rescue the session.
-		return refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err))
-	}
-
+// cfg is a parameter rather than a path this function loads itself: acquiring
+// it -- via logshell.Load, which enforces logshell.RequiredOwnerUID -- is main's
+// job, before runForceCommand is ever called. This function TRUSTS cfg without
+// re-checking ownership, because main is the only production caller and main
+// obtained cfg through that gate. A test may hand it a config built with
+// logshell.LoadUnchecked instead, which validates content but skips the gate --
+// deliberately, since exercising routing here is not exercising the
+// authentication path's file-selection decision, and an unprivileged test
+// process cannot manufacture a root-owned file to satisfy Load in the first
+// place (chown to a uid you do not hold requires CAP_CHOWN). There is
+// deliberately NO environment override anywhere in this chain: this runs with
+// an environment the client influences, at the start of a root session, and the
+// file main loads decides both which binary gets exec'd and whether the session
+// is recorded at all.
+func runForceCommand(inv logshell.Invocation, cfg *logshell.Config) int {
 	// Read the credential before anything else: sshd removes the file at session
 	// end, and every later moment is another chance for it to be gone.
 	info := sessionInfoFromEnv()
@@ -131,6 +131,7 @@ func runForceCommand(inv logshell.Invocation, configPath string) int {
 	}
 
 	var outcome logshell.Outcome
+	var err error
 	// Interactive or not is decided by whether a terminal is attached, NEVER by
 	// the route kind. `ssh -t root@host /bin/bash` supplies a command AND
 	// allocates a pty; keying off the route would classify it as non-interactive

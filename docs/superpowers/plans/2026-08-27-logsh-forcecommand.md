@@ -2297,9 +2297,9 @@ that exits 0 on an unhandled branch silently grants an unrecorded root session."
 - Consumes: everything from Tasks 1–8.
 - Produces:
   - `func sessionInfoFromEnv() logshell.SessionInfo`
-  - `func runForceCommand(inv logshell.Invocation, configPath string) int`
+  - `func runForceCommand(inv logshell.Invocation, cfg *logshell.Config) int`
 
-`configPath` is a parameter rather than a compiled-in constant read inside the function, so tests can point it at a temp file. `main` passes `logshell.DefaultConfigPath` and nothing else ever does — in particular there is no environment override, because an env-readable config selector on the authentication path is exactly what `runShell`'s compiled-in path exists to prevent.
+**Second defect found during Task 9's implementation, fixed here.** The signature above is corrected from what this section originally specified: `func runForceCommand(inv logshell.Invocation, configPath string) int`, which had `runForceCommand` call `logshell.Load(configPath)` itself. That made the route test's success path depend on a config file passing `Load`'s root-ownership gate (`logshell.RequiredOwnerUID`) -- something no unprivileged test process can produce for a file it created itself (`chown` to a uid you do not hold requires `CAP_CHOWN`). The only way to make that version of the route test run unprivileged was to depend on a real, already-root-owned system file, which reintroduces exactly the host-dependence the first defect note below removes. `runForceCommand` now takes an already-loaded `*logshell.Config`, and `main` calls `logshell.Load(logshell.DefaultConfigPath)` itself, handling the error *before* `runForceCommand` is ever invoked. The ownership gate stays on the one production path, in `main`; `runForceCommand` trusts the config it is handed because `main` is its only production caller. A test hands it a config built with `logshell.LoadUnchecked` instead -- content validation only, no ownership gate -- and now runs for real, unprivileged, with no skip.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2367,26 +2367,6 @@ func TestSessionInfoFromEnvMalformedSshConnection(t *testing.T) {
 	}
 }
 
-// TestRunForceCommandRefusesWithoutAConfig.
-//
-// No configuration means logsh cannot tell whether this account should be
-// recorded, so the safe answer is the same as "recording failed". It must never
-// exit 0, which would silently grant an unrecorded root session.
-//
-// This test is safe to run anywhere precisely because an unreadable config
-// reaches refuse() with no resolved target: nothing is ever exec'd, so it cannot
-// replace the test process.
-func TestRunForceCommandRefusesWithoutAConfig(t *testing.T) {
-	t.Setenv("SSH_ORIGINAL_COMMAND", "id")
-	t.Setenv("SSH_USER_AUTH", "")
-
-	got := runForceCommand(logshell.Invocation{Name: logshell.EntryName},
-		filepath.Join(t.TempDir(), "absent.yaml"))
-	if got != exitRefused {
-		t.Errorf("runForceCommand = %d, want exitRefused (%d)", got, exitRefused)
-	}
-}
-
 // TestEntryNameDispatchesAwayFromAdmin.
 //
 // If logsh-entry ever reached the admin flag parser it would print usage and
@@ -2402,7 +2382,9 @@ func TestEntryNameDispatchesAwayFromAdmin(t *testing.T) {
 }
 ```
 
-The imports this file actually needs are `"path/filepath"`, `"sudosrv/internal/logshell"` and `"testing"`. `t.Setenv` needs no `os` import.
+**No `TestRunForceCommandRefusesWithoutAConfig` here.** An earlier version of this step had one, covering "no configuration means `runForceCommand` refuses". Now that config acquisition has moved to `main` (see the defect note above), that behaviour is `main`'s own `refuse(nil, nil, ...)` call on a `logshell.Load` failure -- not something `runForceCommand` does anymore -- and it is already pinned by `TestRefuseWithNoTargetRefuses` in `main_test.go`, which asserts `refuse(cfg, nil, "test")` returns `exitRefused` even with `cfg.FailClosed = false`. `refuse`'s own logic makes both of its fail-open branches conditional on `tgt != nil`, so that assertion covers `refuse(nil, nil, ...)` too: whether `cfg` is nil or merely permissive, a nil target is what forces the refusal, and that is true either way.
+
+The imports this file actually needs are `"sudosrv/internal/logshell"` and `"testing"`. `t.Setenv` needs no `os` import.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2474,21 +2456,21 @@ func sessionInfoFromEnv() logshell.SessionInfo {
 // fall-through: a forced command that returns 0 without exec'ing anything hands
 // the client a session that nothing recorded.
 //
-// configPath is a parameter so tests can supply their own, and main passes
-// logshell.DefaultConfigPath. There is deliberately NO environment override:
-// this runs with an environment the client influences, at the start of a root
-// session, and the file decides both which binary gets exec'd and whether the
-// session is recorded at all.
-func runForceCommand(inv logshell.Invocation, configPath string) int {
-	cfg, err := logshell.Load(configPath)
-	if err != nil {
-		// No configuration means we cannot tell whether this account should be
-		// recorded, so the safe answer is the same as "recording failed". There
-		// is also nothing resolved to exec, so no target -- BreakGlassActive(nil)
-		// still works, but with nothing to run it cannot rescue the session.
-		return refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err))
-	}
-
+// cfg is a parameter rather than a path this function loads itself: acquiring
+// it -- via logshell.Load, which enforces logshell.RequiredOwnerUID -- is main's
+// job, before runForceCommand is ever called. This function TRUSTS cfg without
+// re-checking ownership, because main is the only production caller and main
+// obtained cfg through that gate. A test may hand it a config built with
+// logshell.LoadUnchecked instead, which validates content but skips the gate --
+// deliberately, since exercising routing here is not exercising the
+// authentication path's file-selection decision, and an unprivileged test
+// process cannot manufacture a root-owned file to satisfy Load in the first
+// place (chown to a uid you do not hold requires CAP_CHOWN). There is
+// deliberately NO environment override anywhere in this chain: this runs with
+// an environment the client influences, at the start of a root session, and the
+// file main loads decides both which binary gets exec'd and whether the session
+// is recorded at all.
+func runForceCommand(inv logshell.Invocation, cfg *logshell.Config) int {
 	// Read the credential before anything else: sshd removes the file at session
 	// end, and every later moment is another chance for it to be gone.
 	info := sessionInfoFromEnv()
@@ -2547,6 +2529,7 @@ func runForceCommand(inv logshell.Invocation, configPath string) int {
 	}
 
 	var outcome logshell.Outcome
+	var err error
 	// Interactive or not is decided by whether a terminal is attached, NEVER by
 	// the route kind. `ssh -t root@host /bin/bash` supplies a command AND
 	// allocates a pty; keying off the route would classify it as non-interactive
@@ -2582,7 +2565,16 @@ func main() {
 	case inv.IsAdmin():
 		os.Exit(runAdmin(inv))
 	case inv.IsEntry():
-		os.Exit(runForceCommand(inv, logshell.DefaultConfigPath))
+		// The root-ownership gate belongs here, on the one production path, and
+		// nowhere inside runForceCommand: see that function's doc comment.
+		cfg, err := logshell.Load(logshell.DefaultConfigPath)
+		if err != nil {
+			// No configuration means we cannot tell whether this account should
+			// be recorded, so the safe answer is the same as "recording failed".
+			// There is nothing resolved to exec, so no target.
+			os.Exit(refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err)))
+		}
+		os.Exit(runForceCommand(inv, cfg))
 	}
 	os.Exit(runShell(inv))
 }
@@ -2615,19 +2607,23 @@ Append to `cmd/logsh/entry_test.go`:
 // through the os.Args[0] re-exec idiom already established by
 // TestPassthroughForwardsTargetEnvShell / TestPassthroughHelperProcess in
 // main_test.go: the parent re-execs this test binary with -test.run anchored
-// exactly to the helper below, and the helper calls runForceCommand directly
-// with the config path it was given.
+// exactly to the helper below, and the helper loads the temp config with
+// logshell.LoadUnchecked and calls runForceCommand directly with the result.
 //
 // This deliberately does NOT build the binary and drive it through a
-// logsh-entry symlink. runForceCommand takes its config path as a parameter
-// specifically so tests do not need a config-selecting hook anywhere near the
-// code that decides which binary a root session execs -- and a host with a
-// real, root-owned /etc/logsh/logsh.yaml already installed (this dev host has
-// one) would out-rank any such hook. Going through main's actual argv0
-// dispatch is covered separately by TestEntryNameDispatchesAwayFromAdmin, which
-// pins that a logsh-entry invocation is recognised as IsEntry() and never
-// reaches runAdmin; what happens once runForceCommand is called is exactly
-// what this test checks, directly.
+// logsh-entry symlink, and deliberately does NOT go anywhere near
+// logshell.Load. runForceCommand takes an already-loaded *logshell.Config
+// rather than a path precisely so a test can hand it one built with
+// LoadUnchecked -- content validation only, no root-ownership gate -- since an
+// unprivileged test process cannot manufacture a root-owned file to satisfy
+// Load in the first place (chown to a uid you do not hold requires CAP_CHOWN).
+// That gate now lives in main, on the one production path, and stays real:
+// internal/logshell's own TestLoadRequiresRootOwnership pins that Load actually
+// enforces uid 0. Going through main's actual argv0 dispatch is covered
+// separately by TestEntryNameDispatchesAwayFromAdmin, which pins that a
+// logsh-entry invocation is recognised as IsEntry() and never reaches
+// runAdmin; what happens once runForceCommand has a config in hand is exactly
+// what this test checks, directly, with no skip and no host dependence.
 func TestForcedCommandRoutesExec(t *testing.T) {
 	cfgDir := t.TempDir()
 	cfgPath := filepath.Join(cfgDir, "logsh.yaml")
@@ -2711,16 +2707,24 @@ func TestForcedCommandRoutesHelperProcess(t *testing.T) {
 	if os.Getenv("LOGSH_WANT_FORCECOMMAND_HELPER") != "1" {
 		return
 	}
+	// LoadUnchecked, not Load: this is a temp file the test process itself
+	// wrote, so it is owned by the test's own uid, not root, and Load's
+	// ownership gate would refuse it regardless of content. That gate belongs
+	// on main's production path, not here -- see runForceCommand's doc comment.
+	cfg, err := logshell.LoadUnchecked(os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG"))
+	if err != nil {
+		t.Fatalf("test helper: LoadUnchecked: %v", err)
+	}
 	inv := logshell.Invocation{Name: logshell.EntryName}
 	// Only returns on failure; on success runForceCommand's own passthrough has
 	// already replaced this process and nothing below runs.
-	os.Exit(runForceCommand(inv, os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG")))
+	os.Exit(runForceCommand(inv, cfg))
 }
 ```
 
-`main`'s entry case is simply `os.Exit(runForceCommand(inv, logshell.DefaultConfigPath))` -- no hook, no override, matching the preamble above exactly. There is nothing to add to `main` for this step.
+`main`'s entry case now loads and error-checks the config itself (see the `main` replacement in Step 3) and calls `os.Exit(runForceCommand(inv, cfg))` -- no hook, no override, no path parameter at all on this function anymore. There is nothing further to add to `main` for this step.
 
-Add `"errors"`, `"os"`, `"os/exec"` and `"strings"` to `entry_test.go`'s imports.
+Add `"errors"`, `"os"`, `"os/exec"`, `"path/filepath"` and `"strings"` to `entry_test.go`'s imports (`"path/filepath"` was dropped from Step 1's list along with `TestRunForceCommandRefusesWithoutAConfig`, and is needed again here for `cfgPath := filepath.Join(cfgDir, "logsh.yaml")`).
 
 - [ ] **Step 5a: Run the subprocess test**
 

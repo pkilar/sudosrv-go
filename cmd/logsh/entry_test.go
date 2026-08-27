@@ -62,26 +62,6 @@ func TestSessionInfoFromEnvMalformedSshConnection(t *testing.T) {
 	}
 }
 
-// TestRunForceCommandRefusesWithoutAConfig.
-//
-// No configuration means logsh cannot tell whether this account should be
-// recorded, so the safe answer is the same as "recording failed". It must never
-// exit 0, which would silently grant an unrecorded root session.
-//
-// This test is safe to run anywhere precisely because an unreadable config
-// reaches refuse() with no resolved target: nothing is ever exec'd, so it cannot
-// replace the test process.
-func TestRunForceCommandRefusesWithoutAConfig(t *testing.T) {
-	t.Setenv("SSH_ORIGINAL_COMMAND", "id")
-	t.Setenv("SSH_USER_AUTH", "")
-
-	got := runForceCommand(logshell.Invocation{Name: logshell.EntryName},
-		filepath.Join(t.TempDir(), "absent.yaml"))
-	if got != exitRefused {
-		t.Errorf("runForceCommand = %d, want exitRefused (%d)", got, exitRefused)
-	}
-}
-
 // TestEntryNameDispatchesAwayFromAdmin.
 //
 // If logsh-entry ever reached the admin flag parser it would print usage and
@@ -107,37 +87,24 @@ func TestEntryNameDispatchesAwayFromAdmin(t *testing.T) {
 // through the os.Args[0] re-exec idiom already established by
 // TestPassthroughForwardsTargetEnvShell / TestPassthroughHelperProcess in
 // main_test.go: the parent re-execs this test binary with -test.run anchored
-// exactly to the helper below, and the helper calls runForceCommand directly
-// with the config path it was given.
+// exactly to the helper below, and the helper loads the temp config with
+// logshell.LoadUnchecked and calls runForceCommand directly with the result.
 //
 // This deliberately does NOT build the binary and drive it through a
-// logsh-entry symlink the way an earlier version of this test did.
-// runForceCommand takes its config path as a parameter specifically so tests
-// do not need a config-selecting hook anywhere near the code that decides which
-// binary a root session execs -- and this host has a real, root-owned
-// /etc/logsh/logsh.yaml installed, unrelated to this test, that any such hook
-// would have to out-rank. Going through main's actual argv0 dispatch is covered
-// separately and sufficiently by TestEntryNameDispatchesAwayFromAdmin, which
-// pins that a logsh-entry invocation is recognised as IsEntry() and never
-// reaches runAdmin; what happens once runForceCommand is called is exactly what
-// this test checks, directly.
-//
-// runForceCommand's first step is logshell.Load(configPath), which enforces
-// logshell.RequiredOwnerUID: the config file AND its directory must be owned by
-// uid 0 (internal/logshell/config.go's CheckPerms). No unprivileged process can
-// produce that -- chown to a uid you do not hold requires CAP_CHOWN -- so this
-// test can only reach a successful load while actually running as root. That is
-// not new here: no cmd/logsh test has ever exercised Load's success path, and
-// even internal/logshell's own suite, which has package-internal access to a
-// load(path, ownerUID) test seam Load itself does not expose, never manufactures
-// a root-owned file either -- see TestLoadRequiresRootOwnership, which tests the
-// same boundary from the rejection side and skips for the mirror reason.
+// logsh-entry symlink, and deliberately does NOT go anywhere near
+// logshell.Load. runForceCommand takes an already-loaded *logshell.Config
+// rather than a path precisely so a test can hand it one built with
+// LoadUnchecked -- content validation only, no root-ownership gate -- since an
+// unprivileged test process cannot manufacture a root-owned file to satisfy
+// Load in the first place (chown to a uid you do not hold requires CAP_CHOWN).
+// That gate now lives in main, on the one production path, and stays real:
+// internal/logshell's own TestLoadRequiresRootOwnership pins that Load actually
+// enforces uid 0. Going through main's actual argv0 dispatch is covered
+// separately by TestEntryNameDispatchesAwayFromAdmin, which pins that a
+// logsh-entry invocation is recognised as IsEntry() and never reaches
+// runAdmin; what happens once runForceCommand has a config in hand is exactly
+// what this test checks, directly, with no skip and no host dependence.
 func TestForcedCommandRoutesExec(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("needs a root-owned config: runForceCommand calls logshell.Load, " +
-			"which requires uid 0 and an unprivileged test cannot manufacture that")
-	}
-
 	cfgDir := t.TempDir()
 	cfgPath := filepath.Join(cfgDir, "logsh.yaml")
 	cfg := "record_users: []\n" +
@@ -220,8 +187,16 @@ func TestForcedCommandRoutesHelperProcess(t *testing.T) {
 	if os.Getenv("LOGSH_WANT_FORCECOMMAND_HELPER") != "1" {
 		return
 	}
+	// LoadUnchecked, not Load: this is a temp file the test process itself
+	// wrote, so it is owned by the test's own uid, not root, and Load's
+	// ownership gate would refuse it regardless of content. That gate belongs
+	// on main's production path, not here -- see runForceCommand's doc comment.
+	cfg, err := logshell.LoadUnchecked(os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG"))
+	if err != nil {
+		t.Fatalf("test helper: LoadUnchecked: %v", err)
+	}
 	inv := logshell.Invocation{Name: logshell.EntryName}
 	// Only returns on failure; on success runForceCommand's own passthrough has
 	// already replaced this process and nothing below runs.
-	os.Exit(runForceCommand(inv, os.Getenv("LOGSH_FORCECOMMAND_HELPER_CONFIG")))
+	os.Exit(runForceCommand(inv, cfg))
 }

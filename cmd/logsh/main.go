@@ -62,7 +62,16 @@ func main() {
 	case inv.IsAdmin():
 		os.Exit(runAdmin(inv))
 	case inv.IsEntry():
-		os.Exit(runForceCommand(inv, logshell.DefaultConfigPath))
+		// The root-ownership gate belongs here, on the one production path, and
+		// nowhere inside runForceCommand: see that function's doc comment.
+		cfg, err := logshell.Load(logshell.DefaultConfigPath)
+		if err != nil {
+			// No configuration means we cannot tell whether this account should
+			// be recorded, so the safe answer is the same as "recording failed".
+			// There is nothing resolved to exec, so no target.
+			os.Exit(refuse(nil, nil, fmt.Sprintf("configuration is unusable: %v", err)))
+		}
+		os.Exit(runForceCommand(inv, cfg))
 	}
 	os.Exit(runShell(inv))
 }
