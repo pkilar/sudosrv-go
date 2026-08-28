@@ -110,24 +110,35 @@ Add a `force_command` section to `/etc/logsh/logsh.yaml`. The shipped
 ```yaml
 record_users:
   - root            # WITHOUT THIS NOTHING IS RECORDED. See below.
-
-force_command:
-  routes:
-    internal-sftp:
-      exec: [/usr/lib/ssh/sftp-server, -l, INFO]
 ```
 
 `record_users` must name `root` or `0`. This is the single most likely
 misconfiguration and the most silent one: sessions are routed correctly and
 recorded not at all. `logsh -validate` warns about it.
 
-The `sftp-server` path differs by distribution:
+**Most hosts need no routes at all.** Whether an `internal-sftp` route is
+required depends on what `sshd_config` does with sftp, and the shipped
+configuration therefore ships without one:
 
-| Distribution | Path |
+| `Subsystem sftp` says | What you need |
 |---|---|
-| RHEL, Fedora | `/usr/libexec/openssh/sftp-server` |
-| Debian, Ubuntu | `/usr/lib/openssh/sftp-server` |
-| Arch | `/usr/lib/ssh/sftp-server` |
+| a real binary — RHEL, Fedora and Debian all do this by default | nothing; the client sends that path as its command and the default route runs it |
+| `internal-sftp` | a route, because there is no binary to exec |
+
+Do not guess from a table of paths — `logsh -selftest` reads `sshd_config` and
+says which case the host is in, naming the `sftp-server` path that exists there
+if a route is required:
+
+```yaml
+force_command:
+  routes:
+    internal-sftp:
+      exec: [/usr/libexec/openssh/sftp-server, -l, INFO]   # path is per-distro
+```
+
+The binary lives in `/usr/libexec/openssh` on RHEL and Fedora,
+`/usr/lib/openssh` on Debian and Ubuntu, and `/usr/lib/ssh` on Arch — which is
+exactly why the shipped file names none of them.
 
 ## 5. Routing, and why the table is small
 
@@ -195,7 +206,17 @@ one recorder rather than nesting a second.
 
 ```
 ok    force_command: interactive shell for root: /bin/zsh (from /etc/passwd)
-ok    force_command.routes[internal-sftp]: /usr/lib/ssh/sftp-server
+ok    force_command: no internal-sftp route needed (/etc/ssh/sshd_config runs /usr/libexec/openssh/sftp-server)
+```
+
+On a host configured for `internal-sftp` with no route, it fails and gives you
+the entry to paste, with the path that exists on that host:
+
+```
+FAIL  force_command.routes: /etc/ssh/sshd_config says 'Subsystem sftp internal-sftp',
+      which has no binary to exec, and no internal-sftp route is configured
+        internal-sftp:
+          exec: [/usr/libexec/openssh/sftp-server, -l, INFO]
 ```
 
 ## 7. What gets recorded
