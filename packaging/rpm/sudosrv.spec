@@ -15,7 +15,8 @@ Source0:        %{name}-%{version}.tar.gz
 # The shared sysusers and tmpfiles files, staged into SOURCES by build-rpm.sh.
 # They are separate Sources rather than paths inside the tarball because
 # %%sysusers_create_compat embeds the file's CONTENT at build time and needs a
-# path that resolves while the spec is being parsed.
+# path that resolves while the spec is being parsed. (The tmpfiles file is a
+# Source for symmetry; its scriptlet takes the installed path, not this one.)
 Source1:        sudosrv.sysusers
 Source2:        sudosrv.tmpfiles
 
@@ -34,6 +35,11 @@ Requires:       sudo >= 1.9.0
 # image, and without it `systemctl reload sudosrv` -- the documented way to
 # apply a new TLS certificate without dropping connections -- fails.
 Requires:       util-linux
+# The package ships /etc/logrotate.d/sudosrv, and nothing rotated it: logrotate
+# is not in the fedora base image, so on a minimal host the config sat inert
+# while /var/log/sudosrv -- full session transcripts -- grew without bound and
+# nothing reported a problem.
+Requires:       logrotate
 # Fedora's RPM generates "Requires: user(sudosrv)" and "group(sudosrv)" from the
 # %%attr(...,sudosrv,sudosrv) entries in %%files. Nothing provided them, so the
 # package could not be installed at all -- dnf refused the transaction with
@@ -153,7 +159,14 @@ install -D -m 0644 packaging/man/logsh.8 %{buildroot}%{_mandir}/man8/logsh.8
 # An undefined RPM macro is left verbatim, so the scriptlet ran "%%tmpfiles_..."
 # as a shell job spec and died with "fg: no job control", failing the whole
 # transaction after the files were already unpacked.
-%tmpfiles_create %{SOURCE2}
+# %%tmpfiles_create takes a RUNTIME path, unlike %%sysusers_create_compat which
+# embeds the file's content at build time. Passing %%{SOURCE2} therefore baked
+# the builder's own SOURCES directory into the shipped scriptlet, so every
+# installed host ran `systemd-tmpfiles --create /.../rpmbuild/SOURCES/...` on a
+# path that cannot exist there. The macro ends in `|| :`, so it failed silently
+# and the entries were never applied -- masked only because %%files ships both
+# directories with %%attr. Point at the installed file instead.
+%tmpfiles_create %{_tmpfilesdir}/%{name}.conf
 
 %preun
 # Stop and disable the service
@@ -208,6 +221,13 @@ exit 0
 %{_tmpfilesdir}/sudosrv.conf
 %{_mandir}/man8/sudosrv.8*
 %config(noreplace) %{_sysconfdir}/logrotate.d/sudosrv
+# 0700, which rpmlint reports as non-standard-dir-perm, and deliberately so.
+# These hold sudo I/O logs: complete terminal transcripts of privileged
+# sessions, including anything typed while echo was off that the password
+# filter did not catch. The daemon is the only reader, sudoreplay runs as root,
+# and no other account has any business enumerating session directories, whose
+# names alone disclose who ran what and when. Group or world access here would
+# be the packaging equivalent of world-readable /var/log/audit.
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/log/sudosrv
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 

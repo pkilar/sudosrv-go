@@ -90,6 +90,40 @@ jobs:
     - name: golangci-lint
       run: make lint
 
+  # Builds each package format in a clean container and lints the BUILT package,
+  # not the recipe. A recipe that parses proves very little: the three defects
+  # this job was added for -- a logrotate config nothing depended on, a %post
+  # naming the builder's own SOURCES directory, and a log directory logrotate
+  # would have processed as root -- were all invisible until the artefact was
+  # inspected, and all three would have shipped.
+  #
+  # Runs `make lint-packaging-<format>`, the same command a developer runs, for
+  # the same reason the lint job invokes the Makefile rather than an equivalent.
+  #
+  # fail-fast is off so one format's failure still leaves the other two reported;
+  # a broken RPM must not hide a broken .deb. Findings that genuinely do not
+  # apply belong in that format's justified filter file
+  # (packaging/rpm/sudosrv.rpmlintrc, packaging/debian/*.lintian-overrides),
+  # each of which records WHY next to the entry -- never in a widened gate.
+  packaging:
+    runs-on: ubuntu-latest
+    # Each format installs a toolchain and downloads the Go version go.mod asks
+    # for, inside a container that starts empty every run.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [rpm, deb, arch]
+    steps:
+    - uses: actions/checkout@v4
+
+    # No setup-go: the build runs inside the container, on the toolchain that
+    # format's distribution actually ships, which is the thing being tested.
+    # The staging step uses `git archive HEAD`, so this lints the commit under
+    # test -- on a pull request, the merge result.
+    - name: Build and lint the ${{ matrix.format }} package
+      run: make lint-packaging-${{ matrix.format }}
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

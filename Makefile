@@ -60,7 +60,7 @@ LDFLAGS_STRIP = -ldflags="-s -w $(VERSION_X)"
 .DEFAULT_GOAL := help
 
 # Phony targets do not represent files
-.PHONY: lint all build build-logsh build-wiredump install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
+.PHONY: lint lint-packaging all build build-logsh build-wiredump install-logsh build-release build-linux-amd64 build-linux-arm64 release-all build-static-linux-amd64 build-static-linux-arm64 release-static-all proto test deps run clean help rpm deb arch
 
 # Build the application for local architecture
 all: build
@@ -159,6 +159,15 @@ lint:
 	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION)..."
 	$(GOCMD) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
+# Build each package format in a clean container and lint the BUILT package.
+# Linting the recipe only proves it parses; linting the artefact is what catches
+# a dependency nothing declares or a scriptlet naming a build-time path.
+# Lints COMMITTED state -- the build stages from `git archive HEAD`.
+lint-packaging: lint-packaging-rpm lint-packaging-deb lint-packaging-arch
+
+lint-packaging-%:
+	./packaging/lint-packaging.sh $*
+
 # Tidy Go module dependencies
 deps:
 	@echo "Tidying module dependencies..."
@@ -207,6 +216,8 @@ help:
 	@echo "  proto                    Generate Go code from the protobuf definition."
 	@echo "  test                     Run all unit tests."
 	@echo "  lint                     Run golangci-lint (version pinned in go.mod)."
+	@echo "  lint-packaging           Build and lint all three package formats in containers."
+	@echo "  lint-packaging-rpm       Build and lint only the RPM (also -deb, -arch)."
 	@echo "  deps                     Ensure all Go module dependencies are correct."
 	@echo "  run                      Build and run the server. Use 'make run CONFIG=path/to/config.yaml' to specify a config file."
 	@echo "  clean                    Remove all compiled binaries and build cache."
