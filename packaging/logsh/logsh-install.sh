@@ -79,6 +79,8 @@ usage: logsh-install.sh <command> [args]
   enable <user> <name>    set <user>'s shell to the <name> symlink (e.g. lbash)
   disable <user> <shell>  set <user>'s shell back to <shell> (e.g. /bin/bash)
   uninstall               restore shells, then remove symlinks and /etc/shells entries
+                          (--force, or LOGSH_FORCE_UNINSTALL=1, overrides the
+                          sshd reference check)
   check-sshd              exit non-zero if sshd still references logsh-entry;
                           changes nothing (used by the pacman removal hook)
 
@@ -337,8 +339,26 @@ cmd_check_sshd() {
 # removal must never be able to do that, which is why this runs from prerm and
 # not postrm.
 cmd_uninstall() {
+	# LOGSH_FORCE_UNINSTALL is honoured here as well as in check-sshd, because
+	# the hook and this function are two halves of one removal. If an operator
+	# forced past the pre-transaction hook and this still refused, pacman would
+	# ignore the refusal and remove the package anyway -- with no account
+	# restored, which is the very lockout the guard exists to prevent. Forcing
+	# the removal has to force the restore with it.
+	#
+	# Separate `if`s rather than a `&&` list: under `set -e` a trailing && list
+	# that evaluates false becomes the function's exit status and aborts the
+	# caller.
+	_force=0
+	if [ "${1:-}" = "--force" ]; then
+		_force=1
+	fi
+	if [ "${LOGSH_FORCE_UNINSTALL:-}" = 1 ]; then
+		_force=1
+	fi
+
 	_hits="$(entry_in_sshd_config)"
-	if [ -n "$_hits" ] && [ "${1:-}" != "--force" ]; then
+	if [ -n "$_hits" ] && [ "$_force" -eq 0 ]; then
 		report_sshd_refusal "$_hits"
 		exit 1
 	fi
