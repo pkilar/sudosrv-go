@@ -28,7 +28,6 @@ Source2:        sudosrv.tmpfiles
 # builder (mock without --enable-network, koji) must vendor a toolchain.
 BuildRequires:  golang >= 1.21
 BuildRequires:  make
-BuildRequires:  protobuf-compiler
 BuildRequires:  systemd-rpm-macros
 Requires:       sudo >= 1.9.0
 # /bin/kill, used by the unit's ExecReload. Not present in every minimal

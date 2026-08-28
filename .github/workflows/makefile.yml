@@ -64,6 +64,16 @@ jobs:
     - name: Resolve module dependencies
       run: make deps
 
+    # The package recipes no longer regenerate this file; they consume the
+    # committed one, because protoc is absent from every RHEL-family repository
+    # and a build host's protoc is not the version the file was generated with.
+    # That removed an accidental freshness check, so assert it here instead --
+    # this job pins protoc to the version recorded in the file's header.
+    - name: Committed protobuf is current
+      run: |
+        make proto
+        git diff --exit-code -- pkg/sudosrv_proto/sudo_logsrv.pb.go
+
     - name: Build binary
       run: make build
 
