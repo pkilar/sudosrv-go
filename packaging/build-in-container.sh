@@ -210,7 +210,14 @@ if [ -d /site ]; then
 		for _ext in $SITE_REPO_EXT; do
 			_src="/site/$FORMAT/\$_name.\$_ext"
 			[ -f "\$_src" ] || continue
-			_dest="${SITE_REPO_DEST:-\$(basename "\$_src")}"
+			# Prefixed, never the bare source name: a target id is often the
+			# distribution's own repo filename -- fedora.repo, rocky.repo,
+			# ubi.repo all ship in /etc/yum.repos.d -- and copying over one of
+			# those deletes the base repository, after which nothing installs
+			# and the error names a missing package rather than the cause.
+			# Arch is the exception: its destination is fixed, because
+			# pacman.conf includes that exact path.
+			_dest="${SITE_REPO_DEST:-00-site-\$_name.\$_ext}"
 			mkdir -p "$SITE_REPO_DIR"
 			cp "\$_src" "$SITE_REPO_DIR/\$_dest"
 			echo ":: site: \$_name.\$_ext -> $SITE_REPO_DIR/\$_dest"
