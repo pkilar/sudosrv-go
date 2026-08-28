@@ -74,8 +74,7 @@ func runTargets(t *testing.T, args ...string) (string, int) {
 	cmd := exec.Command(abs, args...)
 	out, err := cmd.Output()
 	code := 0
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
 		t.Fatalf("running %s %v: %v", abs, args, err)
@@ -88,7 +87,7 @@ func TestTargetsManifestIsWellFormed(t *testing.T) {
 	formats := map[string]bool{"rpm": true, "deb": true, "arch": true}
 	arches := map[string]bool{"amd64": true, "arm64": true}
 
-	for _, line := range strings.Split(readPackaging(t, targetsManifest), "\n") {
+	for line := range strings.SplitSeq(readPackaging(t, targetsManifest), "\n") {
 		row := strings.TrimSpace(line)
 		if row == "" || strings.HasPrefix(row, "#") {
 			continue
@@ -109,7 +108,7 @@ func TestTargetsManifestIsWellFormed(t *testing.T) {
 		if archList == "" {
 			t.Errorf("target %q declares no arches", id)
 		}
-		for _, a := range strings.Split(archList, ",") {
+		for a := range strings.SplitSeq(archList, ",") {
 			if !arches[a] {
 				t.Errorf("target %q declares unknown arch %q", id, a)
 			}
@@ -221,8 +220,7 @@ func runDriver(t *testing.T, args ...string) (string, string, int) {
 	cmd.Stderr = &stderr
 	err = cmd.Run()
 	code := 0
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
 		t.Fatalf("running %s %v: %v", abs, args, err)

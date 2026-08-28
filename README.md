@@ -335,6 +335,19 @@ make rpm    # RPM package
 make arch   # Arch Linux package (requires makepkg)
 ```
 
+To build for a distribution you are not running — RHEL 9, Ubuntu LTS, Fedora —
+without installing anything on the host:
+
+```bash
+make targets                  # list what can be built
+make build-package-rhel9      # build in a clean RHEL 9 container
+make lint-package-rhel9       # build, then lint the result
+```
+
+Packages are built natively: the container supplies the distribution and your
+machine supplies the architecture. Building aarch64 packages requires an
+aarch64 machine. See [docs/building-packages.md](docs/building-packages.md).
+
 All packages include a systemd service unit, logrotate configuration, and sane defaults.
 
 ## Client Configuration (sudoers)
