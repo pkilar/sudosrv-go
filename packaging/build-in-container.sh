@@ -128,6 +128,10 @@ arch)
 esac
 
 DEST="$OUT/$TARGET/$HOST_ARCH"
+# Start from empty. The lint loop inspects everything in this directory, and it
+# is what CI uploads, so a leftover artifact from an earlier version would be
+# linted as if current and shipped as if fresh.
+rm -rf "$DEST"
 mkdir -p "$DEST"
 
 echo ":: building $TARGET ($FORMAT, $IMAGE) on $HOST_ARCH via $ENGINE"
