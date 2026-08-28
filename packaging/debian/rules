@@ -28,13 +28,10 @@ VERSION_X = -X main.appVersion=$(shell tr -d "[:space:]" < VERSION)
 	dh $@ --with installsysusers
 
 override_dh_auto_configure:
-	# Use the Makefile's proto target rather than invoking protoc directly.
-	# protoc needs protoc-gen-go on PATH, and Debian's protobuf-compiler does not
-	# ship it, so the direct call failed with "protoc-gen-go: program not found"
-	# and the package could not be built at all. The Makefile resolves the plugin
-	# through `go tool`, pinned by the tool directive in go.mod, so the generator
-	# always matches the protobuf runtime this module compiles against.
-	$(MAKE) proto
+	# Deliberately empty. The protobuf Go code is committed and consumed as-is;
+	# regenerating it here needed protoc, and a build host's protoc is not the
+	# one the committed file was generated with. CI asserts the committed file
+	# is current, where the compiler version is pinned.
 
 override_dh_auto_build:
 	# Build the application

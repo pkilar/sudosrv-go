@@ -9,12 +9,19 @@ Maintainer: Paul Kilar <pkilar@gmail.com>
 # and debian/rules sets GOTOOLCHAIN=auto so the distro toolchain fetches the
 # one it needs. That requires network access at build time -- a sealed builder
 # must vendor a toolchain instead.
+# No protobuf-compiler: pkg/sudosrv_proto/sudo_logsrv.pb.go is committed and
+# consumed as-is. Regenerating it here would need protoc to match the version
+# the committed file was produced with, which CI pins and a build host cannot.
 Build-Depends: debhelper-compat (= 13),
-               golang-go (>= 2:1.21~),
-               protobuf-compiler
+# 2:1.24~, not 2:1.21~. go.mod requires Go 1.27 and the build bootstraps it via
+# GOTOOLCHAIN, but that only works from a recent enough Go: 1.24 fetches 1.27,
+# 1.22 fails with "toolchain not available". The old floor claimed a build that
+# does not work, so the failure landed deep inside `go clean` instead of at
+# dependency resolution where it belongs.
+               golang-go (>= 2:1.24~)
 Standards-Version: 4.6.2
-Homepage: https://github.com/pkilar/sudosrv
-Vcs-Git: https://github.com/pkilar/sudosrv.git
+Homepage: https://github.com/pkilar/sudosrv-go
+Vcs-Git: https://github.com/pkilar/sudosrv-go.git
 Rules-Requires-Root: no
 
 Package: logsh

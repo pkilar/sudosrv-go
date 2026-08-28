@@ -11,10 +11,10 @@ pkgver=0.0.0
 pkgrel=1
 pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
 arch=('x86_64' 'aarch64')
-url='https://github.com/pkilar/sudosrv'
+url='https://github.com/pkilar/sudosrv-go'
 license=('Apache-2.0')
 depends=('procps-ng')
-makedepends=('go>=1.27' 'protobuf')
+makedepends=('go>=1.27')
 optdepends=('sudo: sudo client (>= 1.9.0)')
 # !debug: makepkg otherwise emits a sudosrv-debug package, and there is nothing
 # in it -- both binaries are linked with -ldflags="-s -w", so the symbols it
@@ -26,14 +26,10 @@ sha256sums=('SKIP')
 build() {
     cd "${pkgbase}-${pkgver}"
 
-    # Generate protobuf code through the Makefile rather than calling protoc
-    # directly. protoc needs protoc-gen-go on PATH, which a clean build chroot
-    # does not have -- the direct call failed with "protoc-gen-go: program not
-    # found" and build() aborted. The Makefile resolves the plugin via `go
-    # tool`, pinned by the tool directive in go.mod. A build on a developer's
-    # own machine hid this, because the plugin was already in their PATH.
+    # The protobuf Go code is committed and consumed as-is -- see the comment in
+    # debian/rules. GOTOOLCHAIN stays explicit: go.mod asks for 1.27 and some
+    # distributions pin GOTOOLCHAIN=local, which makes the build fail outright.
     export GOTOOLCHAIN=auto
-    make proto
 
     # Tidy dependencies
     go mod tidy
