@@ -5,11 +5,14 @@ package logshell
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The generated pb.go is committed. Regenerating it while building a package
@@ -290,6 +293,56 @@ func TestDriverNeverPassesPlatform(t *testing.T) {
 				t.Errorf("driver references %q outside a comment, which would "+
 					"reintroduce emulation: %s", banned, code)
 			}
+		}
+	}
+}
+
+// One container-build path, not two. The retired script hardcoded a single
+// image per format, which is exactly what the manifest replaces.
+func TestLintPackagingScriptIsRetired(t *testing.T) {
+	if _, err := os.Stat("../../packaging/lint-packaging.sh"); err == nil {
+		t.Error("packaging/lint-packaging.sh still exists; build-in-container.sh " +
+			"replaces it, and keeping both leaves two container-build paths that drift")
+	}
+	mk := readPackaging(t, "../../Makefile")
+	if strings.Contains(mk, "lint-packaging.sh") {
+		t.Error("Makefile still references the retired lint-packaging.sh")
+	}
+	if !strings.Contains(mk, "build-in-container.sh") {
+		t.Error("Makefile should drive builds through build-in-container.sh")
+	}
+}
+
+// CI must derive its matrix from the manifest. A restated list is a list that
+// drifts, and the drift is invisible until a target silently stops being built.
+func TestCIDerivesItsMatrixFromTheManifest(t *testing.T) {
+	body := readPackaging(t, "../../.github/workflows/makefile.yml")
+
+	var wf struct {
+		Jobs map[string]struct {
+			RunsOn   string `yaml:"runs-on"`
+			Strategy struct {
+				FailFast *bool `yaml:"fail-fast"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(body), &wf); err != nil {
+		t.Fatalf("workflow does not parse: %v", err)
+	}
+	job, ok := wf.Jobs["packages"]
+	if !ok {
+		t.Fatal("workflow has no 'packages' job")
+	}
+	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
+		t.Error("packages job must set fail-fast: false, so one distribution's " +
+			"failure cannot hide another's")
+	}
+	if !strings.Contains(body, "targets.sh json") {
+		t.Error("CI must build its matrix from targets.sh, not restate the target list")
+	}
+	for _, id := range []string{"fedora", "rhel9", "debian-stable"} {
+		if strings.Contains(body, "- "+id) {
+			t.Errorf("workflow hardcodes target %q; it must come from the manifest", id)
 		}
 	}
 }
