@@ -14,19 +14,25 @@
 # The build stages from `git archive HEAD`, so it builds COMMITTED state.
 # Commit before running this locally or you will build your previous revision.
 #
+# Behind a firewall, see --site below: internal package repositories, a proxy,
+# and a corporate CA are supplied from a directory outside this repo, because
+# they are site-specific and their hostnames are usually not public.
+#
 # usage: build-in-container.sh <target-id> [--lint] [--out DIR] [--dry-run]
+#                              [--site DIR]
 set -eu
 
 DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(cd -- "$DIR/.." && pwd)
 TARGETS="$DIR/targets.sh"
 
-TARGET="" LINT=0 OUT="$REPO/dist" DRYRUN=0
+TARGET="" LINT=0 OUT="$REPO/dist" DRYRUN=0 SITE="${PKG_SITE_DIR:-}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--lint) LINT=1; shift ;;
 	--out) OUT="$2"; shift 2 ;;
 	--dry-run) DRYRUN=1; shift ;;
+	--site) SITE="$2"; shift 2 ;;
 	-h|--help) sed -n '2,17p' "$0"; exit 0 ;;
 	-*) echo "error: unknown option $1" >&2; exit 2 ;;
 	*)
@@ -65,8 +71,13 @@ fi
 # not require an engine. It runs where one cannot exist -- notably inside a
 # package build, since the Debian recipe and the PKGBUILD both run the test
 # suite, and the tests exercise this path.
+if [ -n "$SITE" ]; then
+	[ -d "$SITE" ] || { echo "error: --site '$SITE' is not a directory" >&2; exit 2; }
+	SITE=$(cd -- "$SITE" && pwd)
+fi
+
 if [ "$DRYRUN" = 1 ]; then
-	echo "target=$TARGET format=$FORMAT image=$IMAGE arch=$HOST_ARCH engine=$ENGINE"
+	echo "target=$TARGET format=$FORMAT image=$IMAGE arch=$HOST_ARCH engine=$ENGINE site=${SITE:-none}"
 	exit 0
 fi
 
@@ -98,6 +109,9 @@ rpm)
 		rpmlint -f packaging/rpm/sudosrv.rpmlintrc "$1"
 	fi
 }'
+	SITE_REPO_DIR='/etc/yum.repos.d'
+	SITE_CA_DIR='/etc/pki/ca-trust/source/anchors'
+	SITE_CA_UPDATE='update-ca-trust'
 	LINTER='rpmlint'
 	LINTCMD='rpmlint_compat'
 	ERRPAT=': E: '
@@ -108,6 +122,9 @@ deb)
 	BUILDCMD='./packaging/debian/build-deb.sh'
 	GLOB='debbuild/*.deb'
 	LINTPRE=''
+	SITE_REPO_DIR='/etc/apt/sources.list.d'
+	SITE_CA_DIR='/usr/local/share/ca-certificates'
+	SITE_CA_UPDATE='update-ca-certificates'
 	LINTER='lintian'
 	LINTCMD='lintian -i --tag-display-limit 0 --fail-on error'
 	ERRPAT='^E: '
@@ -120,6 +137,11 @@ arch)
 	BUILDCMD='chown -R builder /work && su builder -c "./packaging/arch/build-arch.sh"'
 	GLOB='archbuild/*.pkg.tar.*'
 	LINTPRE=''
+	# pacman takes a mirrorlist rather than repo fragments; a site file named
+	# mirrorlist lands where pacman.conf already includes it from.
+	SITE_REPO_DIR='/etc/pacman.d'
+	SITE_CA_DIR='/etc/ca-certificates/trust-source/anchors'
+	SITE_CA_UPDATE='trust extract-compat'
 	LINTER='namcap'
 	LINTCMD='namcap'
 	ERRPAT=' E: '
@@ -153,12 +175,40 @@ if [ "\$IN_ARCH" != "$HOST_ARCH" ]; then
 	exit 1
 fi
 
-$BOOTSTRAP >/tmp/bootstrap.log 2>&1 || { cat /tmp/bootstrap.log; echo "BOOTSTRAP FAILED" >&2; exit 1; }
+# Site configuration, applied before anything touches the network. Order
+# matters: the CA has to be trusted before an HTTPS mirror is contacted, and the
+# mirrors have to be in place before the first install.
+if [ -d /site ]; then
+	# env is sourced, not passed on a command line: a proxy URL may carry
+	# credentials, and a command line is visible in ps and in build logs.
+	if [ -f /site/env ]; then
+		echo ":: site: sourcing /site/env"
+		. /site/env
+		export \$(sed -n 's/^[[:space:]]*\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p' /site/env) 2>/dev/null || true
+	fi
+	if [ -d /site/ca ] && ls /site/ca/*.crt >/dev/null 2>&1; then
+		echo ":: site: installing CA anchors into $SITE_CA_DIR"
+		mkdir -p "$SITE_CA_DIR" && cp /site/ca/*.crt "$SITE_CA_DIR/"
+		$SITE_CA_UPDATE >/dev/null 2>&1 || echo "note: $SITE_CA_UPDATE failed or is unavailable" >&2
+	fi
+	if [ -d /site/$FORMAT ] && [ -n "\$(ls -A /site/$FORMAT 2>/dev/null)" ]; then
+		echo ":: site: installing repository config into $SITE_REPO_DIR"
+		mkdir -p "$SITE_REPO_DIR" && cp -a /site/$FORMAT/. "$SITE_REPO_DIR/"
+	fi
+	# The escape hatch, run last so it can override anything above -- disabling
+	# the distribution's own unreachable mirrors is the usual reason.
+	if [ -x /site/setup.sh ]; then
+		echo ":: site: running setup.sh"
+		/site/setup.sh || { echo "SITE SETUP FAILED" >&2; exit 1; }
+	fi
+fi
+
+{ $BOOTSTRAP ; } >/tmp/bootstrap.log 2>&1 || { cat /tmp/bootstrap.log 2>/dev/null; echo "BOOTSTRAP FAILED" >&2; exit 1; }
 mkdir -p /work && cp -a /src/. /work/ && cd /work
 git config --global --add safe.directory /work 2>/dev/null || true
 
-$BUILDDEP >/tmp/builddep.log 2>&1 || { cat /tmp/builddep.log; echo "BUILD-DEP RESOLUTION FAILED" >&2; exit 1; }
-$BUILDCMD >/tmp/build.log 2>&1 || { cat /tmp/build.log; echo "BUILD FAILED" >&2; exit 1; }
+{ $BUILDDEP ; } >/tmp/builddep.log 2>&1 || { cat /tmp/builddep.log 2>/dev/null; echo "BUILD-DEP RESOLUTION FAILED" >&2; exit 1; }
+{ $BUILDCMD ; } >/tmp/build.log 2>&1 || { cat /tmp/build.log 2>/dev/null; echo "BUILD FAILED" >&2; exit 1; }
 
 n=0
 for f in $GLOB; do
@@ -191,6 +241,23 @@ fi
 EOF
 )
 
-"$ENGINE" run --rm -v "$REPO":/src:ro -v "$DEST":/out "$IMAGE" sh -c "$SCRIPT"
+# Proxy variables are forwarded by NAME, never by value: `-e VAR` takes the
+# value from this process's environment, so a proxy URL carrying credentials
+# never appears in a command line, in ps output, or in a build log.
+ENV_ARGS=""
+for v in http_proxy https_proxy ftp_proxy no_proxy \
+         HTTP_PROXY HTTPS_PROXY FTP_PROXY NO_PROXY \
+         GOPROXY GOSUMDB GONOSUMDB GOPRIVATE GOFLAGS; do
+	eval "val=\${$v:-}"
+	[ -n "$val" ] && ENV_ARGS="$ENV_ARGS -e $v"
+done
+
+SITE_ARGS=""
+[ -n "$SITE" ] && SITE_ARGS="-v $SITE:/site:ro"
+
+# Unquoted on purpose: both are lists of separate arguments, not single words.
+# shellcheck disable=SC2086
+"$ENGINE" run --rm $ENV_ARGS $SITE_ARGS \
+	-v "$REPO":/src:ro -v "$DEST":/out "$IMAGE" sh -c "$SCRIPT"
 echo ":: artifacts in $DEST"
 ls -1 "$DEST" | sed 's/^/   /'

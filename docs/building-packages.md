@@ -77,6 +77,64 @@ Build dependencies are not listed anywhere in the tooling: they are resolved
 from the recipe's own declarations (`dnf builddep`, `mk-build-deps`,
 `makepkg -s`). That is what lets a new row work without editing the driver.
 
+## Behind a firewall: internal repositories, a proxy, and a corporate CA
+
+The build reaches the network three times: pulling the image, installing build
+dependencies from the distribution's mirrors, and fetching Go modules and the
+toolchain. On a restricted network all three need redirecting.
+
+**The image** comes from the `image` column in `packaging/targets.tsv` — point
+those rows at an internal registry mirror and nothing else changes.
+
+**Everything else** comes from a *site directory*, passed with `--site DIR` or
+`PKG_SITE_DIR`. It lives outside the repository deliberately: internal mirror
+hostnames and proxy URLs are site-specific and usually not public, so they must
+not be committed.
+
+```
+site/
+├── env              # sourced in the container before anything hits the network
+├── ca/*.crt         # extra trust anchors, installed and trusted per format
+├── rpm/*.repo       # copied to /etc/yum.repos.d
+├── deb/*.list       # copied to /etc/apt/sources.list.d  (or *.sources)
+├── arch/mirrorlist  # copied to /etc/pacman.d
+└── setup.sh         # optional, runs last, can override all of the above
+```
+
+```bash
+./packaging/build-in-container.sh rhel9 --lint --site ~/acme-site
+PKG_SITE_DIR=~/acme-site make lint-package-rhel9
+```
+
+**Proxy variables are forwarded automatically** when set in your shell —
+`http_proxy`, `https_proxy`, `ftp_proxy`, `no_proxy`, their uppercase forms, and
+`GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GOFLAGS`. They are passed **by
+name, never by value**, so a proxy URL carrying credentials never appears in a
+command line, in `ps`, or in a build log. Put anything else in `site/env`, which
+is sourced rather than passed as arguments for the same reason.
+
+Order inside the container is fixed and matters: `env` is sourced, then the CA
+anchors are installed and trusted, then the repository files are placed, then
+`setup.sh` runs — the CA has to be trusted before an HTTPS mirror is contacted,
+and the mirrors have to exist before the first install.
+
+**Disabling the distribution's own mirrors** is `setup.sh`'s job, since it runs
+last. Remove them by name rather than by glob, or the site files placed a moment
+earlier go with them:
+
+```sh
+#!/bin/sh
+set -eu
+# RHEL/Fedora: keep the site repo, drop the unreachable defaults.
+rm -f /etc/yum.repos.d/ubi.repo /etc/yum.repos.d/fedora*.repo
+# Debian: replace the default sources outright.
+: > /etc/apt/sources.list
+```
+
+If TLS is being intercepted, the corporate CA in `site/ca/` is not optional —
+without it every HTTPS fetch fails with a certificate error that looks like a
+network outage.
+
 ## Gotchas, each already paid for once
 
 **Builds stage from `git archive HEAD`.** An uncommitted change is not in the
