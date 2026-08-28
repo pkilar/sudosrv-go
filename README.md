@@ -335,7 +335,7 @@ make rpm    # RPM package
 make arch   # Arch Linux package (requires makepkg)
 ```
 
-To build for a distribution you are not running — RHEL 9, Ubuntu LTS, Fedora —
+To build for a distribution you are not running — RHEL 9, RHEL 10, Fedora —
 without installing anything on the host:
 
 ```bash

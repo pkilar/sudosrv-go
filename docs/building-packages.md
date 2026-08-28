@@ -92,8 +92,9 @@ toolchain instead.
 
 **The distribution's Go must be new enough to bootstrap the one `go.mod` asks
 for.** `GOTOOLCHAIN=auto` fetches Go 1.27, but only from a recent enough Go:
-1.24 can, 1.22 fails with `toolchain not available`. That is why there is no
-`ubuntu-lts` row — Ubuntu 24.04 LTS ships Go 1.22. The recipes' declared floors
+1.24 can, 1.22 fails with `toolchain not available`. Check this before adding a
+target: a distribution whose Go is older than 1.24 cannot build this at all,
+which is what rules out Ubuntu 24.04 LTS. The recipes' declared floors
 (`golang-go (>= 2:1.24~)`, `BuildRequires: golang >= 1.24`) exist so this fails
 at dependency resolution, with a name and a version, rather than deep inside
 `go clean` where the message says nothing about the cause.
