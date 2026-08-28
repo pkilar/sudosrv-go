@@ -39,6 +39,13 @@ REPO=$(cd -- "$(dirname -- "$0")/.." && pwd)
 # the job, warnings are printed for information. Findings that genuinely do not
 # apply belong in that format's justified filter file (sudosrv.rpmlintrc,
 # debian/*.lintian-overrides), not in a widened gate here.
+#
+# Each gate checks the linter's EXIT STATUS as well as its output, and asserts
+# that at least one package was actually inspected. Grepping output alone is
+# not a gate: an earlier revision passed `-f` to an rpmlint that wanted `-r`,
+# so the linter died with a usage error on every package and the job reported a
+# clean pass, because "unrecognized arguments" does not match ": E: ". A check
+# that cannot fail is not a check.
 case "$FORMAT" in
 rpm)
 	IMAGE=fedora:latest
@@ -48,13 +55,19 @@ rpm)
 	    make git rpmlint >/dev/null
 	mkdir -p /work && cp -a /src/. /work/ && cd /work
 	git config --global --add safe.directory /work
-	./packaging/rpm/build-rpm.sh >/dev/null
-	rc=0
+	if ! ./packaging/rpm/build-rpm.sh >/tmp/build.log 2>&1; then
+		cat /tmp/build.log; echo "BUILD FAILED" >&2; exit 1
+	fi
+	rc=0; n=0
 	for f in rpmbuild/RPMS/*/*.rpm rpmbuild/SRPMS/*.rpm; do
+		[ -e "$f" ] || continue
+		n=$((n + 1))
 		echo "===== $(basename "$f") ====="
-		rpmlint -f packaging/rpm/sudosrv.rpmlintrc "$f" 2>&1 | tee /tmp/out || true
+		if rpmlint -r packaging/rpm/sudosrv.rpmlintrc "$f" >/tmp/out 2>&1; then :; else rc=1; fi
+		cat /tmp/out
 		if grep -qE ": E: " /tmp/out; then rc=1; fi
 	done
+	if [ "$n" -eq 0 ]; then echo "no packages were linted" >&2; exit 1; fi
 	exit $rc
 	'
 	;;
@@ -68,12 +81,17 @@ deb)
 	    git ca-certificates lintian >/dev/null
 	mkdir -p /work && cp -a /src/. /work/ && cd /work
 	git config --global --add safe.directory /work
-	./packaging/debian/build-deb.sh >/dev/null
-	rc=0
+	if ! ./packaging/debian/build-deb.sh >/tmp/build.log 2>&1; then
+		cat /tmp/build.log; echo "BUILD FAILED" >&2; exit 1
+	fi
+	rc=0; n=0
 	for f in debbuild/*.deb; do
+		[ -e "$f" ] || continue
+		n=$((n + 1))
 		echo "===== $(basename "$f") ====="
-		lintian -i --tag-display-limit 0 --fail-on error "$f" || rc=1
+		if lintian -i --tag-display-limit 0 --fail-on error "$f"; then :; else rc=1; fi
 	done
+	if [ "$n" -eq 0 ]; then echo "no packages were linted" >&2; exit 1; fi
 	exit $rc
 	'
 	;;
@@ -89,13 +107,21 @@ arch)
 	cd /work
 	git config --global --add safe.directory /work
 	su builder -c "git config --global --add safe.directory /work"
-	su builder -c "./packaging/arch/build-arch.sh" >/dev/null
-	rc=0
+	if ! su builder -c "./packaging/arch/build-arch.sh" >/tmp/build.log 2>&1; then
+		cat /tmp/build.log; echo "BUILD FAILED" >&2; exit 1
+	fi
+	# namcap exits 0 whatever it finds, so its output is the only signal --
+	# which is exactly why the "was anything linted at all" check below matters.
+	rc=0; n=0
 	for f in archbuild/*.pkg.tar.*; do
+		[ -e "$f" ] || continue
+		n=$((n + 1))
 		echo "===== $(basename "$f") ====="
-		namcap "$f" 2>&1 | tee /tmp/out || true
+		namcap "$f" >/tmp/out 2>&1 || true
+		cat /tmp/out
 		if grep -qE " E: " /tmp/out; then rc=1; fi
 	done
+	if [ "$n" -eq 0 ]; then echo "no packages were linted" >&2; exit 1; fi
 	exit $rc
 	'
 	;;
