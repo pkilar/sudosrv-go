@@ -5,39 +5,45 @@
 # reason next to it. Anything without a reason is a bug to fix, not to filter --
 # the logrotate dependency, the tmpfiles path and the user-writable log
 # directory were all found by this linter and were fixed rather than silenced.
+#
+# Format note: this is the legacy addFilter() form, deliberately. rpmlint 2.8
+# loads a TOML `Filters = [...]` rpmlintrc given with -r and then ignores it --
+# it reports the file as loaded and filters nothing, which looks exactly like a
+# clean package. Verified by comparing filtered counts between the two forms.
 
-Filters = [
-    # Both binaries are built CGO-free, so the Go runtime links statically.
-    # That is a project-wide property, not a packaging shortcut: the module has
-    # no cgo dependencies at all, which is what keeps cross-compilation clean.
-    # For logsh the claim is stronger still -- it is a login shell, so a dynamic
-    # linker that cannot resolve it does not degrade the login, it PREVENTS the
-    # login for every recorded account on the host at once, with no way back in
-    # over ssh.
-    "statically-linked-binary",
+# Both binaries are built CGO-free, so the Go runtime links statically. That is
+# a project-wide property, not a packaging shortcut: the module has no cgo
+# dependencies at all, which is what keeps cross-compilation clean. For logsh
+# the claim is stronger still -- it is a login shell, so a dynamic linker that
+# cannot resolve it does not degrade the login, it PREVENTS the login for every
+# recorded account on the host at once, with no way back in over ssh.
+addFilter("statically-linked-binary")
 
-    # Go does not emit PIE by default for static builds, and forcing it would
-    # reintroduce the dynamic-linking failure mode above. This reflects the
-    # language's build output, not the packaging.
-    "position-independent-executable-suggested",
+# Go does not emit PIE for these static builds, and forcing it would reintroduce
+# the dynamic-linking failure mode above. This reflects the language's build
+# output, not the packaging.
+addFilter("position-independent-executable-suggested")
 
-    # Project nouns the dictionary does not carry: sudosrv, sudoreplay, logsrvd,
-    # lbash, lzsh, sbin, symlinks, md.
-    "spelling-error",
+# Project nouns the dictionary does not carry: sudosrv, sudoreplay, logsrvd,
+# lbash, lzsh, sbin, symlinks, md.
+addFilter("spelling-error")
 
-    # The daemon runs as its own service account, created from the shipped
-    # sysusers.d file. A dedicated uid/gid is the point.
-    "non-standard-uid",
-    "non-standard-gid",
+# The daemon runs as its own service account, created from the shipped
+# sysusers.d file. A dedicated uid/gid is the point.
+addFilter("non-standard-uid")
+addFilter("non-standard-gid")
 
-    # 0700 on /var/log/sudosrv and /var/spool/sudosrv-cache is deliberate and is
-    # justified at the %files entry in sudosrv.spec: these hold complete
-    # terminal transcripts of privileged sessions, and the directory names alone
-    # disclose who ran what and when.
-    "non-standard-dir-perm",
+# 0700 on /var/log/sudosrv and /var/spool/sudosrv-cache is deliberate, and is
+# justified at the %files entry in sudosrv.spec: these hold complete terminal
+# transcripts of privileged sessions, and the directory names alone disclose who
+# ran what and when.
+addFilter("non-standard-dir-perm")
 
-    # Source0 names a locally staged tarball, not a downloadable URL. The
-    # version rendered here is the spec's 0.0.0 placeholder, because rpmlint
-    # parses the spec without the rpm_version macro build-rpm.sh injects.
-    "invalid-url Source0",
-]
+# Source0 names a locally staged tarball, not a downloadable URL. The version
+# rendered is the spec's 0.0.0 placeholder, because rpmlint parses the spec
+# without the rpm_version macro that build-rpm.sh injects.
+addFilter("invalid-url Source0")
+
+# NOT filtered, deliberately: no-%check-section is a real gap. The PKGBUILD runs
+# the test suite in check(); this spec runs no tests at build time. It is a
+# warning, so it does not fail the gate, but it should stay visible.

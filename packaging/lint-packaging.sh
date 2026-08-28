@@ -63,7 +63,12 @@ rpm)
 		[ -e "$f" ] || continue
 		n=$((n + 1))
 		echo "===== $(basename "$f") ====="
-		if rpmlint -r packaging/rpm/sudosrv.rpmlintrc "$f" >/tmp/out 2>&1; then :; else rc=1; fi
+		# --ignore-unused-rpmlintrc: one rpmlintrc covers both subpackages, so a
+		# filter that applies to sudosrv (non-standard-dir-perm, say) is
+		# necessarily unused when linting logsh -- which rpmlint reports as an
+		# ERROR and would fail the gate for no defect.
+		if rpmlint --ignore-unused-rpmlintrc -r packaging/rpm/sudosrv.rpmlintrc \
+		    "$f" >/tmp/out 2>&1; then :; else rc=1; fi
 		cat /tmp/out
 		if grep -qE ": E: " /tmp/out; then rc=1; fi
 	done
