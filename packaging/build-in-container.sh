@@ -58,12 +58,21 @@ fi
 
 if command -v podman >/dev/null 2>&1; then ENGINE=podman
 elif command -v docker >/dev/null 2>&1; then ENGINE=docker
-else echo "error: neither podman nor docker is available" >&2; exit 2
+else ENGINE=none
 fi
 
+# --dry-run resolves the target and reports; it starts no container, so it must
+# not require an engine. It runs where one cannot exist -- notably inside a
+# package build, since the Debian recipe and the PKGBUILD both run the test
+# suite, and the tests exercise this path.
 if [ "$DRYRUN" = 1 ]; then
 	echo "target=$TARGET format=$FORMAT image=$IMAGE arch=$HOST_ARCH engine=$ENGINE"
 	exit 0
+fi
+
+if [ "$ENGINE" = none ]; then
+	echo "error: neither podman nor docker is available" >&2
+	exit 2
 fi
 
 case "$FORMAT" in
