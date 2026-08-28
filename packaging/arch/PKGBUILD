@@ -11,7 +11,7 @@ pkgver=0.0.0
 pkgrel=1
 pkgdesc='Go-based sudo I/O log server implementing the sudo_logsrv.proto protocol'
 arch=('x86_64' 'aarch64')
-url='https://github.com/pkilar/sudosrv'
+url='https://github.com/pkilar/sudosrv-go'
 license=('Apache-2.0')
 depends=('procps-ng')
 makedepends=('go>=1.27')

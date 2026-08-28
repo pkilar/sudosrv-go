@@ -68,7 +68,11 @@ fi
 
 case "$FORMAT" in
 rpm)
-	BOOTSTRAP='dnf install -y -q rpm-build make git rpmlint "dnf-command(builddep)"'
+	# rpmlint is installed separately and tolerated as missing: UBI 10 ships no
+	# rpmlint in its repositories at all. A distribution's tooling gap must not
+	# make the target unbuildable -- but it must not read as a clean lint
+	# either, which is what the LINT UNAVAILABLE notice below is for.
+	BOOTSTRAP='dnf install -y -q rpm-build make git "dnf-command(builddep)" && { dnf install -y -q rpmlint || echo "note: rpmlint unavailable"; }'
 	BUILDDEP='dnf builddep -y -q packaging/rpm/sudosrv.spec'
 	BUILDCMD='./packaging/rpm/build-rpm.sh'
 	GLOB='rpmbuild/RPMS/*/*.rpm rpmbuild/SRPMS/*.rpm'
@@ -85,6 +89,7 @@ rpm)
 		rpmlint -f packaging/rpm/sudosrv.rpmlintrc "$1"
 	fi
 }'
+	LINTER='rpmlint'
 	LINTCMD='rpmlint_compat'
 	ERRPAT=': E: '
 	;;
@@ -94,6 +99,7 @@ deb)
 	BUILDCMD='./packaging/debian/build-deb.sh'
 	GLOB='debbuild/*.deb'
 	LINTPRE=''
+	LINTER='lintian'
 	LINTCMD='lintian -i --tag-display-limit 0 --fail-on error'
 	ERRPAT='^E: '
 	;;
@@ -105,6 +111,7 @@ arch)
 	BUILDCMD='chown -R builder /work && su builder -c "./packaging/arch/build-arch.sh"'
 	GLOB='archbuild/*.pkg.tar.*'
 	LINTPRE=''
+	LINTER='namcap'
 	LINTCMD='namcap'
 	ERRPAT=' E: '
 	;;
@@ -151,6 +158,13 @@ echo ":: produced \$n artifact(s)"
 
 if [ "$LINT" = 1 ]; then
 $LINTPRE
+	# A linter this distribution does not ship is a coverage gap, not a build
+	# failure -- but it must be stated, never implied by a silent pass.
+	if ! command -v $LINTER >/dev/null 2>&1; then
+		echo "!! LINT UNAVAILABLE: $LINTER is not packaged for this distribution." >&2
+		echo "!! The packages were BUILT but NOT LINTED." >&2
+		exit 0
+	fi
 	rc=0
 	for f in /out/*; do
 		[ -e "\$f" ] || continue

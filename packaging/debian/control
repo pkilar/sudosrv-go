@@ -15,8 +15,8 @@ Maintainer: Paul Kilar <pkilar@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                golang-go (>= 2:1.21~)
 Standards-Version: 4.6.2
-Homepage: https://github.com/pkilar/sudosrv
-Vcs-Git: https://github.com/pkilar/sudosrv.git
+Homepage: https://github.com/pkilar/sudosrv-go
+Vcs-Git: https://github.com/pkilar/sudosrv-go.git
 Rules-Requires-Root: no
 
 Package: logsh

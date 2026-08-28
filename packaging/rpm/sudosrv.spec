@@ -10,7 +10,7 @@ Release:        1%{?dist}
 Summary:        Go-based sudo I/O log server
 
 License:        Apache-2.0
-URL:            https://github.com/example/sudosrv
+URL:            https://github.com/pkilar/sudosrv-go
 Source0:        %{name}-%{version}.tar.gz
 # The shared sysusers and tmpfiles files, staged into SOURCES by build-rpm.sh.
 # They are separate Sources rather than paths inside the tarball because
