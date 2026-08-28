@@ -302,7 +302,13 @@ entry_in_sshd_config() {
 report_sshd_refusal() {
 	printf 'logsh-install: refusing to uninstall: sshd still references logsh-entry\n' >&2
 	printf '%s\n' "$1" >&2
-	printf 'logsh-install: remove the Match block and reload sshd first, or pass --force\n' >&2
+	# Both overrides are named because the caller decides which is reachable:
+	# --force works for a direct invocation and from prerm/%preun, but pacman
+	# offers no way to pass a flag through to a hook, so on Arch the environment
+	# variable is the only one an operator can actually use.
+	printf 'logsh-install: remove the reference and reload sshd first, or override with\n' >&2
+	printf '  --force                       (direct invocation)\n' >&2
+	printf '  LOGSH_FORCE_UNINSTALL=1       (e.g. sudo -E LOGSH_FORCE_UNINSTALL=1 pacman -R logsh)\n' >&2
 }
 
 # cmd_check_sshd reports whether sshd still references the entry symlink and
