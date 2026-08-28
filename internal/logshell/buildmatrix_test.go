@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -199,6 +200,96 @@ func TestTargetsJSONOmitsUnsupportedPairs(t *testing.T) {
 	for _, r := range m.Include {
 		if r.ID == "arch" {
 			t.Error("arm64 matrix must not include the amd64-only arch target")
+		}
+	}
+}
+
+const driverScript = "../../packaging/build-in-container.sh"
+
+func runDriver(t *testing.T, args ...string) (string, string, int) {
+	t.Helper()
+	abs, err := filepath.Abs(driverScript)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", driverScript, err)
+	}
+	cmd := exec.Command(abs, args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running %s %v: %v", abs, args, err)
+	}
+	return stdout.String(), stderr.String(), code
+}
+
+func TestDriverRejectsUnknownTarget(t *testing.T) {
+	_, errOut, code := runDriver(t, "no-such-target", "--dry-run")
+	if code != 2 {
+		t.Errorf("unknown target must exit 2, got %d", code)
+	}
+	if !strings.Contains(errOut, "no-such-target") {
+		t.Errorf("error should name the target, got %q", errOut)
+	}
+}
+
+// Refusing an impossible pair is what keeps "we never emulate" true: the only
+// other way to satisfy the request would be to emulate it.
+func TestDriverRefusesUnsupportedHostArch(t *testing.T) {
+	out, errOut, code := runDriver(t, "arch", "--dry-run")
+	host := runtime.GOARCH
+	if host == "amd64" {
+		if code != 0 {
+			t.Errorf("arch/amd64 is supported, expected exit 0, got %d (%s)", code, errOut)
+		}
+		if !strings.Contains(out, "target=arch") {
+			t.Errorf("dry run should name the target, got %q", out)
+		}
+		return
+	}
+	if code != 2 {
+		t.Errorf("arch on %s must exit 2, got %d", host, code)
+	}
+	if !strings.Contains(errOut, "amd64") {
+		t.Errorf("refusal should say which arches are supported, got %q", errOut)
+	}
+}
+
+func TestDriverDryRunResolvesImage(t *testing.T) {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skipf("no targets declared for %s", runtime.GOARCH)
+	}
+	out, errOut, code := runDriver(t, "rhel9", "--dry-run")
+	if code != 0 {
+		t.Fatalf("dry run exited %d: %s", code, errOut)
+	}
+	for _, want := range []string{
+		"target=rhel9", "format=rpm", "image=registry.access.redhat.com/ubi9/ubi",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run missing %q; got %q", want, out)
+		}
+	}
+}
+
+// The driver must never hand an architecture to the container engine: doing so
+// is how a build silently starts emulating.
+func TestDriverNeverPassesPlatform(t *testing.T) {
+	body := readPackaging(t, "../../packaging/build-in-container.sh")
+	for _, banned := range []string{"--platform", "--arch", "qemu"} {
+		for line := range strings.SplitSeq(body, "\n") {
+			code := strings.TrimSpace(line)
+			if strings.HasPrefix(code, "#") {
+				continue
+			}
+			if strings.Contains(code, banned) {
+				t.Errorf("driver references %q outside a comment, which would "+
+					"reintroduce emulation: %s", banned, code)
+			}
 		}
 	}
 }

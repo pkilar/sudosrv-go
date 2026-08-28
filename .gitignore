@@ -38,6 +38,11 @@ test.coverprofile
 /debbuild/
 /archbuild/
 
+# Packages built by packaging/build-in-container.sh, laid out as
+# dist/<target>/<arch>/ so artifacts from an x86_64 and an aarch64 runner merge
+# without colliding.
+dist/
+
 # OS-specific files
 .DS_Store
 Thumbs.db
