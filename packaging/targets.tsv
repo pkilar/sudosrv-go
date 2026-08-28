@@ -1,0 +1,14 @@
+# Build targets. The container supplies the distribution; the machine supplies
+# the architecture. Nothing here is emulated or cross-compiled, so a row is
+# buildable only on hardware of a listed architecture.
+#
+# The arches column is load-bearing: the official archlinux image publishes
+# amd64 only, so without it CI would schedule an Arch leg onto an ARM runner.
+#
+# id            format  image                                    arches
+fedora          rpm     fedora:latest                            amd64,arm64
+rhel9           rpm     registry.access.redhat.com/ubi9/ubi      amd64,arm64
+rhel10          rpm     registry.access.redhat.com/ubi10/ubi     amd64,arm64
+debian-stable   deb     debian:stable                            amd64,arm64
+ubuntu-lts      deb     ubuntu:24.04                             amd64,arm64
+arch            arch    archlinux:latest                         amd64
