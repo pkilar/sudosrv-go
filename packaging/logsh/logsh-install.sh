@@ -79,6 +79,10 @@ usage: logsh-install.sh <command> [args]
   enable <user> <name>    set <user>'s shell to the <name> symlink (e.g. lbash)
   disable <user> <shell>  set <user>'s shell back to <shell> (e.g. /bin/bash)
   uninstall               restore shells, then remove symlinks and /etc/shells entries
+                          (--force, or LOGSH_FORCE_UNINSTALL=1, overrides the
+                          sshd reference check)
+  check-sshd              exit non-zero if sshd still references logsh-entry;
+                          changes nothing (used by the pacman removal hook)
 
 Environment: ROOT, SBINDIR, CONFDIR, SHELLS_FILE, PASSWD_FILE
 USAGE
@@ -293,6 +297,47 @@ entry_in_sshd_config() {
 	return 0
 }
 
+# report_sshd_refusal prints why a removal is being refused. Shared so the
+# uninstall path and the pre-transaction check cannot drift apart in wording.
+report_sshd_refusal() {
+	printf 'logsh-install: refusing to uninstall: sshd still references logsh-entry\n' >&2
+	printf '%s\n' "$1" >&2
+	# Both overrides are named because the caller decides which is reachable:
+	# --force works for a direct invocation and from prerm/%preun, but pacman
+	# offers no way to pass a flag through to a hook, so on Arch the environment
+	# variable is the only one an operator can actually use.
+	printf 'logsh-install: remove the reference and reload sshd first, or override with\n' >&2
+	printf '  --force                       (direct invocation)\n' >&2
+	printf '  LOGSH_FORCE_UNINSTALL=1       (e.g. sudo -E LOGSH_FORCE_UNINSTALL=1 pacman -R logsh)\n' >&2
+}
+
+# cmd_check_sshd reports whether sshd still references the entry symlink and
+# exits non-zero if it does. It changes nothing.
+#
+# This exists because pacman does not honour a failing pre_remove. dpkg aborts
+# on a failing prerm and rpm aborts on a failing %preun, so on those two the
+# refusal inside cmd_uninstall is the whole guard. pacman prints the error,
+# removes the package anyway, and still exits 0 -- which leaves every switched
+# account pointing at a symlink that no longer exists. The only pacman
+# mechanism that can abort a transaction is a PreTransaction hook with
+# AbortOnFail, and such a hook must not restore accounts, because the
+# transaction it is vetting may still be cancelled. Hence a check that is pure.
+#
+# LOGSH_FORCE_UNINSTALL is the override for that path, since pacman offers no
+# way to pass --force through to a hook. It matters because the guard treats an
+# unreadable config as a reference: without an escape hatch, a host whose
+# sshd_config cannot be read would refuse removal forever.
+cmd_check_sshd() {
+	if [ "${LOGSH_FORCE_UNINSTALL:-}" = 1 ]; then
+		return 0
+	fi
+	_hits="$(entry_in_sshd_config)"
+	if [ -n "$_hits" ]; then
+		report_sshd_refusal "$_hits"
+		exit 1
+	fi
+}
+
 # cmd_uninstall restores every account BEFORE removing anything.
 #
 # The other order is a fleet-wide lockout: delete the symlinks first and every
@@ -300,11 +345,27 @@ entry_in_sshd_config() {
 # removal must never be able to do that, which is why this runs from prerm and
 # not postrm.
 cmd_uninstall() {
+	# LOGSH_FORCE_UNINSTALL is honoured here as well as in check-sshd, because
+	# the hook and this function are two halves of one removal. If an operator
+	# forced past the pre-transaction hook and this still refused, pacman would
+	# ignore the refusal and remove the package anyway -- with no account
+	# restored, which is the very lockout the guard exists to prevent. Forcing
+	# the removal has to force the restore with it.
+	#
+	# Separate `if`s rather than a `&&` list: under `set -e` a trailing && list
+	# that evaluates false becomes the function's exit status and aborts the
+	# caller.
+	_force=0
+	if [ "${1:-}" = "--force" ]; then
+		_force=1
+	fi
+	if [ "${LOGSH_FORCE_UNINSTALL:-}" = 1 ]; then
+		_force=1
+	fi
+
 	_hits="$(entry_in_sshd_config)"
-	if [ -n "$_hits" ] && [ "${1:-}" != "--force" ]; then
-		printf 'logsh-install: refusing to uninstall: sshd still references logsh-entry\n' >&2
-		printf '%s\n' "$_hits" >&2
-		printf 'logsh-install: remove the Match block and reload sshd first, or pass --force\n' >&2
+	if [ -n "$_hits" ] && [ "$_force" -eq 0 ]; then
+		report_sshd_refusal "$_hits"
 		exit 1
 	fi
 
@@ -336,5 +397,6 @@ case "$command" in
 	enable)    cmd_enable "$@" ;;
 	disable)   cmd_disable "$@" ;;
 	uninstall) cmd_uninstall "$@" ;;
+	check-sshd) cmd_check_sshd "$@" ;;
 	*)         usage ;;
 esac

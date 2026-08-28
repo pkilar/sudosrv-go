@@ -135,6 +135,8 @@ install -D -m 0755 packaging/logsh/logsh-install.sh \
 install -D -m 0644 examples/logsh.yaml %{buildroot}%{_sysconfdir}/logsh/logsh.yaml
 install -D -m 0644 docs/logsh-deployment.md \
     %{buildroot}%{_docdir}/logsh/logsh-deployment.md
+install -D -m 0644 docs/logsh-forcecommand.md \
+    %{buildroot}%{_docdir}/logsh/logsh-forcecommand.md
 install -D -m 0644 packaging/man/logsh.8 %{buildroot}%{_mandir}/man8/logsh.8
 
 %pre
@@ -195,6 +197,7 @@ exit 0
 %config(noreplace) %{_sysconfdir}/logsh/logsh.yaml
 %dir %{_docdir}/logsh
 %doc %{_docdir}/logsh/logsh-deployment.md
+%doc %{_docdir}/logsh/logsh-forcecommand.md
 %{_mandir}/man8/logsh.8*
 
 %files

@@ -87,6 +87,8 @@ override_dh_auto_install:
 		$(CURDIR)/debian/logsh/etc/logsh/logsh.yaml
 	install -D -m 0644 docs/logsh-deployment.md \
 		$(CURDIR)/debian/logsh/usr/share/doc/logsh/logsh-deployment.md
+	install -D -m 0644 docs/logsh-forcecommand.md \
+		$(CURDIR)/debian/logsh/usr/share/doc/logsh/logsh-forcecommand.md
 
 	# The symlinks and the /etc/shells entries are deliberately NOT shipped as
 	# package files. /etc/shells is a shared file no package owns, so it has to
