@@ -1,4 +1,10 @@
 /var/log/sudosrv/*.log {
+    # Rotate as the account that owns the directory rather than as root.
+    # /var/log/sudosrv is sudosrv:sudosrv 0700, so without this logrotate would
+    # be operating as root inside a directory an unprivileged account controls
+    # -- the setup logrotate's own documentation warns about, and what rpmlint
+    # reports as logrotate-user-writable-log-dir.
+    su sudosrv sudosrv
     daily
     missingok
     rotate 30

@@ -63,7 +63,10 @@ package_sudosrv() {
     # without it `systemctl reload sudosrv` fails.
     #
     # No glibc: both binaries are built CGO-free and link nothing dynamically.
-    depends=('procps-ng')
+    # logrotate is a hard dependency, not an optdepend: the package ships
+    # /etc/logrotate.d/sudosrv, and without something to run it /var/log/sudosrv
+    # -- full session transcripts -- grows without bound and nothing says so.
+    depends=('procps-ng' 'logrotate')
     optdepends=('sudo: sudo client (>= 1.9.0)'
                 'logsh: recording login shell that reports to this server')
     backup=('etc/sudosrv/config.yaml'

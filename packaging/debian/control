@@ -47,7 +47,7 @@ Architecture: any
 # procps provides /bin/kill, which the unit's ExecReload runs. Without it
 # `systemctl reload sudosrv` -- the documented way to apply a renewed TLS
 # certificate without dropping connections -- fails.
-Depends: ${shlibs:Depends}, ${misc:Depends}, procps
+Depends: ${shlibs:Depends}, ${misc:Depends}, procps, logrotate
 Recommends: sudo (>= 1.9.0)
 Description: sudo I/O log server
  A Go-based sudo I/O log server that implements the sudo_logsrv.proto
