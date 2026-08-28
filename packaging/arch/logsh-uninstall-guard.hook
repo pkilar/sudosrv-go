@@ -1,0 +1,28 @@
+# Refuse to remove logsh while sshd's configuration still names logsh-entry.
+#
+# This duplicates the check pre_remove already performs, and it has to. pacman
+# treats a failing pre_remove as a warning: it prints the error, removes the
+# package anyway, and exits 0. dpkg aborts on a failing prerm and rpm aborts on
+# a failing %preun, so on those two formats the check inside logsh-install.sh
+# is the whole guard; on Arch it is advisory. A PreTransaction hook with
+# AbortOnFail is the only thing pacman honours, so the fail-closed contract is
+# restored here.
+#
+# Operation = Remove only. An upgrade replaces the binary in place and must not
+# be blocked, which is also why pre_remove is not reached during one.
+#
+# Override with LOGSH_FORCE_UNINSTALL=1, which pacman passes through to the
+# hook's environment:
+#     sudo LOGSH_FORCE_UNINSTALL=1 pacman -R logsh
+# (sudo needs -E, or the variable in env_keep, to let it through.)
+
+[Trigger]
+Operation = Remove
+Type = Package
+Target = logsh
+
+[Action]
+Description = Checking whether sshd still references logsh-entry...
+When = PreTransaction
+Exec = /usr/lib/logsh/logsh-install.sh check-sshd
+AbortOnFail

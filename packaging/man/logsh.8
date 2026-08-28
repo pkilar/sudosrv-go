@@ -1,9 +1,11 @@
-.TH LOGSH 8 "2026-08-17" "logsh" "System Manager's Manual"
+.TH LOGSH 8 "2026-08-27" "logsh" "System Manager's Manual"
 .SH NAME
 logsh \- recording login shell for sudo I/O log servers
 .SH SYNOPSIS
 .BR lbash ", " lzsh ", " lsh
 .RI [ shell-arguments ]
+.PP
+.B logsh\-entry
 .PP
 .B logsh
 .RB [ \-validate ]
@@ -11,6 +13,12 @@ logsh \- recording login shell for sudo I/O log servers
 .RB [ \-config
 .IR path ]
 .RB [ \-version ]
+.PP
+.B logsh
+.BI \-record " dir"
+.RB [ \-shell
+.IR path ]
+.RB [ \-wire ]
 .SH DESCRIPTION
 .B logsh
 is a multi-call login shell that records a terminal session to a
@@ -37,6 +45,37 @@ and so on. The mapping is an allowlist in the configuration file, not a naming
 rule \(em a symlink whose name is not in the map is refused rather than
 resolved by stripping the leading letter.
 .PP
+Invoked as
+.BR logsh\-entry ,
+it runs as an
+.BR sshd (8)
+.B ForceCommand
+instead of as a login shell, which records SSH sessions for an account without
+changing that account's shell in
+.BR passwd (5).
+It takes no arguments and reads the client's requested command from
+.IR SSH_ORIGINAL_COMMAND .
+That command is matched against a literal allowlist of routes: the basename of
+its first whitespace-separated field, compared exactly, with no globbing and no
+prefix matching. A matched route runs the argv from the configuration file and
+never from the client, which is how
+.BR sftp (1)
+and modern
+.BR scp (1)
+keep working; an unmatched command runs as it would have with no
+.B ForceCommand
+configured. An interactive session runs the account's own shell from
+.BR passwd (5),
+so enabling the recorder changes which shell runs on no host. Unlike the
+login-shell symlinks,
+.B logsh\-entry
+is not added to
+.BR shells (5).
+See
+.I /usr/share/doc/logsh/logsh-forcecommand.md
+for the sshd configuration, the certificate critical options, and the removal
+ordering.
+.PP
 An account that is not listed in
 .I record_users
 gets its real shell with no recording and no log entry, which is what makes it
@@ -60,9 +99,47 @@ package maintainer scripts after installation.
 Configuration file to read. Default:
 .IR /etc/logsh/logsh.yaml .
 .TP
+.BI \-record " dir"
+Record this session into
+.I dir
+as a sudoreplay-compatible I/O log and contact no log server. Intended for
+capturing a session on a host that has no reachable
+.BR sudosrv (8).
+.TP
+.BI \-shell " path"
+Shell to run under
+.BR \-record .
+Defaults to
+.IR $SHELL ,
+then
+.IR /bin/sh .
+.TP
+.B \-wire
+With
+.BR \-record ,
+also write the raw wire-format stream as
+.IR session.wire ,
+which
+.BR wiredump (8)
+can decode.
+.TP
 .B \-version
 Print the version and exit.
 .SH FILES
+.TP
+.IR /usr/sbin/lbash ", " /usr/sbin/lzsh ", " /usr/sbin/lsh
+Login-shell symlinks to the binary, created by the package and listed in
+.BR shells (5).
+On Arch these are in
+.I /usr/bin
+instead.
+.TP
+.I /usr/sbin/logsh\-entry
+Symlink used as an
+.BR sshd (8)
+.BR ForceCommand .
+Not a login shell and not listed in
+.BR shells (5).
 .TP
 .I /etc/logsh/logsh.yaml
 Configuration file. Must be root-owned and not group- or world-writable.
@@ -85,4 +162,6 @@ users must say so.
 .BR sudo (8),
 .BR sudoreplay (8),
 .BR passwd (5),
-.BR shells (5)
+.BR shells (5),
+.BR sshd_config (5),
+.BR wiredump (8)

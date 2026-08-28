@@ -124,6 +124,16 @@ package_logsh() {
 
     install -Dm0644 docs/logsh-deployment.md \
         "${pkgdir}/usr/share/doc/logsh/logsh-deployment.md"
+    install -Dm0644 docs/logsh-forcecommand.md \
+        "${pkgdir}/usr/share/doc/logsh/logsh-forcecommand.md"
+
+    # pre_remove cannot stop a removal on Arch: pacman treats a failing
+    # scriptlet as a warning and removes the package regardless. Only a
+    # PreTransaction hook with AbortOnFail is honoured, so the guard that
+    # keeps a switched account from being left with a deleted login shell
+    # lives here as well as in logsh.install.
+    install -Dm0644 packaging/arch/logsh-uninstall-guard.hook \
+        "${pkgdir}/usr/share/libalpm/hooks/logsh-uninstall-guard.hook"
 
     install -Dm0644 packaging/man/logsh.8 "${pkgdir}/usr/share/man/man8/logsh.8"
 
