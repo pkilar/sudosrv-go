@@ -113,6 +113,15 @@ colliding. `default.<ext>` is the fallback where several targets share a mirror;
 an RPM `baseurl` using `$releasever` usually serves rhel9 and rhel10 from one
 file.
 
+The file is installed under a **prefixed** name — `rhel9.repo` lands as
+`/etc/yum.repos.d/00-site-rhel9.repo`. That is not cosmetic: a target id is
+often the distribution's own repo filename (`fedora.repo`, `rocky.repo` and
+`ubi.repo` all ship in `/etc/yum.repos.d`), and overwriting one deletes the base
+repository. The build then fails with `No match for argument: make`, which names
+a missing package and says nothing about the repo it just destroyed. Arch is the
+deliberate exception: its destination stays `/etc/pacman.d/mirrorlist`, because
+`pacman.conf` includes that exact path.
+
 If the directory holds files but none matches, the build says so loudly and
 names what it looked for — a silent skip would leave the build pointed at
 unreachable default mirrors and fail later for a reason that looks unrelated.
