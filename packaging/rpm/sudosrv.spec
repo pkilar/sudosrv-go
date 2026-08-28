@@ -24,9 +24,10 @@ Source2:        sudosrv.tmpfiles
 # 1.25.12. Declaring >= 1.26 made the package unbuildable there rather than
 # merely inconvenient. The floor below is the version that understands
 # GOTOOLCHAIN, and %%build sets GOTOOLCHAIN=auto so the distro's Go fetches
-# the required toolchain. That needs network access at build time: a sealed
+# the required toolchain. 1.24 is the verified floor for that bootstrap: 1.24
+# fetches 1.27, 1.22 fails with "toolchain not available". That needs network access at build time: a sealed
 # builder (mock without --enable-network, koji) must vendor a toolchain.
-BuildRequires:  golang >= 1.21
+BuildRequires:  golang >= 1.24
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 Requires:       sudo >= 1.9.0

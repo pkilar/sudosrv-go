@@ -10,5 +10,11 @@ fedora          rpm     fedora:latest                            amd64,arm64
 rhel9           rpm     registry.access.redhat.com/ubi9/ubi      amd64,arm64
 rhel10          rpm     registry.access.redhat.com/ubi10/ubi     amd64,arm64
 debian-stable   deb     debian:stable                            amd64,arm64
-ubuntu-lts      deb     ubuntu:24.04                             amd64,arm64
+# No ubuntu-lts row. Ubuntu 24.04 LTS ships Go 1.22, which cannot fetch the
+# 1.27 toolchain go.mod requires ("toolchain not available") -- Go 1.24 can,
+# Debian stable has it, Ubuntu LTS does not. Its repositories carry
+# golang-1.24-go, but Debian-style versioned Go packages install to
+# /usr/lib/go-1.24/bin and provide no /usr/bin/go, so using it would mean
+# per-target special-casing in the driver. Add the row back when Ubuntu's
+# default Go moves, or when go.mod's floor drops.
 arch            arch    archlinux:latest                         amd64

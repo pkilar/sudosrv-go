@@ -90,6 +90,14 @@ ships 1.26.7 with `GOTOOLCHAIN=local` patched into `go.env`, so a bare
 and it needs network access at build time. A sealed builder must vendor a
 toolchain instead.
 
+**The distribution's Go must be new enough to bootstrap the one `go.mod` asks
+for.** `GOTOOLCHAIN=auto` fetches Go 1.27, but only from a recent enough Go:
+1.24 can, 1.22 fails with `toolchain not available`. That is why there is no
+`ubuntu-lts` row — Ubuntu 24.04 LTS ships Go 1.22. The recipes' declared floors
+(`golang-go (>= 2:1.24~)`, `BuildRequires: golang >= 1.24`) exist so this fails
+at dependency resolution, with a name and a version, rather than deep inside
+`go clean` where the message says nothing about the cause.
+
 **The protobuf Go code is committed and consumed as-is.** No recipe regenerates
 it: `protobuf-compiler` does not exist in any RHEL-family repository, and a
 build host's protoc is not the version the committed file was generated with.
