@@ -93,13 +93,29 @@ not be committed.
 
 ```
 site/
-├── env              # sourced in the container before anything hits the network
-├── ca/*.crt         # extra trust anchors, installed and trusted per format
-├── rpm/*.repo       # copied to /etc/yum.repos.d
-├── deb/*.list       # copied to /etc/apt/sources.list.d  (or *.sources)
-├── arch/mirrorlist  # copied to /etc/pacman.d
-└── setup.sh         # optional, runs last, can override all of the above
+├── env                      # sourced before anything hits the network
+├── ca/*.crt                 # trust anchors, installed and trusted per format
+├── rpm/
+│   ├── rhel9.repo           # used for the rhel9 target
+│   ├── fedora.repo          # used for the fedora target
+│   └── default.repo         # fallback for any rpm target with no file of its own
+├── deb/
+│   └── debian-stable.list   # or .sources
+├── arch/
+│   └── arch.mirrorlist      # destination is always /etc/pacman.d/mirrorlist
+└── setup.sh                 # optional, runs last, can override the rest
 ```
+
+**Exactly one repository file is installed, chosen by target id** — `rhel9.repo`
+for the `rhel9` target, `fedora.repo` for `fedora`. That is what lets a single
+site directory carry configuration for every distribution without the files
+colliding. `default.<ext>` is the fallback where several targets share a mirror;
+an RPM `baseurl` using `$releasever` usually serves rhel9 and rhel10 from one
+file.
+
+If the directory holds files but none matches, the build says so loudly and
+names what it looked for — a silent skip would leave the build pointed at
+unreachable default mirrors and fail later for a reason that looks unrelated.
 
 ```bash
 ./packaging/build-in-container.sh rhel9 --lint --site ~/acme-site

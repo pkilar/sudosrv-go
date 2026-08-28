@@ -110,6 +110,8 @@ rpm)
 	fi
 }'
 	SITE_REPO_DIR='/etc/yum.repos.d'
+	SITE_REPO_EXT='repo'
+	SITE_REPO_DEST=''
 	SITE_CA_DIR='/etc/pki/ca-trust/source/anchors'
 	SITE_CA_UPDATE='update-ca-trust'
 	LINTER='rpmlint'
@@ -123,6 +125,8 @@ deb)
 	GLOB='debbuild/*.deb'
 	LINTPRE=''
 	SITE_REPO_DIR='/etc/apt/sources.list.d'
+	SITE_REPO_EXT='list sources'
+	SITE_REPO_DEST=''
 	SITE_CA_DIR='/usr/local/share/ca-certificates'
 	SITE_CA_UPDATE='update-ca-certificates'
 	LINTER='lintian'
@@ -140,6 +144,10 @@ arch)
 	# pacman takes a mirrorlist rather than repo fragments; a site file named
 	# mirrorlist lands where pacman.conf already includes it from.
 	SITE_REPO_DIR='/etc/pacman.d'
+	# pacman.conf includes this path by exact name, so the destination is fixed
+	# however the source file is named.
+	SITE_REPO_EXT='mirrorlist'
+	SITE_REPO_DEST='mirrorlist'
 	SITE_CA_DIR='/etc/ca-certificates/trust-source/anchors'
 	SITE_CA_UPDATE='trust extract-compat'
 	LINTER='namcap'
@@ -191,9 +199,32 @@ if [ -d /site ]; then
 		mkdir -p "$SITE_CA_DIR" && cp /site/ca/*.crt "$SITE_CA_DIR/"
 		$SITE_CA_UPDATE >/dev/null 2>&1 || echo "note: $SITE_CA_UPDATE failed or is unavailable" >&2
 	fi
-	if [ -d /site/$FORMAT ] && [ -n "\$(ls -A /site/$FORMAT 2>/dev/null)" ]; then
-		echo ":: site: installing repository config into $SITE_REPO_DIR"
-		mkdir -p "$SITE_REPO_DIR" && cp -a /site/$FORMAT/. "$SITE_REPO_DIR/"
+	# Exactly one repository file, chosen by target id -- rhel9.repo for the
+	# rhel9 target, fedora.repo for fedora -- so ONE site directory can carry
+	# configuration for every distribution without them colliding. default.<ext>
+	# is the fallback where several targets share a mirror (an RPM baseurl using
+	# \$releasever usually serves rhel9 and rhel10 from one file).
+	_installed=
+	for _name in $TARGET default; do
+		[ -n "\$_installed" ] && break
+		for _ext in $SITE_REPO_EXT; do
+			_src="/site/$FORMAT/\$_name.\$_ext"
+			[ -f "\$_src" ] || continue
+			_dest="${SITE_REPO_DEST:-\$(basename "\$_src")}"
+			mkdir -p "$SITE_REPO_DIR"
+			cp "\$_src" "$SITE_REPO_DIR/\$_dest"
+			echo ":: site: \$_name.\$_ext -> $SITE_REPO_DIR/\$_dest"
+			_installed=1
+			break
+		done
+	done
+	# A directory with files but no match is a naming mistake, and silence would
+	# let the build proceed against unreachable default mirrors and fail later
+	# for a reason that looks unrelated.
+	if [ -z "\$_installed" ] && [ -d /site/$FORMAT ] && [ -n "\$(ls -A /site/$FORMAT 2>/dev/null)" ]; then
+		echo "!! site: /site/$FORMAT has files but none named '$TARGET.<ext>' or 'default.<ext>'" >&2
+		echo "!! site: looked for extensions: $SITE_REPO_EXT" >&2
+		echo "!! site: found: \$(ls /site/$FORMAT | tr '\\n' ' ')" >&2
 	fi
 	# The escape hatch, run last so it can override anything above -- disabling
 	# the distribution's own unreachable mirrors is the usual reason.
