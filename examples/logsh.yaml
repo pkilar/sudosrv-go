@@ -254,13 +254,24 @@ force_command:
     # with paths -- a file-level audit trail, not content capture, which is the
     # right trade for a 10 GB transfer.
     #
+    # COMMENTED OUT ON PURPOSE: whether you need this depends on the host, and
+    # the path depends on the distribution.
+    #
+    # You need it only if sshd_config says `Subsystem sftp internal-sftp`.
+    # A host naming a real binary there -- which RHEL, Fedora and Debian all do
+    # by default -- sends that binary's path as the client's command, and the
+    # default route runs it. No entry is needed.
+    #
     # The binary's path differs by distribution:
     #   /usr/libexec/openssh/sftp-server   RHEL, Fedora
     #   /usr/lib/openssh/sftp-server       Debian, Ubuntu
     #   /usr/lib/ssh/sftp-server           Arch
-    # `logsh -selftest` fails if the path named here is missing.
-    internal-sftp:
-      exec: [/usr/lib/ssh/sftp-server, -l, INFO]
+    #
+    # `logsh -selftest` reads sshd_config and says which case this host is in,
+    # naming the path that exists here if an entry is required. Run it rather
+    # than guessing from the list above.
+    # internal-sftp:
+    #   exec: [/usr/libexec/openssh/sftp-server, -l, INFO]
 
     # Optional. rrsync reads $SSH_ORIGINAL_COMMAND itself, so a fixed argv is
     # all it needs. Note this CONFINES rsync to one subtree, which is a policy

@@ -23,6 +23,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sudosrv/internal/logshell"
 )
 
@@ -553,11 +554,61 @@ func runSelftest(path string) int {
 			st, statErr := os.Stat(prog)
 			if statErr != nil || st.IsDir() || st.Mode()&0o111 == 0 {
 				fmt.Fprintf(os.Stderr, "FAIL  force_command.routes[%s]: %s is missing or not executable\n", name, prog)
+				// The sftp-server path differs by distribution, so this is
+				// usually a config copied from another one. Name the path that
+				// would work here.
+				if name == "internal-sftp" {
+					if found := logshell.FindSftpServer(); found != "" && found != prog {
+						fmt.Fprintf(os.Stderr, "      On this host the sftp-server is %s\n", found)
+					}
+				}
 				failed = true
 				continue
 			}
 			fmt.Printf("ok    force_command.routes[%s]: %s\n", name, prog)
 		}
+	}
+
+	// Reported whether or not force_command is configured: the host that most
+	// needs this is the one with no route at all. What sshd does with sftp
+	// decides whether a route is needed, and the sftp-server path differs by
+	// distribution -- the same configuration file ships on every one, so a
+	// hardcoded path is wrong on most of them. Ask the host.
+	forced := len(cfg.ForceCommand.Routes) > 0 || cfg.ForceCommand.Shell != ""
+	subsystem, _ := logshell.SftpSubsystem(logshell.SshdConfigPath)
+	subsystemProg := ""
+	if f := strings.Fields(subsystem); len(f) > 0 {
+		subsystemProg = f[0]
+	}
+	_, hasSftpRoute := cfg.ForceCommand.Routes["internal-sftp"]
+
+	switch {
+	case subsystem == "":
+		// No Subsystem line found, or the config could not be read. Nothing
+		// truthful to say, so say nothing rather than guess.
+	case strings.EqualFold(subsystemProg, "internal-sftp") && !hasSftpRoute:
+		// A failure only for a host already committed to forced-command mode.
+		// Where force_command is unconfigured this is advice about what would
+		// break if it were enabled, not a defect in the present setup.
+		label, out := "warn", os.Stdout
+		if forced {
+			label, out, failed = "FAIL", os.Stderr, true
+		}
+		_, _ = fmt.Fprintf(out,
+			"%s  force_command.routes: %s says 'Subsystem sftp internal-sftp', which has no "+
+				"binary to exec, and no internal-sftp route is configured -- sftp and modern "+
+				"scp fail for forced-command sessions.\n", label, logshell.SshdConfigPath)
+		if found := logshell.FindSftpServer(); found != "" {
+			_, _ = fmt.Fprintf(out, "      Add to force_command.routes:\n"+
+				"        internal-sftp:\n          exec: [%s, -l, INFO]\n", found)
+		} else {
+			_, _ = fmt.Fprintf(out, "      No sftp-server binary found in the usual locations.\n")
+		}
+	case !strings.EqualFold(subsystemProg, "internal-sftp") && !hasSftpRoute:
+		// sshd names a real binary, so the client sends that path as its command
+		// and the default route runs it. A route would be redundant.
+		fmt.Printf("ok    force_command: no internal-sftp route needed (%s runs %s)\n",
+			logshell.SshdConfigPath, subsystemProg)
 	}
 
 	if len(cfg.RecordUsers) == 0 {

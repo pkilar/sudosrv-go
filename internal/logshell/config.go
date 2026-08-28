@@ -492,11 +492,12 @@ func (c *Config) Warnings() []string {
 			w = append(w, "force_command is configured but record_users names neither root nor 0: "+
 				"forced-command sessions would be routed correctly and recorded not at all")
 		}
-		if _, ok := c.ForceCommand.Routes["internal-sftp"]; !ok {
-			w = append(w, "force_command.routes has no internal-sftp entry: if sshd_config says "+
-				"`Subsystem sftp internal-sftp`, sftp and modern scp will fail for forced-command "+
-				"sessions. logsh cannot read sshd_config, so this is only a warning.")
-		}
+		// No warning here about a missing internal-sftp route. Whether one is
+		// needed is a property of the host, not of this file: sshd naming a real
+		// sftp-server binary sends that path as the client's command and needs no
+		// route at all. `logsh -selftest` reads sshd_config and answers it
+		// definitively, so a speculative "this might be a problem, I cannot tell"
+		// here would be noise -- and noise is how warnings get ignored.
 	}
 	return w
 }
