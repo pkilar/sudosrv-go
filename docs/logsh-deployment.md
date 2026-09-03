@@ -91,11 +91,12 @@ Run a sudosrv in **relay mode on loopback** on each recorded host:
 logsh (as the user) --127.0.0.1--> sudosrv relay (as root) --mTLS--> central sudosrv
 ```
 
-This is not optional if you use TLS client certificates. logsh runs as the
-logging-in user — it is their login shell, exec'd after sshd drops privileges —
-so any key it can read, that user can read, and can then use to forge or suppress
-audit records at the central server. The local relay holds the host credentials
-and the spool as root. `logsh -validate` warns if you configure certs directly.
+logsh cannot safely hold a TLS client key: it runs as the logging-in user — it
+is their login shell, exec'd after sshd drops privileges — so any key it could
+read, that user could read, and use to forge or suppress audit records at the
+central server. `server.tls_cert_file` and `server.tls_key_file` do not exist
+as config keys; logsh never presents a client certificate. The local relay
+holds the host credentials and the spool as root instead.
 
 Leave `server.journal_directory` empty in that topology: the relay already
 spools.

@@ -72,17 +72,29 @@ server:
   # logsh cannot safely hold a TLS client key: it runs as the logging-in user, so
   # any key it can read, that user can steal and use to forge or suppress audit
   # records at the central server. The local relay owns the host credentials and
-  # the spool directory, both staying root-only.
-  upstream_host: "127.0.0.1:30343"
-  use_tls: false
+  # the spool directory, both staying root-only. logsh therefore presents no
+  # client certificate at all.
+  #
+  # Addresses use sudo's log_servers syntax: host[:port][(tls)]. The "(tls)"
+  # suffix selects TLS and port 30344; without it, plaintext and port 30343. An
+  # explicit :port overrides either default. Servers are tried in the order
+  # written and the first one that answers is used.
+  #
+  # A suffix that is not exactly "(tls)" is an error, not a hostname -- that
+  # token is the only thing standing between a transcript and the clear.
+  log_servers:
+    - "127.0.0.1"
+  #   - "sudo-iolog.acme.com(tls)"
+  #   - "sudo-iolog-2.acme.com(tls)"
 
-  # Only for a host whose credentials are genuinely user-readable anyway (a
-  # single-admin box, a lab). -validate warns when these are set.
-  # use_tls: true
-  # tls_cacert_file: /etc/logsh/ca.pem
-  # tls_cert_file: /etc/logsh/client.pem
-  # tls_key_file: /etc/logsh/client.key
-  # tls_min_version: "1.3"
+  # Verifies the server certificate, like sudo's log_server_cabundle. Unset uses
+  # the system trust store. It must be readable by the logging-in user, since
+  # that is who logsh runs as -- `logsh -selftest` warns if it is not.
+  # ca_bundle: /etc/logsh/ca.pem
+
+  # sudo's log_server_verify. Defaults to true; setting it false sends session
+  # transcripts to any peer that completes a handshake.
+  # verify: true
 
   connect_timeout: 5s
   response_timeout: 30s
