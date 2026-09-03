@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/logsrvclient"
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -103,9 +104,13 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 		slog.Warn("logsh journal unavailable, trying the log server directly", "dir", dir, "error", err)
 	}
 
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
+	cfgs, cfgErr := cfg.ClientConfigs()
+	if cfgErr != nil {
+		return nil, cfgErr
+	}
+	proc, chosen, err := connectAny(ctx, cfgs)
 	if err == nil {
-		return newBufferedSink(&streamSink{proc: proc, cfg: cfg.ClientConfig()}), nil
+		return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
 	}
 	streamErr = err
 
@@ -113,6 +118,30 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 		return nil, fmt.Errorf("journal unusable (%w) and log server unreachable (%w)", journalErr, streamErr)
 	}
 	return nil, streamErr
+}
+
+// connectAny dials each configured log server in the order written and returns
+// the first connection that succeeds, together with the config it was made
+// with. sudo connects to the first available server; so does this.
+//
+// The chosen config is returned rather than assumed to be the first, because
+// everything downstream -- the stream sink, the per-exchange timeouts -- must
+// describe the server actually reached. Threading the first entry would
+// attribute a session to a server it never touched.
+func connectAny(ctx context.Context, cfgs []logsrvclient.Config) (protocol.Processor, logsrvclient.Config, error) {
+	if len(cfgs) == 0 {
+		return nil, logsrvclient.Config{}, fmt.Errorf("no log servers configured")
+	}
+	failures := make([]string, 0, len(cfgs))
+	for _, cc := range cfgs {
+		proc, err := logsrvclient.Connect(ctx, cc)
+		if err == nil {
+			return proc, cc, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", cc.UpstreamHost, err))
+	}
+	return nil, logsrvclient.Config{}, fmt.Errorf("no log server reachable (%s)",
+		strings.Join(failures, "; "))
 }
 
 // streamSink sends messages to the log server as they are produced.
@@ -290,7 +319,11 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 		return park(flushing, path+journalCorrupt, ErrJournalCorrupt, err)
 	}
 
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
+	cfgs, cfgErr := cfg.ClientConfigs()
+	if cfgErr != nil {
+		return cfgErr
+	}
+	proc, chosen, err := connectAny(ctx, cfgs)
 	if err != nil {
 		// Nothing was sent, so the journal is exactly as it was.
 		if rnErr := os.Rename(flushing, path); rnErr != nil {
@@ -300,7 +333,7 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	}
 	defer func() { _ = proc.Close() }()
 
-	if err := transmitJournal(ctx, flushing, cfg, proc, expectAck, elapsed); err != nil {
+	if err := transmitJournal(ctx, flushing, chosen, proc, expectAck, elapsed); err != nil {
 		if errors.Is(err, logsrvclient.ErrUpstreamRejected) {
 			// A definitive refusal: the server parsed the session and said no,
 			// so it stored nothing and every retry gets the same answer.
@@ -398,7 +431,7 @@ func validateJournal(path string) (expectAck bool, elapsed time.Duration, err er
 }
 
 // transmitJournal sends a validated journal and waits for acknowledgement.
-func transmitJournal(ctx context.Context, path string, cfg *Config, proc protocol.Processor, expectAck bool, elapsed time.Duration) error {
+func transmitJournal(ctx context.Context, path string, client logsrvclient.Config, proc protocol.Processor, expectAck bool, elapsed time.Duration) error {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
 	if err != nil {
 		return err
@@ -415,7 +448,7 @@ func transmitJournal(ctx context.Context, path string, cfg *Config, proc protoco
 			// here means it changed underneath us.
 			return fmt.Errorf("journal changed while being sent: %w", readErr)
 		}
-		if err := cfg.ClientConfig().WithTimeout(ctx, func(c context.Context) error {
+		if err := client.WithTimeout(ctx, func(c context.Context) error {
 			return proc.WriteClientMessageContext(c, msg)
 		}); err != nil {
 			return err
@@ -426,7 +459,7 @@ func transmitJournal(ctx context.Context, path string, cfg *Config, proc protoco
 	if !expectAck {
 		return nil
 	}
-	return logsrvclient.ReadCommitAtLeast(ctx, proc, cfg.ClientConfig(), elapsed)
+	return logsrvclient.ReadCommitAtLeast(ctx, proc, client, elapsed)
 }
 
 // bufferedSink moves the actual delivery onto its own goroutine.

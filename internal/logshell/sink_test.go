@@ -691,3 +691,79 @@ func TestExitWaitsForTheFinalCommitPoint(t *testing.T) {
 			"session is durable when the exit record may never be written.", waited, serverWork)
 	}
 }
+
+// The first server is down; the second must be used, and the sink must carry
+// the config of the server actually reached -- not the first listed.
+func TestConnectAnyFallsThroughToTheSecondServer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			// logsrvclient.Connect completes a ClientHello/ServerHello handshake
+			// before it reports success, so the "reachable" server has to speak
+			// that far -- closing the socket the instant it is accepted would
+			// fail the handshake exactly like the dead first server does, and
+			// connectAny would have nothing to fall through to.
+			go func() {
+				defer func() { _ = c.Close() }()
+				proc := protocol.NewProcessorWithCloser(c, c, c)
+				if _, err := proc.ReadClientMessage(); err != nil {
+					return
+				}
+				_ = proc.WriteServerMessage(&pb.ServerMessage{
+					Type: &pb.ServerMessage_Hello{Hello: &pb.ServerHello{ServerId: "second"}}})
+				// Held open until the client side closes it, so the connection
+				// connectAny returns stays valid for the deferred proc.Close().
+				for {
+					if _, err := proc.ReadClientMessage(); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	dead := "127.0.0.1:1" // nothing listens on port 1
+	cfgs := []logsrvclient.Config{
+		{ClientID: ClientID, UpstreamHost: dead, ConnectTimeout: time.Second},
+		{ClientID: ClientID, UpstreamHost: ln.Addr().String(), ConnectTimeout: time.Second},
+	}
+	proc, chosen, err := connectAny(context.Background(), cfgs)
+	if err != nil {
+		t.Fatalf("connectAny: %v", err)
+	}
+	defer func() { _ = proc.Close() }()
+	if chosen.UpstreamHost != ln.Addr().String() {
+		t.Errorf("chosen = %q, want the reachable server %q", chosen.UpstreamHost, ln.Addr().String())
+	}
+}
+
+// An operator needs to know WHICH server is broken, not merely that none worked.
+func TestConnectAnyNamesEveryServerItTried(t *testing.T) {
+	cfgs := []logsrvclient.Config{
+		{ClientID: ClientID, UpstreamHost: "127.0.0.1:1", ConnectTimeout: time.Second},
+		{ClientID: ClientID, UpstreamHost: "127.0.0.1:2", ConnectTimeout: time.Second},
+	}
+	_, _, err := connectAny(context.Background(), cfgs)
+	if err == nil {
+		t.Fatal("expected an error when every server is down")
+	}
+	for _, want := range []string{"127.0.0.1:1", "127.0.0.1:2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+}
+
+func TestConnectAnyRejectsAnEmptyList(t *testing.T) {
+	if _, _, err := connectAny(context.Background(), nil); err == nil {
+		t.Error("an empty server list must be an error, not a nil connection")
+	}
+}
