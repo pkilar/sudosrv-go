@@ -528,8 +528,11 @@ func (c *Config) ClientConfig() logsrvclient.Config {
 	return logsrvclient.Config{
 		ClientID:      ClientID,
 		TLSSkipVerify: !c.VerifyEnabled(),
-		// Pinned, not configurable: leaving this empty would drop the floor to
-		// Go's TLS 1.2, which is a silent weakening of today's behaviour.
+		// Pinned, not configurable. An empty string here already means 1.3
+		// (logsrvclient.Config.TLSMinVersion, resolved by config.TLSVersion),
+		// so this is not a guard against a lower default today -- it is
+		// belt-and-braces: explicit beats implicit, and the floor stays 1.3
+		// here even if that empty-string mapping is ever changed.
 		TLSMinVersion:   "1.3",
 		TLSCACertFile:   c.Server.CABundle,
 		ConnectTimeout:  c.Server.ConnectTimeout,

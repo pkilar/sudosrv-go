@@ -411,7 +411,9 @@ func TestVerifyDefaultsToOn(t *testing.T) {
 	}
 }
 
-// An empty TLSMinVersion would silently drop the floor to Go's 1.2.
+// TLSMinVersion is pinned to "1.3" explicitly even though an empty string
+// already resolves to 1.3 today (config.TLSVersion) -- explicit beats
+// implicit, and it keeps the floor from moving if that default ever does.
 func TestClientConfigPinsTLSFloor(t *testing.T) {
 	if got := DefaultConfig().ClientConfig().TLSMinVersion; got != "1.3" {
 		t.Errorf("TLSMinVersion = %q, want \"1.3\"", got)

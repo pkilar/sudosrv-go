@@ -104,15 +104,18 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 		slog.Warn("logsh journal unavailable, trying the log server directly", "dir", dir, "error", err)
 	}
 
+	// Not returned directly on failure: doing so would drop journalErr on a
+	// host where both the spool and the server list are broken, reporting
+	// only the half of the failure that happened to be checked second.
 	cfgs, cfgErr := cfg.ClientConfigs()
-	if cfgErr != nil {
-		return nil, cfgErr
+	streamErr = cfgErr
+	if cfgErr == nil {
+		proc, chosen, err := connectAny(ctx, cfgs)
+		if err == nil {
+			return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
+		}
+		streamErr = err
 	}
-	proc, chosen, err := connectAny(ctx, cfgs)
-	if err == nil {
-		return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
-	}
-	streamErr = err
 
 	if journalErr != nil {
 		return nil, fmt.Errorf("journal unusable (%w) and log server unreachable (%w)", journalErr, streamErr)
@@ -321,6 +324,14 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 
 	cfgs, cfgErr := cfg.ClientConfigs()
 	if cfgErr != nil {
+		// Nothing was sent, so the journal is exactly as it was. Un-claimed
+		// for the same reason the connect-failure path just below un-claims:
+		// this journal is still safe to retry, and leaving it at flushing
+		// would strand it under a name orphan recovery never globs for
+		// (logsh-*.journal, not logsh-*.journal.flushing).
+		if rnErr := os.Rename(flushing, path); rnErr != nil {
+			return fmt.Errorf("resolve log servers failed (%w) and the journal could not be un-claimed (%w)", cfgErr, rnErr)
+		}
 		return cfgErr
 	}
 	proc, chosen, err := connectAny(ctx, cfgs)
@@ -558,17 +569,34 @@ func (b *bufferedSink) Close() error {
 	return b.inner.Close()
 }
 
-// journalRetryBudget bounds how long Finish spends trying to deliver a journal
-// while the user waits to log out. A variable, not a constant, so tests can
-// shorten it.
+// journalRetryBudget bounds how long flushWithBudget waits BETWEEN attempts
+// before giving up -- it does not cap the total time a call can take. A
+// variable, not a constant, so tests can shorten it.
+//
+// One attempt is a full FlushJournal call, which -- via connectAny -- walks
+// every configured server in order. A server that accepts the TCP connection
+// but never completes the ClientHello/ServerHello handshake costs up to
+// ConnectTimeout, plus ResponseTimeout for the ClientHello write, plus
+// ResponseTimeout again for the ServerHello read, before connectAny moves on
+// to the next one: 65s per stalling server at the shipped 5s/30s defaults. So
+// a single attempt against N stalling servers can run to roughly N times
+// that, entirely before this budget is even consulted -- the deadline below
+// is checked only after an attempt finishes, to decide whether to start
+// another. Serial failover is what sudo does; this budget does not shrink to
+// compensate for it.
 var journalRetryBudget = 10 * time.Second
 
 // flushWithBudget retries a flush with backoff until the budget is spent.
 //
-// The budget exists because this runs during logout, with the user watching. An
-// unbounded retry would hang their session on an outage; giving up too early
-// would park a journal that one more second would have delivered. When it does
-// give up the journal is kept, so the cost of stopping is delay, never loss.
+// The budget bounds ATTEMPTS, not wall-clock time: the deadline is tested
+// only between one FlushJournal call finishing and the next one starting, so
+// it stops the loop from retrying after a failure rather than capping how
+// long any single attempt itself runs -- see journalRetryBudget for why a
+// single attempt's own worst case scales with the number of configured
+// servers. This runs during logout with the user watching, so giving up too
+// early would park a journal that one more attempt would have delivered; when
+// it does give up the journal is kept, so the cost of stopping is delay,
+// never loss.
 func flushWithBudget(ctx context.Context, path string, cfg *Config, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
 	var err error
