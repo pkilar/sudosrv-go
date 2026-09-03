@@ -252,6 +252,8 @@ exit 0
   /etc/ssh; --force overrides once the reference is gone
 - Fix: the documentation said nested_sessions defaults to metadata, while the
   default is and always was record
+- Removed: logsh -record, -shell and -wire. logsh records to a log server only;
+  standalone local recording is gone
 
 * Wed Aug 19 2026 Paul Kilar <pkilar@gmail.com> - 0.2.0-1
 - logsh records standalone with -record, writing a sudoreplay-compatible I/O
