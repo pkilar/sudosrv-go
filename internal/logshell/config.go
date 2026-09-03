@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sudosrv/internal/eventlog"
@@ -239,6 +241,97 @@ func load(path string, ownerUID uint32) (*Config, error) {
 	return LoadUnchecked(path)
 }
 
+// removedServerKeys maps a key removed from server: in 0.4.0 to what
+// replaces it, so removedKeyError can name a fix instead of just a key.
+//
+// It intentionally does not double as the set removedKeyError checks
+// against -- that set comes from ServerConfig's own struct tags, via
+// recognizedServerKeys, so a key this map fails to list (or one a later
+// change to ServerConfig removes and this map never learns about) is still
+// caught, just with a generic message instead of a specific "use X instead"
+// one. See removedKeyError.
+var removedServerKeys = map[string]string{
+	"upstream_host":   `server.log_servers, e.g. ["127.0.0.1"] or ["host(tls)"]`,
+	"use_tls":         `the "(tls)" suffix on a server.log_servers entry, e.g. ["host(tls)"]`,
+	"tls_skip_verify": "server.verify: false",
+	"tls_cacert_file": "server.ca_bundle",
+	"tls_cert_file":   "nothing: logsh no longer presents a client certificate",
+	"tls_key_file":    "nothing: logsh no longer presents a client certificate",
+	"tls_min_version": "nothing: the TLS floor is pinned at 1.3",
+}
+
+// recognizedServerKeys returns the YAML keys ServerConfig understands, one
+// per struct field's yaml tag.
+//
+// This set is derived rather than hand-listed a second time: a hand-copied
+// list is one refactor away from rejecting a key that a later change to
+// ServerConfig adds, and on a login shell that rejection is a lockout, not a
+// cosmetic bug.
+func recognizedServerKeys() map[string]bool {
+	t := reflect.TypeFor[ServerConfig]()
+	keys := make(map[string]bool, t.NumField())
+	for f := range t.Fields() {
+		name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		if name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+// removedKeyError reports the first (alphabetically) unrecognised key
+// present under server:, or nil if every key there is one ServerConfig
+// understands.
+//
+// This exists because yaml.Unmarshal ignores keys with no matching field:
+// left unchecked, an old config's upstream_host is silently dropped,
+// LogServers keeps its loopback default, Validate sees a non-empty list and
+// passes, and every recorded session on that host is sent to 127.0.0.1 in
+// the clear instead of the configured TLS server -- no error, no warning.
+// Because an unusable config makes logsh refuse a login, the message this
+// produces has to name the key, and where known its replacement, on sight.
+//
+// A key listed in removedServerKeys gets that specific replacement. Any
+// other unrecognised key is still rejected, just with a generic message --
+// a removed key this table fails to list would otherwise fail exactly as
+// silently as upstream_host did, which is why the check is not limited to
+// the map's keys.
+//
+// Deliberately scoped to the server: block: the rest of the document stays
+// as permissive to unknown keys as yaml.Unmarshal always was.
+func removedKeyError(data []byte) error {
+	var probe struct {
+		Server map[string]any `yaml:"server"`
+	}
+	// A parse failure here is not ours to report: the real Unmarshal below
+	// runs against the same bytes and will have already failed.
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return nil
+	}
+	recognized := recognizedServerKeys()
+	keys := make([]string, 0, len(probe.Server))
+	for k := range probe.Server {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic: report the same key every time a config has several
+
+	for _, k := range keys {
+		if recognized[k] {
+			continue
+		}
+		if replacement, ok := removedServerKeys[k]; ok {
+			return fmt.Errorf("server.%s was removed in 0.4.0; use %s", k, replacement)
+		}
+		allowed := make([]string, 0, len(recognized))
+		for rk := range recognized {
+			allowed = append(allowed, rk)
+		}
+		sort.Strings(allowed)
+		return fmt.Errorf("server.%s is not a recognised config key (recognised: %s)", k, strings.Join(allowed, ", "))
+	}
+	return nil
+}
+
 // LoadUnchecked parses and validates the CONTENT of a configuration file,
 // skipping the ownership and mode gate.
 //
@@ -273,6 +366,12 @@ func LoadUnchecked(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	// Must run before Validate, and scoped to server: only (see removedKeyError):
+	// an old upstream_host/use_tls pair would otherwise leave LogServers at its
+	// loopback default, which Validate sees as a perfectly valid non-empty list.
+	if err := removedKeyError(data); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	if cfg.Shells == nil {
 		cfg.Shells = builtinShells

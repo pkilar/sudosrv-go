@@ -484,3 +484,102 @@ func TestWarnsWhenTheCABundleIsUnreadableByTheUser(t *testing.T) {
 		t.Error("a group/other-unreadable ca_bundle must warn")
 	}
 }
+
+// yaml.Unmarshal ignores unknown keys, so an old config would otherwise fail
+// with "no servers configured" and never mention the key it ignored.
+func TestLoadNamesRemovedServerKeys(t *testing.T) {
+	for _, tc := range []struct{ key, wants string }{
+		{"upstream_host: \"127.0.0.1:30343\"", "log_servers"},
+		{"use_tls: true", "log_servers"},
+		{"tls_skip_verify: true", "verify"},
+		{"tls_cacert_file: /etc/logsh/ca.pem", "ca_bundle"},
+		{"tls_cert_file: /etc/logsh/c.pem", "client certificate"},
+		{"tls_min_version: \"1.2\"", "1.3"},
+	} {
+		// writeConfig + load(_, selfUID(t)) is how this suite loads a config
+		// without tripping Load's hardcoded root-ownership requirement.
+		path := writeConfig(t, "record_users: [root]\nserver:\n  "+tc.key+"\n")
+		_, err := load(path, selfUID(t))
+		if err == nil {
+			t.Errorf("%s: expected an error", tc.key)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wants) {
+			t.Errorf("%s: error %q does not point at %q", tc.key, err, tc.wants)
+		}
+	}
+}
+
+// TestRecognizedServerKeysMatchesServerConfig pins the key set removedKeyError
+// derives by reflection, so a change to ServerConfig's yaml tags that drops a
+// key -- which would make removedKeyError reject a config that legitimately
+// uses it -- shows up here first, instead of as a lockout report from a host.
+func TestRecognizedServerKeysMatchesServerConfig(t *testing.T) {
+	want := []string{
+		"log_servers", "ca_bundle", "verify",
+		"connect_timeout", "response_timeout", "journal_directory",
+	}
+	got := recognizedServerKeys()
+	if len(got) != len(want) {
+		t.Fatalf("recognizedServerKeys() = %v, want exactly %v", got, want)
+	}
+	for _, k := range want {
+		if !got[k] {
+			t.Errorf("recognizedServerKeys() is missing %q", k)
+		}
+	}
+}
+
+// TestRemovedKeyErrorAcceptsEveryRecognizedKey is the other direction from
+// TestLoadNamesRemovedServerKeys: every key ServerConfig actually understands
+// must still pass, or rejecting unrecognised keys would trade the silent
+// misdirection this task fixes for an outright lockout on a valid config.
+func TestRemovedKeyErrorAcceptsEveryRecognizedKey(t *testing.T) {
+	body := "server:\n" +
+		"  log_servers: [\"central.example(tls)\"]\n" +
+		"  ca_bundle: /etc/logsh/ca.pem\n" +
+		"  verify: true\n" +
+		"  connect_timeout: 5s\n" +
+		"  response_timeout: 30s\n" +
+		"  journal_directory: \"\"\n"
+	if err := removedKeyError([]byte(body)); err != nil {
+		t.Errorf("a config using only recognised server keys was rejected: %v", err)
+	}
+}
+
+// TestLoadNamesGenericUnknownServerKey is the corrected-premise case: a
+// server: key that is neither current nor one of the six enumerated removals
+// must still be rejected, by name. Without this, a removed key this task's
+// table fails to list -- or a plain typo -- would fail exactly as silently as
+// upstream_host used to: the default log_servers stays in place, Validate
+// sees a non-empty list, and the config passes.
+func TestLoadNamesGenericUnknownServerKey(t *testing.T) {
+	path := writeConfig(t, "record_users: [root]\nserver:\n  frobnicate: true\n")
+	_, err := load(path, selfUID(t))
+	if err == nil {
+		t.Fatal("an unrecognised server key was accepted")
+	}
+	if !strings.Contains(err.Error(), "frobnicate") {
+		t.Errorf("error %q does not name the offending key", err)
+	}
+	if strings.Contains(err.Error(), "0.4.0") {
+		t.Errorf("error %q claims a removal version for a key that was never enumerated", err)
+	}
+}
+
+// TestRemovedKeyErrorIsDeterministic guards the sort in removedKeyError. Go
+// randomizes map iteration order per call, so without the sort, an operator
+// who fixes the one key a run happened to report would just uncover a
+// different one the next time they validated.
+func TestRemovedKeyErrorIsDeterministic(t *testing.T) {
+	body := "server:\n  use_tls: true\n  upstream_host: \"x\"\n  tls_skip_verify: true\n"
+	for range 20 {
+		err := removedKeyError([]byte(body))
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		if !strings.Contains(err.Error(), "server.tls_skip_verify") {
+			t.Errorf("error = %q, want it to always name tls_skip_verify (alphabetically first of the three)", err)
+		}
+	}
+}
