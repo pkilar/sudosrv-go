@@ -8,8 +8,9 @@ sudosrv (0.0.0-1) unstable; urgency=medium
   * ACTION REQUIRED: /etc/logsh/logsh.yaml is not replaced on upgrade, and
     logsh REFUSES a login when its configuration is unusable. Roll out a
     converted logsh.yaml with or before this package. The package's own
-    %post check fails loudly on an unconverted host, naming each removed
-    key and its replacement.
+    %post check warns loudly on an unconverted host, naming each removed
+    key and its replacement -- but the upgrade still succeeds; the next
+    login on that host is refused until the config is converted.
   * BREAKING: logsh's server configuration now uses sudo's log_servers
     syntax. server.upstream_host and server.use_tls are replaced by
     server.log_servers, a list of host[:port][(tls)] entries tried in

@@ -103,6 +103,60 @@ spools.
 
 ---
 
+## Upgrading from 0.3.x
+
+**0.4.0 is a deliberate hard break in the `server:` block's syntax**, and
+`/etc/logsh/logsh.yaml` is a conffile (`%config(noreplace)` / a `postinst`
+conffile / a `.pacnew`-style backup): a package upgrade pairs the NEW binary
+with the OLD config file, on every distribution this ships for. logsh refuses
+rather than fails open, so pairing does not mean silent misbehaviour -- it
+means every login to that host is refused.
+
+Every key `removedKeyError` (`internal/logshell/config.go`) checks for, and
+what replaces it:
+
+| Old key (0.3.x) | Replacement (0.4.0) |
+|---|---|
+| `server.upstream_host` | `server.log_servers`, e.g. `["127.0.0.1"]` or `["host(tls)"]` |
+| `server.use_tls` | the `"(tls)"` suffix on a `server.log_servers` entry, e.g. `["host(tls)"]` |
+| `server.tls_skip_verify` | `server.verify: false` |
+| `server.tls_cacert_file` | `server.ca_bundle` |
+| `server.tls_cert_file` | nothing: logsh no longer presents a client certificate |
+| `server.tls_key_file` | nothing: logsh no longer presents a client certificate |
+| `server.tls_min_version` | nothing: the TLS floor is pinned at 1.3 |
+
+**The package upgrade does not stop for this.** `%post` / `postinst` /
+`post_upgrade` all run `logsh-install.sh verify` (`-validate` and
+`-selftest`) against whatever config is already on disk and print a loud
+warning naming every offending key above and its replacement -- but the
+scriptlet only warns. It does not fail the transaction, so `dnf upgrade`,
+`apt upgrade` and `pacman -Syu` all report success regardless, and an
+unattended upgrade will not stop for this: there is no non-zero exit status
+for automation to trip on, and a warning printed during a batch upgrade is
+easy for nobody to read.
+
+**The failure that actually blocks a login happens at the NEXT LOGIN on that
+host, and that login is refused.** By the time anyone notices, the package is
+already installed and every account switched to logsh is locked out, short
+of the break-glass drill above.
+
+**Get the order right: roll the converted `logsh.yaml` out AT OR BEFORE the
+package upgrade, never after.** For a fleet, stage the new config to every
+host first, confirm it took, and only then push the package.
+
+**Check a host before and after:**
+
+```sh
+logsh -validate  # config + permissions; no session or server required
+logsh -selftest  # also confirms server reachability and force_command routing
+```
+
+Run `-validate` against the OLD binary and the CANDIDATE new config before
+rollout, and run it again -- along with `-selftest` -- immediately after the
+package lands, to catch a host whose config slipped through unconverted.
+
+---
+
 ## Rollout
 
 The install script enforces the ordering. Use it rather than doing these by hand.
@@ -413,6 +467,10 @@ a maintainer's, both man pages are present, a site edit to
 `/etc/logsh/logsh.yaml` survives the upgrade, an account switched to logsh
 **stays** switched across it, and removal puts every switched account back on a
 real shell.
+
+That same persistence -- a site edit surviving the upgrade -- is exactly the
+mechanism that produces a 0.3.x-to-0.4.0 lockout when the edit is never
+converted. See "Upgrading from 0.3.x" above before relying on it.
 
 The Debian build runs from `git archive HEAD` specifically, because the defect
 it replaces — installing an untracked `config.yaml` — was invisible to any test
