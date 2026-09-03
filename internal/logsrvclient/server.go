@@ -15,10 +15,16 @@ const (
 	DefaultTLSPort = "30344"
 )
 
-// tlsSuffix is the ONLY accepted suffix. Anything else parenthesised is an
-// error rather than a hostname: this token alone decides whether a session
-// transcript crosses the network in the clear, and a typo in it must not
-// degrade quietly to plaintext.
+// tlsSuffix is the ONLY accepted suffix, matched case-insensitively because
+// sudo does the same -- lib/iolog/host_port.c compares it with strcasecmp, so
+// "(TLS)" is as valid as "(tls)" in a sudoers log_servers list and must not be
+// refused here.
+//
+// Anything else parenthesised is an error rather than a hostname. That part is
+// deliberately STRICTER than sudo, which truncates at '(' and silently falls
+// through to plaintext on an unrecognised flag: this token alone decides
+// whether a session transcript crosses the network in the clear, so a typo in
+// it must not degrade quietly.
 const tlsSuffix = "(tls)"
 
 // Target is one resolved log server. Address always carries an explicit port,
@@ -37,16 +43,16 @@ func ParseServer(spec string) (Target, error) {
 
 	useTLS := false
 	switch {
-	case strings.HasSuffix(s, tlsSuffix):
+	case len(s) >= len(tlsSuffix) && strings.EqualFold(s[len(s)-len(tlsSuffix):], tlsSuffix):
 		useTLS = true
-		s = strings.TrimSuffix(s, tlsSuffix)
+		s = s[:len(s)-len(tlsSuffix)]
 	case strings.HasSuffix(s, ")"):
 		i := strings.LastIndex(s, "(")
 		if i == -1 {
 			return Target{}, fmt.Errorf("log server %q: unbalanced %q", spec, ")")
 		}
 		return Target{}, fmt.Errorf(
-			"log server %q: %q is not a recognised suffix; only %q selects TLS",
+			"log server %q: %q is not a recognised suffix; only %q, in any case, selects TLS",
 			spec, s[i:], tlsSuffix)
 	case strings.Contains(s, "("):
 		return Target{}, fmt.Errorf("log server %q: unbalanced %q", spec, "(")
@@ -61,14 +67,20 @@ func ParseServer(spec string) (Target, error) {
 		port = DefaultTLSPort
 	}
 
-	// SplitHostPort succeeds only when a port is actually present; it also
-	// validates the bracketed IPv6 form for us.
+	// SplitHostPort succeeds only when a port is actually present. It checks
+	// bracket STRUCTURE but not the contents, so a bracketed host still has to
+	// be validated as an IP literal below.
 	if host, p, err := net.SplitHostPort(s); err == nil {
 		if host == "" {
 			return Target{}, fmt.Errorf("log server %q: no host before the port", spec)
 		}
 		if p == "" {
 			return Target{}, fmt.Errorf("log server %q: empty port", spec)
+		}
+		if strings.HasPrefix(s, "[") {
+			if err := checkBracketed(host, spec); err != nil {
+				return Target{}, err
+			}
 		}
 		return Target{Address: net.JoinHostPort(host, p), UseTLS: useTLS}, nil
 	}
@@ -80,12 +92,41 @@ func ParseServer(spec string) (Target, error) {
 	host := s
 	if strings.ContainsAny(s, "[]") {
 		if len(s) < 2 || s[0] != '[' || s[len(s)-1] != ']' || strings.ContainsAny(s[1:len(s)-1], "[]") {
-			return Target{}, fmt.Errorf("log server %q: malformed IPv6 literal", spec)
+			return Target{}, fmt.Errorf("log server %q: malformed brackets", spec)
 		}
 		host = s[1 : len(s)-1]
+		if err := checkBracketed(host, spec); err != nil {
+			return Target{}, err
+		}
 	}
 	if host == "" {
 		return Target{}, fmt.Errorf("log server %q: no host before the port", spec)
 	}
 	return Target{Address: net.JoinHostPort(host, port), UseTLS: useTLS}, nil
+}
+
+// checkBracketed validates the contents of a [...] host.
+//
+// Brackets denote an IP literal, so a name inside them is a typo rather than a
+// host. sudo's parser only locates the ']' and never inspects what precedes it
+// (lib/iolog/host_port.c), which means "[logsrv.example]" resolves through DNS
+// and ships transcripts to a host the operator never wrote in brackets, while a
+// mistyped literal like "[2001:db8:::1]" surfaces as a dial error at the next
+// login instead of a config error at -validate. logsh refuses a login rather
+// than failing open, so the config-time error is the one worth having.
+func checkBracketed(inner, spec string) error {
+	addr, zone, hasZone := strings.Cut(inner, "%")
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf("log server %q: %q is bracketed but is not an IP address", spec, addr)
+	}
+	if hasZone {
+		if zone == "" {
+			return fmt.Errorf("log server %q: empty zone after %q", spec, "%")
+		}
+		if ip.To4() != nil {
+			return fmt.Errorf("log server %q: a zone is only meaningful on an IPv6 address", spec)
+		}
+	}
+	return nil
 }

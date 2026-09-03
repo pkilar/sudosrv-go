@@ -80,8 +80,14 @@ server:
   # explicit :port overrides either default. Servers are tried in the order
   # written and the first one that answers is used.
   #
-  # A suffix that is not exactly "(tls)" is an error, not a hostname -- that
-  # token is the only thing standing between a transcript and the clear.
+  # The suffix is matched case-insensitively, as sudo matches it, so "(TLS)"
+  # works too. Any OTHER parenthesised suffix is an error, not a hostname --
+  # that token is the only thing standing between a transcript and the clear,
+  # so a typo must not degrade quietly to plaintext the way sudo's does.
+  #
+  # An IPv6 address goes in brackets: "[2001:db8::1]:9999(tls)". What is inside
+  # the brackets must be an IP literal, so "[name.example]" is rejected rather
+  # than resolved through DNS.
   log_servers:
     - "127.0.0.1"
   #   - "sudo-iolog.acme.com(tls)"

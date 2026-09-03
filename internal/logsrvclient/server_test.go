@@ -22,6 +22,13 @@ func TestParseServer(t *testing.T) {
 		{"[2001:db8::1]:9999(tls)", "[2001:db8::1]:9999", true},
 		{"2001:db8::1", "[2001:db8::1]:30343", false},
 		{"  sudo-iolog.acme.com(tls)  ", "sudo-iolog.acme.com:30344", true},
+		{"sudo-iolog.acme.com(TLS)", "sudo-iolog.acme.com:30344", true},
+		{"sudo-iolog.acme.com(Tls)", "sudo-iolog.acme.com:30344", true},
+		{"sudo-iolog.acme.com:9999(TLS)", "sudo-iolog.acme.com:9999", true},
+		{"[2001:db8::1](TLS)", "[2001:db8::1]:30344", true},
+		{"[127.0.0.1]", "127.0.0.1:30343", false},
+		{"[fe80::1%eth0]", "[fe80::1%eth0]:30343", false},
+		{"[fe80::1%eth0]:9999(tls)", "[fe80::1%eth0]:9999", true},
 	} {
 		got, err := ParseServer(tc.spec)
 		if err != nil {
@@ -41,7 +48,6 @@ func TestParseServer(t *testing.T) {
 func TestParseServerRejectsMalformedSuffix(t *testing.T) {
 	for _, spec := range []string{
 		"sudo-iolog.acme.com(ssl)",
-		"sudo-iolog.acme.com(TLS)",
 		"sudo-iolog.acme.com()",
 		"sudo-iolog.acme.com(tls",
 	} {
@@ -79,5 +85,26 @@ func TestParseServerErrorNamesTheSpec(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sudo-iolog.acme.com(ssl)") {
 		t.Errorf("error %q does not name the offending spec", err)
+	}
+}
+
+// Brackets denote an IP literal. Accepting a DNS name inside them would let a
+// malformed address resolve and send transcripts to an unintended host, and a
+// mistyped IPv6 literal would surface as a DNS error at login rather than as a
+// config error at -validate. sudo's own parser only locates the ']'; this is
+// deliberately stricter.
+func TestParseServerRejectsBracketedNonIP(t *testing.T) {
+	for _, spec := range []string{
+		"[logsrv.example]",
+		"[logsrv.example]:9999",
+		"[logsrv.example](tls)",
+		"[2001:db8:::1]",
+		"[]",
+		"[fe80::1%]",
+		"[127.0.0.1%eth0]",
+	} {
+		if got, err := ParseServer(spec); err == nil {
+			t.Errorf("ParseServer(%q) = %+v, want an error", spec, got)
+		}
 	}
 }
