@@ -53,4 +53,4 @@ sudosrv (0.0.0-1) unstable; urgency=medium
     sudo_logsrv.proto protocol, local and relay modes, TLS, store-and-forward
     caching, sudoers-compatible log paths, systemd units.
 
- -- Paul Kilar <pkilar@gmail.com>  Thu, 27 Aug 2026 00:00:00 +0000
+ -- Paul Kilar <pkilar@gmail.com>  Thu, 03 Sep 2026 00:00:00 +0000
