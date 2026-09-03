@@ -291,6 +291,17 @@ func recognizedServerKeys() map[string]bool {
 //     no ",inline" -- falls back to strings.ToLower(field.Name). For an
 //     anonymous field, reflect.StructField.Name IS the embedded type's own
 //     name, so this one fallback correctly covers both cases at once.
+//   - NOT IMPLEMENTED HERE: yaml.v3's getStructInfo also has a legacy
+//     fallback for a struct tag with no "yaml" key at all -- when the whole
+//     tag has no ":" anywhere in it, it uses that whole tag string as the
+//     field name. So a field declared with the bare tag log_servers (no
+//     `yaml:"..."` wrapper) decodes under "log_servers" in real yaml.v3.
+//     addYAMLKeys only ever reads f.Tag.Get("yaml") and falls back to
+//     strings.ToLower(field.Name), so a field written that way would be
+//     named "foo" here instead -- a key yaml.v3 accepts that removedKeyError
+//     would then reject. Dormant today: no field in ServerConfig, or
+//     anything else addYAMLKeys walks, is declared without an explicit
+//     `yaml:"..."` tag.
 //
 // Getting any one of these wrong means a key yaml.v3 itself would decode is
 // one removedKeyError rejects: a lockout in the code meant to prevent one.

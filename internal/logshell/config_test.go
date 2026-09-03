@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // writeConfig drops a config file into its own directory and returns the path.
@@ -599,6 +601,49 @@ func TestAddYAMLKeysMatchesEveryTagForm(t *testing.T) {
 	}
 	if keys["skipped"] || keys["Skipped"] || keys["-"] {
 		t.Error(`yaml:"-" must not contribute a key`)
+	}
+}
+
+// TestAddYAMLKeysMatchesRealYAMLUnmarshal proves the key set above against a
+// REAL yaml.Unmarshal into yamlTagProbe, rather than resting only on
+// TestAddYAMLKeysMatchesEveryTagForm, which restates what addYAMLKeys itself
+// returns: if that hand-derived reading of getStructInfo were ever wrong, the
+// helper and that test would be wrong together and both would stay green.
+// This one only passes when yaml.v3 actually consumes each key addYAMLKeys
+// claims it does, and actually ignores each one it claims to skip, so a
+// future divergence from yaml.v3 fails the suite instead of staying dormant.
+func TestAddYAMLKeysMatchesRealYAMLUnmarshal(t *testing.T) {
+	unmarshal := func(t *testing.T, doc string) yamlTagProbe {
+		t.Helper()
+		var probe yamlTagProbe
+		if err := yaml.Unmarshal([]byte(doc), &probe); err != nil {
+			t.Fatalf("yaml.Unmarshal(%q): %v", doc, err)
+		}
+		return probe
+	}
+
+	// Positive: every key addYAMLKeys reports must really land on the field
+	// it claims to.
+	if got := unmarshal(t, "explicit_name: set\n"); got.Explicit != "set" {
+		t.Errorf("explicit_name did not land on Explicit: %+v", got)
+	}
+	if got := unmarshal(t, "untagged: set\n"); got.Untagged != "set" {
+		t.Errorf("untagged did not land on Untagged: %+v", got)
+	}
+	if got := unmarshal(t, "inner_key: set\n"); got.Inline.Inner != "set" {
+		t.Errorf("inner_key did not land on Inline.Inner: %+v", got)
+	}
+	if got := unmarshal(t, "probeembedded:\n  embedded_value: set\n"); got.Value != "set" {
+		t.Errorf("probeembedded did not land on ProbeEmbedded.Value: %+v", got)
+	}
+
+	// Negative: a key addYAMLKeys deliberately omits must really be a no-op
+	// under yaml.Unmarshal, not merely absent from addYAMLKeys's own map.
+	if got := unmarshal(t, "skipped: set\n"); got.Skipped == "set" {
+		t.Error(`yaml:"-" must not be settable via the key "skipped"`)
+	}
+	if got := unmarshal(t, "ignored_because_unexported: set\n"); got.unexported == "set" {
+		t.Error("an unexported field must not be settable by yaml.Unmarshal")
 	}
 }
 
