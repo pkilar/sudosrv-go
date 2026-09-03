@@ -260,28 +260,76 @@ var removedServerKeys = map[string]string{
 	"tls_min_version": "nothing: the TLS floor is pinned at 1.3",
 }
 
-// recognizedServerKeys returns the YAML keys ServerConfig understands, one
-// per struct field's yaml tag.
-//
-// This set is derived rather than hand-listed a second time: a hand-copied
-// list is one refactor away from rejecting a key that a later change to
-// ServerConfig adds, and on a login shell that rejection is a lockout, not a
-// cosmetic bug.
+// recognizedServerKeys returns the YAML keys ServerConfig understands, by
+// walking its struct tags the same way gopkg.in/yaml.v3's getStructInfo does
+// (yaml.go, unexported) rather than a second, hand-copied list -- a
+// hand-copied list is one refactor away from rejecting a key that a later
+// change to ServerConfig adds, and on a login shell that rejection is a
+// lockout, not a cosmetic bug. See addYAMLKeys for the rules this follows.
 func recognizedServerKeys() map[string]bool {
-	t := reflect.TypeFor[ServerConfig]()
-	keys := make(map[string]bool, t.NumField())
-	for f := range t.Fields() {
-		name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
-		if name != "" && name != "-" {
-			keys[name] = true
-		}
-	}
+	keys := make(map[string]bool)
+	addYAMLKeys(reflect.TypeFor[ServerConfig](), keys)
 	return keys
 }
 
-// removedKeyError reports the first (alphabetically) unrecognised key
-// present under server:, or nil if every key there is one ServerConfig
-// understands.
+// addYAMLKeys adds every top-level YAML key t contributes to keys, matching
+// gopkg.in/yaml.v3@v3.0.1's getStructInfo field-by-field rather than just
+// "does the field have a yaml tag":
+//
+//   - An unexported, non-anonymous field is skipped outright -- yaml.v3
+//     cannot set it either.
+//   - A bare `yaml:"-"` (no comma; the whole tag, checked before any
+//     splitting) skips the field. `yaml:"-,anything"` is NOT this case, and
+//     names the field "-" like any other explicit tag would.
+//   - `,inline` on a struct (or pointer-to-struct) field hoists that
+//     struct's own keys into the caller's set instead of adding one key for
+//     the field itself; addYAMLKeys recurses to collect them. An inline MAP
+//     is not handled -- ServerConfig has no map field today, and one would
+//     make every key valid, which this map[string]bool result cannot
+//     express.
+//   - A field with no tag at all -- explicitly untagged, or anonymous with
+//     no ",inline" -- falls back to strings.ToLower(field.Name). For an
+//     anonymous field, reflect.StructField.Name IS the embedded type's own
+//     name, so this one fallback correctly covers both cases at once.
+//
+// Getting any one of these wrong means a key yaml.v3 itself would decode is
+// one removedKeyError rejects: a lockout in the code meant to prevent one.
+func addYAMLKeys(t reflect.Type, keys map[string]bool) {
+	for f := range t.Fields() {
+		if f.PkgPath != "" && !f.Anonymous {
+			continue // unexported, non-anonymous: yaml.v3 skips it too
+		}
+		tag := f.Tag.Get("yaml")
+		if tag == "-" {
+			continue // exact match only, checked before any comma split
+		}
+		name, opts, _ := strings.Cut(tag, ",")
+		inline := false
+		for opt := range strings.SplitSeq(opts, ",") {
+			if opt == "inline" {
+				inline = true
+				break
+			}
+		}
+		if inline {
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				addYAMLKeys(ft, keys)
+			}
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(f.Name)
+		}
+		keys[name] = true
+	}
+}
+
+// removedKeyError reports every unrecognised key present under server:,
+// sorted, or nil if every key there is one ServerConfig understands.
 //
 // This exists because yaml.Unmarshal ignores keys with no matching field:
 // left unchecked, an old config's upstream_host is silently dropped,
@@ -289,10 +337,13 @@ func recognizedServerKeys() map[string]bool {
 // passes, and every recorded session on that host is sent to 127.0.0.1 in
 // the clear instead of the configured TLS server -- no error, no warning.
 // Because an unusable config makes logsh refuse a login, the message this
-// produces has to name the key, and where known its replacement, on sight.
+// produces has to name every offending key, and where known its
+// replacement, on sight: a typical unconverted config carries several of
+// these keys at once, and an operator locked out of the host should not
+// have to run -validate three times to hear about all of them.
 //
 // A key listed in removedServerKeys gets that specific replacement. Any
-// other unrecognised key is still rejected, just with a generic message --
+// other unrecognised key is still reported, just with a generic message --
 // a removed key this table fails to list would otherwise fail exactly as
 // silently as upstream_host did, which is why the check is not limited to
 // the map's keys.
@@ -303,33 +354,49 @@ func removedKeyError(data []byte) error {
 	var probe struct {
 		Server map[string]any `yaml:"server"`
 	}
-	// A parse failure here is not ours to report: the real Unmarshal below
-	// runs against the same bytes and will have already failed.
+	// If this second decode of the same bytes fails, the real Unmarshal a
+	// few lines below (into cfg, which embeds ServerConfig) should already
+	// have failed and returned: decoding into a typed struct is at least as
+	// strict as decoding the same mapping into map[string]any, so a
+	// map[string]any decode failing here, after the typed decode already
+	// succeeded, would mean that assumption broke. Report it rather than
+	// assume it can't happen -- silently discarding an error this task's own
+	// probe hit is exactly the kind of silent pass-through this task exists
+	// to close.
 	if err := yaml.Unmarshal(data, &probe); err != nil {
-		return nil
+		return fmt.Errorf("parsing server: block: %w", err)
 	}
 	recognized := recognizedServerKeys()
 	keys := make([]string, 0, len(probe.Server))
 	for k := range probe.Server {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys) // deterministic: report the same key every time a config has several
+	sort.Strings(keys) // deterministic: report the same keys, in the same order, every time
 
+	var lines []string
 	for _, k := range keys {
 		if recognized[k] {
 			continue
 		}
 		if replacement, ok := removedServerKeys[k]; ok {
-			return fmt.Errorf("server.%s was removed in 0.4.0; use %s", k, replacement)
+			lines = append(lines, fmt.Sprintf("server.%s was removed in 0.4.0; use %s", k, replacement))
+			continue
 		}
 		allowed := make([]string, 0, len(recognized))
 		for rk := range recognized {
 			allowed = append(allowed, rk)
 		}
 		sort.Strings(allowed)
-		return fmt.Errorf("server.%s is not a recognised config key (recognised: %s)", k, strings.Join(allowed, ", "))
+		lines = append(lines, fmt.Sprintf("server.%s is not a recognised config key (recognised: %s)", k, strings.Join(allowed, ", ")))
 	}
-	return nil
+	if len(lines) == 0 {
+		return nil
+	}
+	noun := "key"
+	if len(lines) != 1 {
+		noun = "keys"
+	}
+	return fmt.Errorf("%d unusable %s under server:\n  %s", len(lines), noun, strings.Join(lines, "\n  "))
 }
 
 // LoadUnchecked parses and validates the CONTENT of a configuration file,

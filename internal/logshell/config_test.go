@@ -5,6 +5,7 @@ package logshell
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -520,6 +521,18 @@ func TestRecognizedServerKeysMatchesServerConfig(t *testing.T) {
 		"connect_timeout", "response_timeout", "journal_directory",
 	}
 	got := recognizedServerKeys()
+
+	// Tied to the struct itself, not just to the literal list below.
+	// ServerConfig carries no inline or embedded field today, so it
+	// contributes exactly one key per field; NumField is therefore the
+	// count addYAMLKeys must produce. A field the helper fails to name --
+	// an added field with no yaml tag was the exact gap found in review --
+	// changes this count without necessarily changing len(want), so this
+	// catches it even when nobody remembers to update the list below.
+	if wantCount := reflect.TypeFor[ServerConfig]().NumField(); len(got) != wantCount {
+		t.Fatalf("recognizedServerKeys() has %d keys, want %d (one per ServerConfig field): %v",
+			len(got), wantCount, got)
+	}
 	if len(got) != len(want) {
 		t.Fatalf("recognizedServerKeys() = %v, want exactly %v", got, want)
 	}
@@ -527,6 +540,65 @@ func TestRecognizedServerKeysMatchesServerConfig(t *testing.T) {
 		if !got[k] {
 			t.Errorf("recognizedServerKeys() is missing %q", k)
 		}
+	}
+}
+
+// probeInline is hoisted into yamlTagProbe below by ,inline: yaml.v3 splices
+// its own key(s) straight into the parent mapping, rather than nesting them
+// under a key named for the field that holds it.
+type probeInline struct {
+	Inner string `yaml:"inner_key"`
+}
+
+// ProbeEmbedded is embedded WITHOUT ,inline in yamlTagProbe below: yaml.v3
+// still gives it exactly one key of its own -- strings.ToLower of its type
+// name, since the field carries no tag -- rather than hoisting Value the way
+// ,inline would.
+type ProbeEmbedded struct {
+	Value string `yaml:"embedded_value"`
+}
+
+// yamlTagProbe exercises every yaml.v3 tag form review found missing from
+// addYAMLKeys's coverage: no tag at all, ,inline, a plain (non-inline)
+// anonymous field, an explicit "-", and an unexported non-anonymous field.
+// ServerConfig has none of these today, but a future field could be any of
+// them, and getting one wrong means a key yaml.v3 itself would decode is one
+// removedKeyError rejects -- a lockout in the code meant to prevent one.
+type yamlTagProbe struct {
+	Explicit   string `yaml:"explicit_name"`
+	Untagged   string
+	unexported string      `yaml:"ignored_because_unexported"` //nolint:unused // read only via addYAMLKeys' reflection; asserted below to contribute no key
+	Skipped    string      `yaml:"-"`
+	Inline     probeInline `yaml:",inline"`
+	ProbeEmbedded
+}
+
+func TestAddYAMLKeysMatchesEveryTagForm(t *testing.T) {
+	keys := make(map[string]bool)
+	addYAMLKeys(reflect.TypeFor[yamlTagProbe](), keys)
+
+	want := []string{
+		"explicit_name", // an explicit yaml:"..." tag
+		"untagged",      // no tag: yaml.v3 falls back to strings.ToLower(field name)
+		"inner_key",     // ,inline hoists the nested struct's own key(s)
+		"probeembedded", // anonymous without ,inline: keyed by strings.ToLower(type name)
+	}
+	if len(keys) != len(want) {
+		t.Fatalf("addYAMLKeys(yamlTagProbe) = %v, want exactly %v", keys, want)
+	}
+	for _, k := range want {
+		if !keys[k] {
+			t.Errorf("addYAMLKeys(yamlTagProbe) is missing %q", k)
+		}
+	}
+	if keys["ignored_because_unexported"] {
+		t.Error("an unexported, non-anonymous field must not contribute a key")
+	}
+	if keys["inline"] || keys["Inline"] {
+		t.Error(",inline must hoist the nested struct's own keys, not add one named for the field")
+	}
+	if keys["skipped"] || keys["Skipped"] || keys["-"] {
+		t.Error(`yaml:"-" must not contribute a key`)
 	}
 }
 
@@ -567,19 +639,61 @@ func TestLoadNamesGenericUnknownServerKey(t *testing.T) {
 	}
 }
 
-// TestRemovedKeyErrorIsDeterministic guards the sort in removedKeyError. Go
-// randomizes map iteration order per call, so without the sort, an operator
-// who fixes the one key a run happened to report would just uncover a
-// different one the next time they validated.
+// TestRemovedKeyErrorIsDeterministic guards the sort in removedKeyError, and
+// that every bad key is reported, not just the first. Go randomizes map
+// iteration order per call, so without the sort, an operator fixing the
+// keys a run happened to report would just uncover a different set, or a
+// different order, next time they validated -- and a typical unconverted
+// config carries several of these keys together, so reporting only one
+// would turn a single edit into repeated edit/validate cycles.
 func TestRemovedKeyErrorIsDeterministic(t *testing.T) {
 	body := "server:\n  use_tls: true\n  upstream_host: \"x\"\n  tls_skip_verify: true\n"
+	want := "3 unusable keys under server:\n" +
+		"  server.tls_skip_verify was removed in 0.4.0; use server.verify: false\n" +
+		"  server.upstream_host was removed in 0.4.0; use server.log_servers, e.g. [\"127.0.0.1\"] or [\"host(tls)\"]\n" +
+		"  server.use_tls was removed in 0.4.0; use the \"(tls)\" suffix on a server.log_servers entry, e.g. [\"host(tls)\"]"
 	for range 20 {
 		err := removedKeyError([]byte(body))
 		if err == nil {
 			t.Fatal("want an error")
 		}
-		if !strings.Contains(err.Error(), "server.tls_skip_verify") {
-			t.Errorf("error = %q, want it to always name tls_skip_verify (alphabetically first of the three)", err)
+		if err.Error() != want {
+			t.Fatalf("error =\n%s\nwant\n%s", err, want)
 		}
+	}
+}
+
+// TestLoadAcceptsAFullyModernServerBlock is the end-to-end green case this
+// task needs alongside TestLoadNamesRemovedServerKeys: a config using every
+// key ServerConfig currently understands must load cleanly through the real
+// load() path -- CheckPerms, the real yaml.Unmarshal, removedKeyError and
+// Validate together, not just removedKeyError in isolation the way
+// TestRemovedKeyErrorAcceptsEveryRecognizedKey exercises it. Until Task 6
+// rewrites examples/logsh.yaml, this is the only green proof that a valid,
+// current config is not rejected by this task's own check; it must stay
+// green regardless of when that lands.
+func TestLoadAcceptsAFullyModernServerBlock(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(bundle, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	body := "record_users: [root]\n" +
+		"server:\n" +
+		"  log_servers: [\"central.example(tls)\"]\n" +
+		"  ca_bundle: \"" + bundle + "\"\n" +
+		"  verify: true\n" +
+		"  connect_timeout: 5s\n" +
+		"  response_timeout: 30s\n" +
+		"  journal_directory: \"\"\n"
+	cfg, err := load(writeConfig(t, body), selfUID(t))
+	if err != nil {
+		t.Fatalf("a config using only recognised server keys was rejected: %v", err)
+	}
+	if len(cfg.Server.LogServers) != 1 || cfg.Server.LogServers[0] != "central.example(tls)" {
+		t.Errorf("Server.LogServers = %v, want [central.example(tls)]", cfg.Server.LogServers)
+	}
+	if cfg.Server.CABundle != bundle {
+		t.Errorf("Server.CABundle = %q, want %q", cfg.Server.CABundle, bundle)
 	}
 }
