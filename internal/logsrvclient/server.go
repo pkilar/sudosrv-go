@@ -73,7 +73,19 @@ func ParseServer(spec string) (Target, error) {
 		return Target{Address: net.JoinHostPort(host, p), UseTLS: useTLS}, nil
 	}
 
-	// No port. Strip any brackets so JoinHostPort re-adds exactly one pair for
-	// an IPv6 literal, whether or not the operator wrote them.
-	return Target{Address: net.JoinHostPort(strings.Trim(s, "[]"), port), UseTLS: useTLS}, nil
+	// No port. A spec containing '[' or ']' must be a single, complete IPv6
+	// literal -- '[' at the very start, ']' at the very end, and nothing else
+	// bracketed or trailing -- rather than have stray or unbalanced brackets
+	// silently stripped into a mangled or empty host.
+	host := s
+	if strings.ContainsAny(s, "[]") {
+		if len(s) < 2 || s[0] != '[' || s[len(s)-1] != ']' || strings.ContainsAny(s[1:len(s)-1], "[]") {
+			return Target{}, fmt.Errorf("log server %q: malformed IPv6 literal", spec)
+		}
+		host = s[1 : len(s)-1]
+	}
+	if host == "" {
+		return Target{}, fmt.Errorf("log server %q: no host before the port", spec)
+	}
+	return Target{Address: net.JoinHostPort(host, port), UseTLS: useTLS}, nil
 }

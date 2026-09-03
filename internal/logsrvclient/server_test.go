@@ -59,6 +59,18 @@ func TestParseServerRejectsEmptyAndHostless(t *testing.T) {
 	}
 }
 
+// A spec with an incomplete, extra, or trailing bracket must be rejected
+// outright, never reduced by naive bracket-stripping to an empty or mangled
+// host -- an empty host resolves to the local system on dial, so a typo'd
+// bracket must not silently redirect a session transcript there.
+func TestParseServerRejectsMalformedBrackets(t *testing.T) {
+	for _, spec := range []string{"[]", "[", "]", "][", "]abc[", "[::1]extra"} {
+		if got, err := ParseServer(spec); err == nil {
+			t.Errorf("ParseServer(%q) = %+v, want an error", spec, got)
+		}
+	}
+}
+
 // The message is shown while refusing a login, so it must name the input.
 func TestParseServerErrorNamesTheSpec(t *testing.T) {
 	_, err := ParseServer("sudo-iolog.acme.com(ssl)")
