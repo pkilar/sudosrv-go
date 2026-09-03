@@ -26,6 +26,8 @@ sudosrv (0.0.0-1) unstable; urgency=medium
     references outside /etc/ssh. --force overrides once it is gone.
   * Fix: the documentation said nested_sessions defaults to metadata, while
     the default is and always was record.
+  * Removed: logsh -record, -shell and -wire. logsh records to a log server
+    only; standalone local recording is gone.
   *
   * Earlier: standalone recording with logsh -record and -wire; the wiredump
     command; sessions carrying source, runenv and submitenv; version stamped

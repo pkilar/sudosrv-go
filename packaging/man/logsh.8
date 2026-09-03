@@ -13,12 +13,6 @@ logsh \- recording login shell for sudo I/O log servers
 .RB [ \-config
 .IR path ]
 .RB [ \-version ]
-.PP
-.B logsh
-.BI \-record " dir"
-.RB [ \-shell
-.IR path ]
-.RB [ \-wire ]
 .SH DESCRIPTION
 .B logsh
 is a multi-call login shell that records a terminal session to a
@@ -98,30 +92,6 @@ package maintainer scripts after installation.
 .BI \-config " path"
 Configuration file to read. Default:
 .IR /etc/logsh/logsh.yaml .
-.TP
-.BI \-record " dir"
-Record this session into
-.I dir
-as a sudoreplay-compatible I/O log and contact no log server. Intended for
-capturing a session on a host that has no reachable
-.BR sudosrv (8).
-.TP
-.BI \-shell " path"
-Shell to run under
-.BR \-record .
-Defaults to
-.IR $SHELL ,
-then
-.IR /bin/sh .
-.TP
-.B \-wire
-With
-.BR \-record ,
-also write the raw wire-format stream as
-.IR session.wire ,
-which
-.BR wiredump (8)
-can decode.
 .TP
 .B \-version
 Print the version and exit.
