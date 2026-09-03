@@ -344,6 +344,28 @@ func runSelftest(path string) int {
 			name, resolveErr)
 	}
 
+	// After a syntax change the operator's first question is "what will it
+	// actually dial?" -- so answer it rather than merely validating.
+	cfgs, serverErr := cfg.ClientConfigs()
+	switch {
+	case serverErr != nil:
+		fmt.Fprintf(os.Stderr, "FAIL  server: %v\n", serverErr)
+		failed = true
+	default:
+		verification := "on"
+		if !cfg.VerifyEnabled() {
+			verification = "OFF"
+		}
+		fmt.Printf("ok    server: %d log server(s), verification %s\n", len(cfgs), verification)
+		for _, cc := range cfgs {
+			transport := "plain"
+			if cc.UseTLS {
+				transport = "tls"
+			}
+			fmt.Printf("        %s (%s)\n", cc.UpstreamHost, transport)
+		}
+	}
+
 	// The question an operator most needs answered before enabling a host: what
 	// will a forced-command root session actually run here? The shell comes from
 	// this host's passwd file, so it can differ from host to host, and printing
