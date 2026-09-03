@@ -245,7 +245,7 @@ exit 0
 - logsh contacts each configured server in order and uses the first that answers
 - ACTION REQUIRED: /etc/logsh/logsh.yaml is not replaced on upgrade, and logsh
   REFUSES a login when its configuration is unusable. Roll out a converted
-  logsh.yaml with or before this package. The package's own %post check fails
+  logsh.yaml with or before this package. The package's own %%post check fails
   loudly on an unconverted host, naming each removed key and its replacement
 
 * Thu Aug 27 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
