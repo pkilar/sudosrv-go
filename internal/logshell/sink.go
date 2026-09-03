@@ -107,9 +107,18 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 	// Not returned directly on failure: doing so would drop journalErr on a
 	// host where both the spool and the server list are broken, reporting
 	// only the half of the failure that happened to be checked second.
+	//
+	// cfgErr and a connectAny failure are not the same cause and must not
+	// share a label: cfgErr means a configured server spec could not be
+	// resolved to an address at all (a config problem), while connectAny
+	// failing means resolved addresses were dialled and refused, timed out,
+	// or -- if ctx was already done -- that the wait itself was cancelled.
+	// Folding all three under "log server unreachable" blames the servers
+	// for failures that were never theirs.
 	cfgs, cfgErr := cfg.ClientConfigs()
-	streamErr = cfgErr
-	if cfgErr == nil {
+	if cfgErr != nil {
+		streamErr = fmt.Errorf("log servers unresolvable: %w", cfgErr)
+	} else {
 		proc, chosen, err := connectAny(ctx, cfgs)
 		if err == nil {
 			return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
@@ -118,7 +127,7 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 	}
 
 	if journalErr != nil {
-		return nil, fmt.Errorf("journal unusable (%w) and log server unreachable (%w)", journalErr, streamErr)
+		return nil, fmt.Errorf("journal unusable (%w) and %w", journalErr, streamErr)
 	}
 	return nil, streamErr
 }
@@ -137,6 +146,14 @@ func connectAny(ctx context.Context, cfgs []logsrvclient.Config) (protocol.Proce
 	}
 	failures := make([]string, 0, len(cfgs))
 	for _, cc := range cfgs {
+		// Checked before every dial, not just once up front: a context that
+		// is cancelled or times out partway through the list must stop the
+		// walk here too, rather than let each remaining server fail fast
+		// with its own "operation was canceled" and get folded into the
+		// aggregate error below as if it were unreachable.
+		if err := ctx.Err(); err != nil {
+			return nil, logsrvclient.Config{}, err
+		}
 		proc, err := logsrvclient.Connect(ctx, cc)
 		if err == nil {
 			return proc, cc, nil
