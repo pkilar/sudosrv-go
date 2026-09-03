@@ -172,19 +172,9 @@ func TestValidate(t *testing.T) {
 			wantErr: "absolute",
 		},
 		{
-			name:    "missing upstream",
-			mutate:  func(c *Config) { c.Server.UpstreamHost = "" },
-			wantErr: "upstream_host",
-		},
-		{
-			name:    "half-configured TLS pair",
-			mutate:  func(c *Config) { c.Server.TLSCertFile = "/etc/logsh/cert.pem" },
-			wantErr: "together",
-		},
-		{
-			name:    "bad tls_min_version",
-			mutate:  func(c *Config) { c.Server.TLSMinVersion = "1.1" },
-			wantErr: "tls_min_version",
+			name:    "empty log_servers list",
+			mutate:  func(c *Config) { c.Server.LogServers = nil },
+			wantErr: "log_servers",
 		},
 		{
 			name:    "relative break-glass marker",
@@ -209,28 +199,6 @@ func TestValidate(t *testing.T) {
 
 	if err := DefaultConfig().Validate(); err != nil {
 		t.Errorf("the shipped defaults do not validate: %v", err)
-	}
-}
-
-// TestWarningsFlagsUserReadableClientKey guards the property that makes the
-// whole deployment model safe: logsh runs as the logging-in user, so a client
-// certificate it can read is one that user can steal and use to forge audit
-// records against the central server.
-func TestWarningsFlagsUserReadableClientKey(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.RecordUsers = []string{"root"}
-	cfg.Server.TLSCertFile = "/etc/logsh/client.pem"
-	cfg.Server.TLSKeyFile = "/etc/logsh/client.key"
-
-	var found bool
-	for _, w := range cfg.Warnings() {
-		if strings.Contains(w, "tls_cert_file") {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("configuring a client certificate produced no warning, though logsh runs as " +
-			"the logging-in user and the key would be readable by them")
 	}
 }
 
@@ -395,5 +363,122 @@ func TestWarningsShellOverride(t *testing.T) {
 	}
 	if !slices.ContainsFunc(cfg.Warnings(), func(w string) bool { return strings.Contains(w, "force_command.shell") }) {
 		t.Errorf("want a force_command.shell warning, got %v", cfg.Warnings())
+	}
+}
+
+func TestClientConfigsResolveEachServerInOrder(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.LogServers = []string{"a.example(tls)", "b.example:9999", "c.example"}
+	got, err := c.ClientConfigs()
+	if err != nil {
+		t.Fatalf("ClientConfigs: %v", err)
+	}
+	want := []struct {
+		host string
+		tls  bool
+	}{
+		{"a.example:30344", true},
+		{"b.example:9999", false},
+		{"c.example:30343", false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d configs, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].UpstreamHost != want[i].host || got[i].UseTLS != want[i].tls {
+			t.Errorf("config %d = {%q, %v}, want {%q, %v}",
+				i, got[i].UpstreamHost, got[i].UseTLS, want[i].host, want[i].tls)
+		}
+	}
+}
+
+// Absent means verify; only an explicit false disables it.
+func TestVerifyDefaultsToOn(t *testing.T) {
+	c := DefaultConfig()
+	if !c.VerifyEnabled() {
+		t.Error("verification must default to on")
+	}
+	if c.ClientConfig().TLSSkipVerify {
+		t.Error("TLSSkipVerify must be false when verification is on")
+	}
+	no := false
+	c.Server.Verify = &no
+	if c.VerifyEnabled() {
+		t.Error("verify: false must disable verification")
+	}
+	if !c.ClientConfig().TLSSkipVerify {
+		t.Error("TLSSkipVerify must be true when verify is false")
+	}
+}
+
+// An empty TLSMinVersion would silently drop the floor to Go's 1.2.
+func TestClientConfigPinsTLSFloor(t *testing.T) {
+	if got := DefaultConfig().ClientConfig().TLSMinVersion; got != "1.3" {
+		t.Errorf("TLSMinVersion = %q, want \"1.3\"", got)
+	}
+}
+
+func TestClientConfigCarriesTheCABundle(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.CABundle = "/etc/logsh/ca.pem"
+	if got := c.ClientConfig().TLSCACertFile; got != "/etc/logsh/ca.pem" {
+		t.Errorf("TLSCACertFile = %q, want the ca_bundle", got)
+	}
+}
+
+func TestValidateRejectsAnEmptyServerList(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.LogServers = nil
+	if err := c.Validate(); err == nil {
+		t.Error("an empty log_servers list must not validate")
+	}
+}
+
+func TestValidateRejectsAnUnparsableServer(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.LogServers = []string{"good.example", "bad.example(ssl)"}
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("an unparsable entry must not validate")
+	}
+	if !strings.Contains(err.Error(), "bad.example(ssl)") {
+		t.Errorf("error %q should name the offending entry", err)
+	}
+}
+
+func TestValidateRejectsARelativeCABundle(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.CABundle = "ca.pem"
+	if err := c.Validate(); err == nil {
+		t.Error("a relative ca_bundle must not validate")
+	}
+}
+
+func TestWarnsWhenVerificationIsOff(t *testing.T) {
+	c := DefaultConfig()
+	no := false
+	c.Server.Verify = &no
+	c.Server.CABundle = "/etc/logsh/ca.pem"
+	joined := strings.Join(c.Warnings(), "\n")
+	if !strings.Contains(joined, "any peer that completes a handshake") {
+		t.Error("verify: false must warn that transcripts go to any peer")
+	}
+	if !strings.Contains(joined, "not used") {
+		t.Error("a ca_bundle alongside verify: false must warn that it is ignored")
+	}
+}
+
+// -validate normally runs as root and can read a 0600 bundle that the
+// logging-in user cannot; without this the session fails its handshake instead.
+func TestWarnsWhenTheCABundleIsUnreadableByTheUser(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(bundle, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	c := DefaultConfig()
+	c.Server.CABundle = bundle
+	if !strings.Contains(strings.Join(c.Warnings(), "\n"), "readable") {
+		t.Error("a group/other-unreadable ca_bundle must warn")
 	}
 }

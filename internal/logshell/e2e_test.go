@@ -162,8 +162,7 @@ func TestEndToEndInteractiveSessionLandsOnDisk(t *testing.T) {
 	_, slave := outerTerminal(t)
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = addr
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{addr}
 	cfg.LogTTYOut = true
 
 	var userSaw bytes.Buffer
@@ -288,8 +287,7 @@ func TestEndToEndNonInteractiveSessionIsMetadataOnly(t *testing.T) {
 	addr, logDir := startSudosrv(t)
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = addr
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{addr}
 
 	_, wOut := pipes(t)
 	rIn := emptyStdin(t)

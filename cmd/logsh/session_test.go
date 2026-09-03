@@ -90,7 +90,7 @@ func TestRunSessionNestingHelperProcess(t *testing.T) {
 	cfg.RecordUsers = []string{strconv.Itoa(os.Getuid())}
 	// Unreachable on purpose: with no server and no journal, recording fails
 	// and fail_closed decides. Port 0 is never listening.
-	cfg.Server.UpstreamHost = "127.0.0.1:0"
+	cfg.Server.LogServers = []string{"127.0.0.1:0"}
 	cfg.Server.JournalDirectory = ""
 
 	nesting := logshell.Nesting{Kind: logshell.NestedNone}

@@ -187,8 +187,7 @@ func (s *mockServer) snapshot() (out, in string, ws []*pb.ChangeWindowSize, exit
 // run can assert on each.
 func testConfig(addr string) *Config {
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = addr
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{addr}
 	cfg.LogTTYOut = true
 	cfg.LogTTYIn = true
 	return cfg
@@ -413,8 +412,7 @@ func TestRunRecordedFailsBeforeSpawningShell(t *testing.T) {
 	_, slave := outerTerminal(t)
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = stallingServer(t)
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{stallingServer(t)}
 	// The window a wrongly-started shell would run in. Long enough that `touch`
 	// cannot miss it, short enough to keep the suite quick.
 	cfg.Server.ResponseTimeout = time.Second

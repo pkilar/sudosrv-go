@@ -74,8 +74,7 @@ func TestJournalledSessionSurvivesAServerOutage(t *testing.T) {
 	spool := t.TempDir()
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = deadAddr(t)
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{deadAddr(t)}
 	cfg.Server.ConnectTimeout = 200 * time.Millisecond
 	cfg.Server.JournalDirectory = spool
 
@@ -211,8 +210,7 @@ func TestFailClosedRequiresBothPathsToFail(t *testing.T) {
 	}
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = deadAddr(t)
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{deadAddr(t)}
 	cfg.Server.ConnectTimeout = 200 * time.Millisecond
 	cfg.Server.JournalDirectory = filepath.Join(locked, "spool")
 
@@ -549,8 +547,7 @@ func TestLostAcknowledgementDoesNotReplay(t *testing.T) {
 // parked as if it were ambiguous.
 func TestConnectFailureIsRetried(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = deadAddr(t)
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{deadAddr(t)}
 	cfg.Server.ConnectTimeout = 100 * time.Millisecond
 
 	dir := t.TempDir()

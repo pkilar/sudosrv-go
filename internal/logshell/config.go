@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sudosrv/internal/config"
 	"sudosrv/internal/eventlog"
 	"sudosrv/internal/logsrvclient"
 	"syscall"
@@ -133,18 +132,26 @@ type Config struct {
 // staying root-only, and logsh connects to 127.0.0.1 with no client certificate
 // at all. That also keeps one user from reading another's spooled transcript.
 //
-// The TLSCertFile/TLSKeyFile fields exist for the case where logsh runs on a
-// host whose credentials genuinely are user-readable (a single-admin box, a lab)
-// and for symmetry with the relay config. Validate warns when they are set,
-// because on a multi-user host setting them is a privilege escalation.
+// logsh itself carries no TLSCertFile/TLSKeyFile fields at all, not even as an
+// opt-in escape hatch: any key logsh could read, the logging-in user could read
+// too, and could then forge or suppress audit records under this host's
+// identity. logsrvclient still has those fields -- sudosrv's relay uses them,
+// running as root -- but ServerConfig below does not project them.
 type ServerConfig struct {
-	UpstreamHost  string `yaml:"upstream_host"`
-	UseTLS        bool   `yaml:"use_tls"`
-	TLSSkipVerify bool   `yaml:"tls_skip_verify"`
-	TLSMinVersion string `yaml:"tls_min_version"`
-	TLSCertFile   string `yaml:"tls_cert_file"`
-	TLSKeyFile    string `yaml:"tls_key_file"`
-	TLSCACertFile string `yaml:"tls_cacert_file"`
+	// LogServers is sudo's log_servers, in order of preference. Each entry is
+	// host[:port][(tls)]; the suffix selects TLS and port 30344, its absence
+	// plaintext and 30343. See logsrvclient.ParseServer.
+	LogServers []string `yaml:"log_servers"`
+
+	// CABundle verifies the server, matching sudo's log_server_cabundle. Empty
+	// means the system trust store.
+	CABundle string `yaml:"ca_bundle"`
+
+	// Verify is sudo's log_server_verify. A pointer because absent must mean
+	// TRUE: a plain bool cannot distinguish "not written" from "written false",
+	// and defaulting verification off would be the wrong way round. Read it
+	// through VerifyEnabled.
+	Verify *bool `yaml:"verify"`
 
 	ConnectTimeout  time.Duration `yaml:"connect_timeout"`
 	ResponseTimeout time.Duration `yaml:"response_timeout"`
@@ -187,9 +194,9 @@ func DefaultConfig() *Config {
 		LogStderr:   false,
 		IologFlush:  true,
 		Server: ServerConfig{
-			UpstreamHost:    "127.0.0.1:30343",
-			UseTLS:          false, // loopback to a local relay by default
-			TLSMinVersion:   "1.3",
+			// A local sudosrv relay on loopback, plaintext: the recommended
+			// topology, and what the previous upstream_host default resolved to.
+			LogServers:      []string{"127.0.0.1"},
 			ConnectTimeout:  5 * time.Second,
 			ResponseTimeout: 30 * time.Second,
 		},
@@ -338,16 +345,25 @@ func (c *Config) Validate() error {
 	if _, ok := c.Shells[EntryName]; ok {
 		return fmt.Errorf("shells[%s]: %s names the forced-command entry point and cannot also be a shell mapping", EntryName, EntryName)
 	}
-	if c.Server.UpstreamHost == "" {
-		return fmt.Errorf("server.upstream_host: must be set")
+	if len(c.Server.LogServers) == 0 {
+		return fmt.Errorf("server.log_servers: at least one log server must be listed")
 	}
-	if (c.Server.TLSCertFile == "") != (c.Server.TLSKeyFile == "") {
-		return fmt.Errorf("server: tls_cert_file and tls_key_file must be set together")
+	for _, spec := range c.Server.LogServers {
+		if _, err := logsrvclient.ParseServer(spec); err != nil {
+			return fmt.Errorf("server.log_servers: %w", err)
+		}
 	}
-	// Reuse the server's mapping rather than duplicating it, so logsh and
-	// sudosrv can never disagree about what "1.2" means.
-	if _, err := config.TLSVersion(c.Server.TLSMinVersion); err != nil {
-		return fmt.Errorf("server: %w", err)
+	if c.Server.CABundle != "" {
+		if !filepath.IsAbs(c.Server.CABundle) {
+			return fmt.Errorf("server.ca_bundle: %s must be an absolute path", c.Server.CABundle)
+		}
+		st, err := os.Stat(c.Server.CABundle)
+		if err != nil {
+			return fmt.Errorf("server.ca_bundle: %w", err)
+		}
+		if !st.Mode().IsRegular() {
+			return fmt.Errorf("server.ca_bundle: %s is not a regular file", c.Server.CABundle)
+		}
 	}
 	switch c.NestedSessions {
 	case "", NestedModeRecord, NestedModeMetadata, NestedModeSkip:
@@ -411,15 +427,6 @@ func (c *Config) Validate() error {
 func (c *Config) Warnings() []string {
 	var w []string
 
-	// See the ServerConfig doc comment: on a multi-user host a user-readable
-	// client key lets any recorded user impersonate the host to the log server.
-	if c.Server.TLSCertFile != "" {
-		w = append(w, fmt.Sprintf(
-			"server.tls_cert_file is set: logsh runs as the logging-in user, so %s and its key "+
-				"are readable by every recorded user and can be used to forge audit records. "+
-				"Prefer a local sudosrv relay on loopback that holds the credentials as root.",
-			c.Server.TLSCertFile))
-	}
 	// Both non-default values depend on a claim logsh cannot verify.
 	switch c.NestedSessions {
 	case NestedModeSkip:
@@ -436,8 +443,24 @@ func (c *Config) Warnings() []string {
 			"WILL NOT WORK inside a recorded session, and every exec costs a stop. It is also "+
 			"blocked outright where kernel.yama.ptrace_scope is 2 or 3.")
 	}
-	if c.Server.TLSSkipVerify {
-		w = append(w, "server.tls_skip_verify is set: session transcripts will be sent to any peer that completes a handshake")
+	if !c.VerifyEnabled() {
+		w = append(w, "server.verify is false: session transcripts will be sent to any peer "+
+			"that completes a handshake")
+		if c.Server.CABundle != "" {
+			w = append(w, "server.ca_bundle is set but server.verify is false, so the bundle is not used")
+		}
+	}
+	if c.Server.CABundle != "" {
+		// logsh drops to the logging-in user before connecting, but -validate is
+		// normally run as root and can read a bundle the session cannot. Without
+		// this the config validates and every recorded session then fails its
+		// handshake.
+		if st, err := os.Stat(c.Server.CABundle); err == nil && st.Mode().Perm()&0o044 == 0 {
+			w = append(w, fmt.Sprintf(
+				"server.ca_bundle %s is not readable by group or other: logsh runs as the "+
+					"logging-in user, so every recorded session will fail its TLS handshake",
+				c.Server.CABundle))
+		}
 	}
 	if len(c.RecordUsers) == 0 {
 		w = append(w, "record_users is empty: no session will be recorded")
@@ -492,18 +515,40 @@ func (c *Config) ShouldRecord(username string, uid int) bool {
 	return slices.Contains(c.RecordUsers, strconv.Itoa(uid))
 }
 
-// ClientConfig projects the server section onto the neutral client config.
+// VerifyEnabled reports whether the server certificate is verified. Absent
+// means yes; only an explicit `verify: false` turns it off.
+func (c *Config) VerifyEnabled() bool {
+	return c.Server.Verify == nil || *c.Server.Verify
+}
+
+// ClientConfig is the address-FREE projection: identity, TLS policy and
+// timeouts. Use it where a connection already exists and only its settings are
+// needed. To dial, use ClientConfigs, which fills in an address per server.
 func (c *Config) ClientConfig() logsrvclient.Config {
 	return logsrvclient.Config{
-		ClientID:        ClientID,
-		UpstreamHost:    c.Server.UpstreamHost,
-		UseTLS:          c.Server.UseTLS,
-		TLSSkipVerify:   c.Server.TLSSkipVerify,
-		TLSMinVersion:   c.Server.TLSMinVersion,
-		TLSCertFile:     c.Server.TLSCertFile,
-		TLSKeyFile:      c.Server.TLSKeyFile,
-		TLSCACertFile:   c.Server.TLSCACertFile,
+		ClientID:      ClientID,
+		TLSSkipVerify: !c.VerifyEnabled(),
+		// Pinned, not configurable: leaving this empty would drop the floor to
+		// Go's TLS 1.2, which is a silent weakening of today's behaviour.
+		TLSMinVersion:   "1.3",
+		TLSCACertFile:   c.Server.CABundle,
 		ConnectTimeout:  c.Server.ConnectTimeout,
 		ResponseTimeout: c.Server.ResponseTimeout,
 	}
+}
+
+// ClientConfigs resolves every configured server, in the order written.
+func (c *Config) ClientConfigs() ([]logsrvclient.Config, error) {
+	out := make([]logsrvclient.Config, 0, len(c.Server.LogServers))
+	for _, spec := range c.Server.LogServers {
+		t, err := logsrvclient.ParseServer(spec)
+		if err != nil {
+			return nil, err
+		}
+		cc := c.ClientConfig()
+		cc.UpstreamHost = t.Address
+		cc.UseTLS = t.UseTLS
+		out = append(out, cc)
+	}
+	return out, nil
 }
