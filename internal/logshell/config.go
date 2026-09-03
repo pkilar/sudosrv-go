@@ -514,9 +514,9 @@ func (c *Config) Validate() error {
 	if len(c.Server.LogServers) == 0 {
 		return fmt.Errorf("server.log_servers: at least one log server must be listed")
 	}
-	for _, spec := range c.Server.LogServers {
+	for i, spec := range c.Server.LogServers {
 		if _, err := logsrvclient.ParseServer(spec); err != nil {
-			return fmt.Errorf("server.log_servers: %w", err)
+			return fmt.Errorf("server.log_servers[%d]: %w", i, err)
 		}
 	}
 	if c.Server.CABundle != "" {
