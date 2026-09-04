@@ -735,7 +735,7 @@ func TestConnectAnyFallsThroughToTheSecondServer(t *testing.T) {
 		{ClientID: ClientID, UpstreamHost: dead, ConnectTimeout: time.Second},
 		{ClientID: ClientID, UpstreamHost: ln.Addr().String(), ConnectTimeout: time.Second},
 	}
-	proc, chosen, err := connectAny(context.Background(), cfgs)
+	proc, chosen, err := connectAny(t.Context(), cfgs)
 	if err != nil {
 		t.Fatalf("connectAny: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestConnectAnyNamesEveryServerItTried(t *testing.T) {
 		{ClientID: ClientID, UpstreamHost: "127.0.0.1:1", ConnectTimeout: time.Second},
 		{ClientID: ClientID, UpstreamHost: "127.0.0.1:2", ConnectTimeout: time.Second},
 	}
-	_, _, err := connectAny(context.Background(), cfgs)
+	_, _, err := connectAny(t.Context(), cfgs)
 	if err == nil {
 		t.Fatal("expected an error when every server is down")
 	}
@@ -763,7 +763,7 @@ func TestConnectAnyNamesEveryServerItTried(t *testing.T) {
 }
 
 func TestConnectAnyRejectsAnEmptyList(t *testing.T) {
-	if _, _, err := connectAny(context.Background(), nil); err == nil {
+	if _, _, err := connectAny(t.Context(), nil); err == nil {
 		t.Error("an empty server list must be an error, not a nil connection")
 	}
 }

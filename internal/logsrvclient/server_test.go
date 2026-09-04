@@ -50,6 +50,11 @@ func TestParseServerRejectsMalformedSuffix(t *testing.T) {
 		"sudo-iolog.acme.com(ssl)",
 		"sudo-iolog.acme.com()",
 		"sudo-iolog.acme.com(tls",
+		// Stripping one "(tls)" must not leave a parenthesised remainder to be
+		// taken for a hostname.
+		"sudo-iolog.acme.com(ssl)(tls)",
+		"sudo-iolog.acme.com()(tls)",
+		"sudo-iolog.acme.com(tls)(tls)",
 	} {
 		if got, err := ParseServer(spec); err == nil {
 			t.Errorf("ParseServer(%q) = %+v, want an error", spec, got)

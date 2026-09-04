@@ -4,11 +4,11 @@ package logshell
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sudosrv/internal/eventlog"
@@ -378,11 +378,11 @@ func removedKeyError(data []byte) error {
 		return fmt.Errorf("parsing server: block: %w", err)
 	}
 	recognized := recognizedServerKeys()
-	keys := make([]string, 0, len(probe.Server))
-	for k := range probe.Server {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // deterministic: report the same keys, in the same order, every time
+	// Sorted so the same config reports the same keys in the same order every time.
+	keys := slices.Sorted(maps.Keys(probe.Server))
+	// Hoisted out of the loop below: the recognised set does not vary per key,
+	// and rebuilding it there re-sorted the same names once per offending key.
+	allowed := strings.Join(slices.Sorted(maps.Keys(recognized)), ", ")
 
 	var lines []string
 	for _, k := range keys {
@@ -393,12 +393,7 @@ func removedKeyError(data []byte) error {
 			lines = append(lines, fmt.Sprintf("server.%s was removed in 0.4.0; use %s", k, replacement))
 			continue
 		}
-		allowed := make([]string, 0, len(recognized))
-		for rk := range recognized {
-			allowed = append(allowed, rk)
-		}
-		sort.Strings(allowed)
-		lines = append(lines, fmt.Sprintf("server.%s is not a recognised config key (recognised: %s)", k, strings.Join(allowed, ", ")))
+		lines = append(lines, fmt.Sprintf("server.%s is not a recognised config key (recognised: %s)", k, allowed))
 	}
 	if len(lines) == 0 {
 		return nil
@@ -720,10 +715,10 @@ func (c *Config) ClientConfig() logsrvclient.Config {
 // ClientConfigs resolves every configured server, in the order written.
 func (c *Config) ClientConfigs() ([]logsrvclient.Config, error) {
 	out := make([]logsrvclient.Config, 0, len(c.Server.LogServers))
-	for _, spec := range c.Server.LogServers {
+	for i, spec := range c.Server.LogServers {
 		t, err := logsrvclient.ParseServer(spec)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("server.log_servers[%d]: %w", i, err)
 		}
 		cc := c.ClientConfig()
 		cc.UpstreamHost = t.Address

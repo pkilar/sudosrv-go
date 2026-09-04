@@ -54,8 +54,17 @@ func ParseServer(spec string) (Target, error) {
 		return Target{}, fmt.Errorf(
 			"log server %q: %q is not a recognised suffix; only %q, in any case, selects TLS",
 			spec, s[i:], tlsSuffix)
-	case strings.Contains(s, "("):
-		return Target{}, fmt.Errorf("log server %q: unbalanced %q", spec, "(")
+	}
+
+	// Checked AFTER the suffix is stripped rather than as another case of the
+	// switch above: a case there is unreachable once the "(tls)" case matches,
+	// so stripping one suffix would leave a parenthesised remainder to be taken
+	// for a hostname -- "h(ssl)(tls)" resolving the host "h(ssl)". Parentheses
+	// are never part of a host, so any that survive here are an error.
+	if strings.ContainsAny(s, "()") {
+		return Target{}, fmt.Errorf(
+			"log server %q: %q is not a valid host; parentheses appear only in a trailing %s suffix",
+			spec, s, tlsSuffix)
 	}
 
 	if s == "" {
