@@ -365,3 +365,61 @@ func TestApplyAuthInfoTruncatesTheClientCommand(t *testing.T) {
 		t.Error("truncation must be visible in the value")
 	}
 }
+
+// The FQDN a host reports is frequently defined only in /etc/hosts, and Go's
+// pure resolver -- all a static binary gets -- never consults it: LookupCNAME
+// goes straight to DNS, and a reverse lookup returns whichever name is listed
+// first for that address, which for a loopback line is "localhost", not the
+// host. So the hosts file is parsed directly, the way glibc's files backend
+// does: the first name on the matching line is the canonical one.
+func TestCanonicalFromHosts(t *testing.T) {
+	const hosts = `# Static table lookup for hostnames.
+127.0.0.1        localhost
+::1              localhost
+127.0.0.1        neutrino.home.kilar.net neutrino
+10.0.0.5         web01.acme.com web01 www
+192.168.1.9      shortonly
+10.0.0.7    MixedCase.Acme.COM  mixedcase
+`
+	for _, tc := range []struct {
+		name  string
+		short string
+		want  string
+	}{
+		{"canonical is the first name on the line", "neutrino", "neutrino.home.kilar.net"},
+		{"matches any alias on the line", "www", "web01.acme.com"},
+		{"matches the short alias", "web01", "web01.acme.com"},
+		{"already-canonical name still resolves", "web01.acme.com", "web01.acme.com"},
+		{"line whose canonical has no dot is not an FQDN", "shortonly", ""},
+		{"loopback localhost line has no qualified name", "localhost", ""},
+		{"name matching is case-insensitive", "MIXEDCASE", "MixedCase.Acme.COM"},
+		{"absent host", "nosuchhost", ""},
+		{"an IP is not a name match", "127.0.0.1", ""},
+		{"comment text is not a name", "Static", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalFromHosts([]byte(hosts), tc.short); got != tc.want {
+				t.Errorf("canonicalFromHosts(_, %q) = %q, want %q", tc.short, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHostFQDNKeepsAnAlreadyQualifiedName(t *testing.T) {
+	// A kernel name carrying a dot is already the FQDN; resolving it would risk
+	// a DNS round trip in the login path for no gain.
+	for _, h := range []string{"web01.acme.com", "a.b.c.d"} {
+		if got := hostFQDN(h); got != h {
+			t.Errorf("hostFQDN(%q) = %q, want it unchanged", h, got)
+		}
+	}
+}
+
+func TestHostFQDNFallsBackToTheShortName(t *testing.T) {
+	// Nothing resolves this, so the short name must survive: logsh must never
+	// refuse or stall a login because a name could not be qualified.
+	const unresolvable = "no-such-host-a8f3e1c9"
+	if got := hostFQDN(unresolvable); got != unresolvable {
+		t.Errorf("hostFQDN(%q) = %q, want the short name back", unresolvable, got)
+	}
+}
