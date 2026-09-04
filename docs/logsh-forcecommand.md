@@ -267,6 +267,33 @@ local uid for a certificate principal. The numeric ids describe the process; the
 name describes the authenticated identity. Anything joining on `submituid` must
 not read it as identifying a human.
 
+### Stripping the Kerberos realm
+
+`strip_cert_realms` lists realms to remove from the key ID before it is recorded
+as `submituser`, which is useful when the rest of your estate keys on bare
+usernames:
+
+```yaml
+strip_cert_realms:
+  - CORP.EXAMPLE.COM
+```
+
+With that set, the record above carries `submituser jsmith` while
+`logsh_cert_keyid` still reads `jsmith@CORP.EXAMPLE.COM`. **The raw certificate
+field is never shortened**, so the realm remains recoverable from every record.
+
+Matching is case-insensitive, and only the realm after the last `@` is removed,
+so an instance survives: `jsmith/admin@CORP.EXAMPLE.COM` becomes `jsmith/admin`.
+
+Realms not listed are left in place. A certificate issued under a realm this
+host never expected keeps it, rather than being recorded as a bare name that
+reads like a local account.
+
+This sharpens the `submituid` caveat above rather than softening it: with the
+realm gone, `submituser jsmith` *looks* like a local account while `submituid`
+still describes the root process. It is not a local account, and nothing should
+join the two.
+
 **A session with `logsh_auth_method: publickey` and no key ID is a root login
 that arrived without a certificate** — the break-glass account, or a key a
 fallback audit missed. Its credential is identified by `logsh_auth_key` alone.

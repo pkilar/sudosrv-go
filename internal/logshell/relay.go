@@ -123,7 +123,7 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 	meta := CollectMeta(pty.Name, size, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
 	meta.ApplyNesting(DetectNesting())
-	meta.ApplyAuthInfo(spec.Info)
+	meta.ApplyAuthInfo(spec.Info, cfg.StripCertRealms)
 
 	rec, err := StartRecorder(ctx, cfg, meta)
 	if err != nil {

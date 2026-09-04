@@ -220,6 +220,22 @@ fail_closed: true
 # break-glass is not break-glass.
 break_glass_marker: /etc/logsh/bypass
 
+# Kerberos realms to strip from a certificate key ID before it is recorded as
+# submituser: with CORP.EXAMPLE.COM listed, jsmith@CORP.EXAMPLE.COM is recorded
+# as jsmith. Matching is case-insensitive, and an instance survives, so
+# jsmith/admin@CORP.EXAMPLE.COM becomes jsmith/admin.
+#
+# Only realms listed here are stripped. A principal from any other realm keeps
+# it, so a certificate issued under a realm this host never expected cannot land
+# in the record looking like a local account -- an unfamiliar realm is the
+# detail worth seeing.
+#
+# logsh_cert_keyid always keeps the full principal, whatever is listed here, so
+# the realm stays recoverable from every record. Unset records the key ID
+# exactly as the certificate carried it.
+#strip_cert_realms:
+#  - CORP.EXAMPLE.COM
+
 # Forced-command mode: sshd runs logsh via `ForceCommand /usr/sbin/logsh-entry`,
 # so a session authenticating AS root produces a transcript even though sudo is
 # nowhere in the path.

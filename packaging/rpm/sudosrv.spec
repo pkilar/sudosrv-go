@@ -232,6 +232,14 @@ exit 0
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 
 %changelog
+* Fri Sep 04 2026 Paul Kilar <pkilar@gmail.com> - 0.4.1-1
+- logsh can strip a Kerberos realm from a certificate key ID before recording it
+  as submituser: strip_cert_realms lists the realms to remove, so
+  jsmith@CORP.EXAMPLE.COM is recorded as jsmith. Only realms listed are
+  stripped, and logsh_cert_keyid always keeps the full principal, so the realm
+  stays recoverable from every record. Unset -- the default -- records the key
+  ID exactly as the certificate carried it, so no existing host changes
+
 * Thu Sep 03 2026 Paul Kilar <pkilar@gmail.com> - 0.4.0-1
 - BREAKING: logsh's server configuration now uses sudo's log_servers syntax.
   server.upstream_host and server.use_tls are replaced by server.log_servers,

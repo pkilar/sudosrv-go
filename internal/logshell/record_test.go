@@ -238,7 +238,7 @@ func TestApplyAuthInfoNamesTheHumanInSubmituser(t *testing.T) {
 		Serial:        20260819000137,
 		Principals:    []string{"root-web"},
 		CAFingerprint: "SHA256:abc",
-	}})
+	}}, nil)
 
 	if meta.SubmitUser != "jsmith@CORP.EXAMPLE.COM" {
 		t.Errorf("SubmitUser = %q, want the certificate key ID", meta.SubmitUser)
@@ -265,7 +265,7 @@ func TestApplyAuthInfoNamesTheHumanInSubmituser(t *testing.T) {
 // shape a plain-key session has to produce.
 func TestApplyAuthInfoPlainKeyDoesNotRewriteSubmituser(t *testing.T) {
 	meta := SessionMeta{User: "root", SubmitUser: "root"}
-	meta.ApplyAuthInfo(SessionInfo{Auth: AuthInfo{Method: AuthMethodKey, KeyFingerprint: "SHA256:xyz"}})
+	meta.ApplyAuthInfo(SessionInfo{Auth: AuthInfo{Method: AuthMethodKey, KeyFingerprint: "SHA256:xyz"}}, nil)
 
 	if meta.SubmitUser != "root" {
 		t.Errorf("SubmitUser = %q, want root", meta.SubmitUser)
@@ -297,7 +297,7 @@ func TestInfoMessagesCarryCertificateKeys(t *testing.T) {
 		},
 		SSHCommand: "internal-sftp -l INFO",
 		SSHClient:  "10.20.30.41 51234",
-	})
+	}, nil)
 	msgs := meta.InfoMessages()
 
 	for key, want := range map[string]string{
@@ -356,7 +356,7 @@ func TestInfoMessagesOmitEmptyAuthKeys(t *testing.T) {
 // must not bloat every session record.
 func TestApplyAuthInfoTruncatesTheClientCommand(t *testing.T) {
 	meta := SessionMeta{}
-	meta.ApplyAuthInfo(SessionInfo{SSHCommand: strings.Repeat("x", DefaultCommandLogMaxLen*3)})
+	meta.ApplyAuthInfo(SessionInfo{SSHCommand: strings.Repeat("x", DefaultCommandLogMaxLen*3)}, nil)
 
 	if len(meta.Info.SSHCommand) > DefaultCommandLogMaxLen {
 		t.Errorf("SSHCommand length %d, want <= %d", len(meta.Info.SSHCommand), DefaultCommandLogMaxLen)
@@ -421,5 +421,76 @@ func TestHostFQDNFallsBackToTheShortName(t *testing.T) {
 	const unresolvable = "no-such-host-a8f3e1c9"
 	if got := hostFQDN(unresolvable); got != unresolvable {
 		t.Errorf("hostFQDN(%q) = %q, want the short name back", unresolvable, got)
+	}
+}
+
+// A certificate key ID is typically a Kerberos principal, and submituser is
+// where it lands. Stripping is restricted to realms the operator named so a
+// principal issued under an unexpected realm cannot quietly become a bare,
+// local-looking username in the record.
+func TestStripRealm(t *testing.T) {
+	corp := []string{"CORP.EXAMPLE.COM", "EU.EXAMPLE.COM"}
+	for _, tc := range []struct {
+		name   string
+		keyID  string
+		realms []string
+		want   string
+	}{
+		{"listed realm is stripped", "jsmith@CORP.EXAMPLE.COM", corp, "jsmith"},
+		{"second listed realm is stripped", "jsmith@EU.EXAMPLE.COM", corp, "jsmith"},
+		{"unlisted realm is kept", "jsmith@OTHER.EXAMPLE.COM", corp, "jsmith@OTHER.EXAMPLE.COM"},
+		{"realm match is case-insensitive", "jsmith@corp.example.com", corp, "jsmith"},
+		{"config entry case does not matter", "jsmith@CORP.EXAMPLE.COM", []string{"corp.example.com"}, "jsmith"},
+		{"instance survives", "jsmith/admin@CORP.EXAMPLE.COM", corp, "jsmith/admin"},
+		{"only the last @ separates the realm", "odd@name@CORP.EXAMPLE.COM", corp, "odd@name"},
+		{"no realm to strip", "jsmith", corp, "jsmith"},
+		{"no realms configured", "jsmith@CORP.EXAMPLE.COM", nil, "jsmith@CORP.EXAMPLE.COM"},
+		{"stripping to empty is refused", "@CORP.EXAMPLE.COM", corp, "@CORP.EXAMPLE.COM"},
+		{"empty key id", "", corp, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripRealm(tc.keyID, tc.realms); got != tc.want {
+				t.Errorf("stripRealm(%q, %v) = %q, want %q", tc.keyID, tc.realms, got, tc.want)
+			}
+		})
+	}
+}
+
+// The realm is removed from submituser only. logsh_cert_keyid is the raw
+// certificate field, so it keeps the full principal and the realm stays
+// recoverable from every record.
+func TestApplyAuthInfoStripsSubmitUserButNotKeyID(t *testing.T) {
+	const full = "jsmith@CORP.EXAMPLE.COM"
+	var m SessionMeta
+	m.SubmitUser = "root"
+	m.ApplyAuthInfo(SessionInfo{
+		Auth: AuthInfo{Method: AuthMethodCert, KeyID: full},
+	}, []string{"CORP.EXAMPLE.COM"})
+
+	if m.SubmitUser != "jsmith" {
+		t.Errorf("SubmitUser = %q, want %q", m.SubmitUser, "jsmith")
+	}
+	if m.Info.Auth.KeyID != full {
+		t.Errorf("KeyID = %q, want it untouched as %q", m.Info.Auth.KeyID, full)
+	}
+	var found string
+	for _, msg := range m.InfoMessages() {
+		if msg.GetKey() == "logsh_cert_keyid" {
+			found = msg.GetStrval()
+		}
+	}
+	if found != full {
+		t.Errorf("logsh_cert_keyid on the wire = %q, want the full principal %q", found, full)
+	}
+}
+
+func TestApplyAuthInfoLeavesSubmitUserWhenRealmUnlisted(t *testing.T) {
+	const full = "jsmith@OTHER.EXAMPLE.COM"
+	var m SessionMeta
+	m.ApplyAuthInfo(SessionInfo{
+		Auth: AuthInfo{Method: AuthMethodCert, KeyID: full},
+	}, []string{"CORP.EXAMPLE.COM"})
+	if m.SubmitUser != full {
+		t.Errorf("SubmitUser = %q, want the unstripped %q", m.SubmitUser, full)
 	}
 }

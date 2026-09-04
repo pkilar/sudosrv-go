@@ -5,6 +5,12 @@ sudosrv (0.0.0-1) unstable; urgency=medium
     deliberately implausible: a package built by running dpkg-buildpackage
     here directly must not look like a release.
 
+  * logsh can strip a Kerberos realm from a certificate key ID before it is
+    recorded as submituser: strip_cert_realms lists the realms to remove, so
+    jsmith@CORP.EXAMPLE.COM is recorded as jsmith. Only listed realms are
+    stripped, and logsh_cert_keyid always keeps the full principal. Unset --
+    the default -- records the key ID exactly as the certificate carried it.
+
   * ACTION REQUIRED: /etc/logsh/logsh.yaml is not replaced on upgrade, and
     logsh REFUSES a login when its configuration is unusable. Roll out a
     converted logsh.yaml with or before this package. The package's own
@@ -59,4 +65,4 @@ sudosrv (0.0.0-1) unstable; urgency=medium
     sudo_logsrv.proto protocol, local and relay modes, TLS, store-and-forward
     caching, sudoers-compatible log paths, systemd units.
 
- -- Paul Kilar <pkilar@gmail.com>  Thu, 03 Sep 2026 00:00:00 +0000
+ -- Paul Kilar <pkilar@gmail.com>  Fri, 04 Sep 2026 00:00:00 +0000
