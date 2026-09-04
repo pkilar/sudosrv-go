@@ -116,6 +116,15 @@ type Config struct {
 	// second uid-0 account with a plain shell, which lives in sshd config rather
 	// than here.
 	BreakGlassMarker string `yaml:"break_glass_marker"`
+
+	// StripCertRealms lists the Kerberos realms to remove from a certificate
+	// key ID before it is recorded as submituser, e.g. CORP.EXAMPLE.COM turning
+	// jsmith@CORP.EXAMPLE.COM into jsmith. Matching is case-insensitive, and a
+	// realm not listed here is left in place. Empty -- the default -- records
+	// the key ID exactly as the certificate carried it.
+	//
+	// logsh_cert_keyid is never shortened, whatever this is set to.
+	StripCertRealms []string `yaml:"strip_cert_realms"`
 }
 
 // ServerConfig locates the log server logsh reports to.
@@ -523,6 +532,16 @@ func (c *Config) Validate() error {
 	for i, spec := range c.Server.LogServers {
 		if _, err := logsrvclient.ParseServer(spec); err != nil {
 			return fmt.Errorf("server.log_servers[%d]: %w", i, err)
+		}
+	}
+	for i, r := range c.StripCertRealms {
+		if strings.TrimSpace(r) == "" {
+			return fmt.Errorf("strip_cert_realms[%d]: empty realm", i)
+		}
+		// A realm is what follows the last "@", so an entry containing one
+		// could never match and is a sign the whole principal was pasted in.
+		if strings.Contains(r, "@") {
+			return fmt.Errorf("strip_cert_realms[%d]: %q looks like a principal; list the realm alone, e.g. CORP.EXAMPLE.COM", i, r)
 		}
 	}
 	if c.Server.CABundle != "" {

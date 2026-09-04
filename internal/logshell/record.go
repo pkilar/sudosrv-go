@@ -245,13 +245,43 @@ func (m *SessionMeta) ApplyNesting(n Nesting) {
 // the name describes the authenticated identity. This is a real asymmetry with
 // sudo's records, where submituid is the invoking human's uid, and consumers
 // joining on submituid must not read it as identifying a person.
-func (m *SessionMeta) ApplyAuthInfo(info SessionInfo) {
+func (m *SessionMeta) ApplyAuthInfo(info SessionInfo, stripRealms []string) {
 	info.SSHCommand = truncateForRecord(info.SSHCommand)
 	m.Info = info
 
+	// Only submituser is shortened. m.Info keeps the key ID exactly as the
+	// certificate carried it, so logsh_cert_keyid still reports the realm and
+	// nothing about the authenticated identity becomes unrecoverable.
 	if info.Auth.Method == AuthMethodCert && info.Auth.KeyID != "" {
-		m.SubmitUser = info.Auth.KeyID
+		m.SubmitUser = stripRealm(info.Auth.KeyID, stripRealms)
 	}
+}
+
+// stripRealm removes a trailing Kerberos realm from a certificate key ID when
+// that realm is one the operator listed, and returns keyID unchanged otherwise.
+//
+// Restricted to listed realms rather than stripping any: submituser reads as a
+// username, and turning an unrecognised principal into a bare one would let a
+// certificate issued under a realm this host never expected land in the record
+// looking like a local account. An unfamiliar realm is exactly the detail worth
+// keeping visible.
+//
+// The realm is whatever follows the LAST "@", so an instance -- jsmith/admin --
+// survives, and matching is case-insensitive because a realm is conventionally
+// upper case and a config written in lower case means the same realm.
+func stripRealm(keyID string, realms []string) string {
+	at := strings.LastIndex(keyID, "@")
+	// No realm, or nothing before it: an empty submituser answers no question
+	// that the full key ID does not answer better.
+	if at <= 0 {
+		return keyID
+	}
+	for _, r := range realms {
+		if strings.EqualFold(keyID[at+1:], r) {
+			return keyID[:at]
+		}
+	}
+	return keyID
 }
 
 // truncateForRecord bounds an attacker-controlled string, visibly.

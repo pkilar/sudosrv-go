@@ -134,7 +134,7 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 	meta := CollectMeta(TTYNameOf(spec.Std.In.Fd()), WinSize{}, spec.ShellPath, argv)
 	meta.SessionID = spec.CmdLog.SessionID()
 	meta.ApplyNesting(nesting)
-	meta.ApplyAuthInfo(spec.Info)
+	meta.ApplyAuthInfo(spec.Info, spec.Config.StripCertRealms)
 
 	rec, err := StartEventRecorder(ctx, spec.Config, meta, captureStreams)
 	if err != nil {

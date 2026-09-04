@@ -742,3 +742,24 @@ func TestLoadAcceptsAFullyModernServerBlock(t *testing.T) {
 		t.Errorf("Server.CABundle = %q, want %q", cfg.Server.CABundle, bundle)
 	}
 }
+
+func TestValidateRejectsBadStripCertRealms(t *testing.T) {
+	for _, tc := range []struct{ name, realm string }{
+		{"empty entry", ""},
+		{"whitespace entry", "   "},
+		{"a whole principal instead of a realm", "jsmith@CORP.EXAMPLE.COM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.StripCertRealms = []string{tc.realm}
+			if err := c.Validate(); err == nil {
+				t.Errorf("Validate() = nil for strip_cert_realms %q, want an error", tc.realm)
+			}
+		})
+	}
+	c := DefaultConfig()
+	c.StripCertRealms = []string{"CORP.EXAMPLE.COM", "eu.example.com"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil for well-formed realms", err)
+	}
+}
