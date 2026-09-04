@@ -249,6 +249,10 @@ exit 0
   loudly on an unconverted host, naming each removed key and its replacement
   -- but the upgrade still succeeds; the next login on that host is refused
   until the config is converted
+- Fix: logsh reports the fully qualified host name in submithost, matching what
+  sudo records; it previously sent the kernel short name. %%{hostname} in
+  local_storage.iolog_dir expands from this field, so sessions recorded after
+  this upgrade land under FQDN-named paths where earlier ones used the short name
 
 * Thu Aug 27 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
 - logsh can run as an sshd ForceCommand, via a new /usr/sbin/logsh-entry

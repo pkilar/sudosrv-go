@@ -47,6 +47,11 @@ sudosrv (0.0.0-1) unstable; urgency=medium
     the default is and always was record.
   * Removed: logsh -record, -shell and -wire. logsh records to a log server
     only; standalone local recording is gone.
+  * Fix: logsh reports the fully qualified host name in submithost, matching
+    what sudo records; it previously sent the kernel short name. %{hostname}
+    in local_storage.iolog_dir expands from this field, so sessions recorded
+    after this upgrade land under FQDN-named paths where earlier ones used
+    the short name.
   *
   * Earlier: standalone recording with logsh -record and -wire; the wiredump
     command; sessions carrying source, runenv and submitenv; version stamped
