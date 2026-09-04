@@ -5,6 +5,7 @@ package logshell
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"strconv"
@@ -146,7 +147,7 @@ func CollectMeta(ttyName string, size WinSize, shellPath string, argv []string) 
 	meta.SubmitUser, meta.SubmitUID = meta.User, uid
 	meta.SubmitGroup, meta.SubmitGID = meta.Group, gid
 	if h, err := os.Hostname(); err == nil {
-		meta.Host = h
+		meta.Host = hostFQDN(h)
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		meta.Cwd = cwd
@@ -563,3 +564,81 @@ func (r *Recorder) Exit(ctx context.Context, code int, signal string, coreDumped
 
 // Close releases the sink. Safe to call after Exit.
 func (r *Recorder) Close() error { return r.sink.Close() }
+
+// hostsPath is the static name table, consulted before DNS to match the
+// "hosts: files dns" order of a default nsswitch.conf.
+const hostsPath = "/etc/hosts"
+
+// fqdnTimeout bounds the DNS fallback in hostFQDN. logsh sits in the login
+// path, so this is the longest a login may ever wait for a name to be
+// qualified; on expiry the short name is reported instead.
+const fqdnTimeout = time.Second
+
+// hostFQDN qualifies the kernel's node name for submithost, which sudo fills
+// from ctx->user.host -- the fully qualified name when sudoers sets fqdn.
+// os.Hostname returns gethostname(2), which on most hosts is the short name.
+//
+// It cannot fail. A session recorded against a short name is worse than one
+// recorded against an FQDN, but both are enormously better than a login
+// refused or stalled because a name would not resolve, so every failure path
+// returns the name we started with.
+func hostFQDN(short string) string {
+	if short == "" || strings.Contains(short, ".") {
+		return short // already qualified: no lookup, no login-path latency
+	}
+	if b, err := os.ReadFile(hostsPath); err == nil {
+		if fq := canonicalFromHosts(b, short); fq != "" {
+			return fq
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fqdnTimeout)
+	defer cancel()
+	cname, err := net.DefaultResolver.LookupCNAME(ctx, short)
+	if err != nil {
+		return short
+	}
+	if cname = strings.TrimSuffix(cname, "."); strings.Contains(cname, ".") {
+		return cname
+	}
+	return short
+}
+
+// canonicalFromHosts returns the canonical name -- the first one on the line --
+// of the hosts entry that lists short among its names, or "" when there is no
+// such entry or its canonical name is itself unqualified.
+//
+// This file is parsed directly because Go's pure resolver, which is all a
+// static binary gets, never consults it for a name: LookupCNAME queries DNS,
+// and a reverse lookup yields whichever name is registered first for the
+// address -- "localhost" for the loopback line that commonly carries a host's
+// own FQDN -- rather than the host's own. glibc's files backend returns
+// exactly what this returns, so reading it keeps a static logsh reporting the
+// name sudo would report on the same machine.
+//
+// First match wins, as it does in glibc. Scanning on for a qualified name
+// after an unqualified match would let one host's entry supply another host's
+// canonical name, which in an audit record is worse than reporting the short
+// name and letting DNS have its turn.
+func canonicalFromHosts(hosts []byte, short string) string {
+	for line := range strings.Lines(string(hosts)) {
+		if i := strings.IndexByte(line, '#'); i != -1 {
+			line = line[:i]
+		}
+		// An entry is an address followed by one or more names, the first of
+		// which is canonical; anything shorter carries no name to match.
+		names := strings.Fields(line)
+		if len(names) < 2 {
+			continue
+		}
+		names = names[1:]
+		for _, n := range names {
+			if strings.EqualFold(n, short) {
+				if strings.Contains(names[0], ".") {
+					return names[0]
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
