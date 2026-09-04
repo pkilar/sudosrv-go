@@ -100,8 +100,7 @@ func TestIdleLandsOnTheRecordThatFollowsIt(t *testing.T) {
 	_, slave := outerTerminal(t)
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = addr
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{addr}
 	cfg.LogTTYOut = true
 
 	var userSaw bytes.Buffer
@@ -157,8 +156,7 @@ func TestTrailingIdleIsNotRecorded(t *testing.T) {
 	_, slave := outerTerminal(t)
 
 	cfg := DefaultConfig()
-	cfg.Server.UpstreamHost = addr
-	cfg.Server.UseTLS = false
+	cfg.Server.LogServers = []string{addr}
 	cfg.LogTTYOut = true
 
 	var userSaw bytes.Buffer

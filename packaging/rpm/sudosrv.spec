@@ -232,6 +232,24 @@ exit 0
 %dir %attr(0700,sudosrv,sudosrv) %{_localstatedir}/spool/sudosrv-cache
 
 %changelog
+* Thu Sep 03 2026 Paul Kilar <pkilar@gmail.com> - 0.4.0-1
+- BREAKING: logsh's server configuration now uses sudo's log_servers syntax.
+  server.upstream_host and server.use_tls are replaced by server.log_servers,
+  a list of host[:port][(tls)] entries tried in order; (tls) selects TLS and
+  port 30344, its absence plaintext and 30343
+- BREAKING: server.tls_cacert_file becomes server.ca_bundle, and
+  server.tls_skip_verify becomes server.verify (default true)
+- BREAKING: logsh no longer presents a TLS client certificate;
+  server.tls_cert_file and server.tls_key_file are removed. Use a local sudosrv
+  relay, which holds host credentials as root
+- logsh contacts each configured server in order and uses the first that answers
+- ACTION REQUIRED: /etc/logsh/logsh.yaml is not replaced on upgrade, and logsh
+  REFUSES a login when its configuration is unusable. Roll out a converted
+  logsh.yaml with or before this package. The package's own %%post check warns
+  loudly on an unconverted host, naming each removed key and its replacement
+  -- but the upgrade still succeeds; the next login on that host is refused
+  until the config is converted
+
 * Thu Aug 27 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
 - logsh can run as an sshd ForceCommand, via a new /usr/sbin/logsh-entry
   multi-call name, so SSH sessions authenticating as root are recorded without

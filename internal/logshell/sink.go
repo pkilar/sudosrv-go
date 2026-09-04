@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/logsrvclient"
 	"sudosrv/internal/protocol"
 	pb "sudosrv/pkg/sudosrv_proto"
@@ -103,16 +104,64 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 		slog.Warn("logsh journal unavailable, trying the log server directly", "dir", dir, "error", err)
 	}
 
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
-	if err == nil {
-		return newBufferedSink(&streamSink{proc: proc, cfg: cfg.ClientConfig()}), nil
+	// Not returned directly on failure: doing so would drop journalErr on a
+	// host where both the spool and the server list are broken, reporting
+	// only the half of the failure that happened to be checked second.
+	//
+	// cfgErr and a connectAny failure are not the same cause and must not
+	// share a label: cfgErr means a configured server spec could not be
+	// resolved to an address at all (a config problem), while connectAny
+	// failing means resolved addresses were dialled and refused, timed out,
+	// or -- if ctx was already done -- that the wait itself was cancelled.
+	// Folding all three under "log server unreachable" blames the servers
+	// for failures that were never theirs.
+	cfgs, cfgErr := cfg.ClientConfigs()
+	if cfgErr != nil {
+		streamErr = fmt.Errorf("log servers unresolvable: %w", cfgErr)
+	} else {
+		proc, chosen, err := connectAny(ctx, cfgs)
+		if err == nil {
+			return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
+		}
+		streamErr = err
 	}
-	streamErr = err
 
 	if journalErr != nil {
-		return nil, fmt.Errorf("journal unusable (%w) and log server unreachable (%w)", journalErr, streamErr)
+		return nil, fmt.Errorf("journal unusable (%w) and %w", journalErr, streamErr)
 	}
 	return nil, streamErr
+}
+
+// connectAny dials each configured log server in the order written and returns
+// the first connection that succeeds, together with the config it was made
+// with. sudo connects to the first available server; so does this.
+//
+// The chosen config is returned rather than assumed to be the first, because
+// everything downstream -- the stream sink, the per-exchange timeouts -- must
+// describe the server actually reached. Threading the first entry would
+// attribute a session to a server it never touched.
+func connectAny(ctx context.Context, cfgs []logsrvclient.Config) (protocol.Processor, logsrvclient.Config, error) {
+	if len(cfgs) == 0 {
+		return nil, logsrvclient.Config{}, fmt.Errorf("no log servers configured")
+	}
+	failures := make([]string, 0, len(cfgs))
+	for _, cc := range cfgs {
+		// Checked before every dial, not just once up front: a context that
+		// is cancelled or times out partway through the list must stop the
+		// walk here too, rather than let each remaining server fail fast
+		// with its own "operation was canceled" and get folded into the
+		// aggregate error below as if it were unreachable.
+		if err := ctx.Err(); err != nil {
+			return nil, logsrvclient.Config{}, err
+		}
+		proc, err := logsrvclient.Connect(ctx, cc)
+		if err == nil {
+			return proc, cc, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", cc.UpstreamHost, err))
+	}
+	return nil, logsrvclient.Config{}, fmt.Errorf("no log server reachable (%s)",
+		strings.Join(failures, "; "))
 }
 
 // streamSink sends messages to the log server as they are produced.
@@ -290,7 +339,19 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 		return park(flushing, path+journalCorrupt, ErrJournalCorrupt, err)
 	}
 
-	proc, err := logsrvclient.Connect(ctx, cfg.ClientConfig())
+	cfgs, cfgErr := cfg.ClientConfigs()
+	if cfgErr != nil {
+		// Nothing was sent, so the journal is exactly as it was. Un-claimed
+		// for the same reason the connect-failure path just below un-claims:
+		// this journal is still safe to retry, and leaving it at flushing
+		// would strand it under a name orphan recovery never globs for
+		// (logsh-*.journal, not logsh-*.journal.flushing).
+		if rnErr := os.Rename(flushing, path); rnErr != nil {
+			return fmt.Errorf("resolve log servers failed (%w) and the journal could not be un-claimed (%w)", cfgErr, rnErr)
+		}
+		return cfgErr
+	}
+	proc, chosen, err := connectAny(ctx, cfgs)
 	if err != nil {
 		// Nothing was sent, so the journal is exactly as it was.
 		if rnErr := os.Rename(flushing, path); rnErr != nil {
@@ -300,7 +361,7 @@ func FlushJournal(ctx context.Context, path string, cfg *Config) error {
 	}
 	defer func() { _ = proc.Close() }()
 
-	if err := transmitJournal(ctx, flushing, cfg, proc, expectAck, elapsed); err != nil {
+	if err := transmitJournal(ctx, flushing, chosen, proc, expectAck, elapsed); err != nil {
 		if errors.Is(err, logsrvclient.ErrUpstreamRejected) {
 			// A definitive refusal: the server parsed the session and said no,
 			// so it stored nothing and every retry gets the same answer.
@@ -398,7 +459,7 @@ func validateJournal(path string) (expectAck bool, elapsed time.Duration, err er
 }
 
 // transmitJournal sends a validated journal and waits for acknowledgement.
-func transmitJournal(ctx context.Context, path string, cfg *Config, proc protocol.Processor, expectAck bool, elapsed time.Duration) error {
+func transmitJournal(ctx context.Context, path string, client logsrvclient.Config, proc protocol.Processor, expectAck bool, elapsed time.Duration) error {
 	f, err := os.Open(path) // #nosec G304 -- caller-supplied spool path, root-configured
 	if err != nil {
 		return err
@@ -415,7 +476,7 @@ func transmitJournal(ctx context.Context, path string, cfg *Config, proc protoco
 			// here means it changed underneath us.
 			return fmt.Errorf("journal changed while being sent: %w", readErr)
 		}
-		if err := cfg.ClientConfig().WithTimeout(ctx, func(c context.Context) error {
+		if err := client.WithTimeout(ctx, func(c context.Context) error {
 			return proc.WriteClientMessageContext(c, msg)
 		}); err != nil {
 			return err
@@ -426,7 +487,7 @@ func transmitJournal(ctx context.Context, path string, cfg *Config, proc protoco
 	if !expectAck {
 		return nil
 	}
-	return logsrvclient.ReadCommitAtLeast(ctx, proc, cfg.ClientConfig(), elapsed)
+	return logsrvclient.ReadCommitAtLeast(ctx, proc, client, elapsed)
 }
 
 // bufferedSink moves the actual delivery onto its own goroutine.
@@ -525,17 +586,34 @@ func (b *bufferedSink) Close() error {
 	return b.inner.Close()
 }
 
-// journalRetryBudget bounds how long Finish spends trying to deliver a journal
-// while the user waits to log out. A variable, not a constant, so tests can
-// shorten it.
+// journalRetryBudget bounds how long flushWithBudget waits BETWEEN attempts
+// before giving up -- it does not cap the total time a call can take. A
+// variable, not a constant, so tests can shorten it.
+//
+// One attempt is a full FlushJournal call, which -- via connectAny -- walks
+// every configured server in order. A server that accepts the TCP connection
+// but never completes the ClientHello/ServerHello handshake costs up to
+// ConnectTimeout, plus ResponseTimeout for the ClientHello write, plus
+// ResponseTimeout again for the ServerHello read, before connectAny moves on
+// to the next one: 65s per stalling server at the shipped 5s/30s defaults. So
+// a single attempt against N stalling servers can run to roughly N times
+// that, entirely before this budget is even consulted -- the deadline below
+// is checked only after an attempt finishes, to decide whether to start
+// another. Serial failover is what sudo does; this budget does not shrink to
+// compensate for it.
 var journalRetryBudget = 10 * time.Second
 
 // flushWithBudget retries a flush with backoff until the budget is spent.
 //
-// The budget exists because this runs during logout, with the user watching. An
-// unbounded retry would hang their session on an outage; giving up too early
-// would park a journal that one more second would have delivered. When it does
-// give up the journal is kept, so the cost of stopping is delay, never loss.
+// The budget bounds ATTEMPTS, not wall-clock time: the deadline is tested
+// only between one FlushJournal call finishing and the next one starting, so
+// it stops the loop from retrying after a failure rather than capping how
+// long any single attempt itself runs -- see journalRetryBudget for why a
+// single attempt's own worst case scales with the number of configured
+// servers. This runs during logout with the user watching, so giving up too
+// early would park a journal that one more attempt would have delivered; when
+// it does give up the journal is kept, so the cost of stopping is delay,
+// never loss.
 func flushWithBudget(ctx context.Context, path string, cfg *Config, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
 	var err error
