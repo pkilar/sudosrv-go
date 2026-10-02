@@ -102,6 +102,43 @@ Three things to know:
 Unknown critical options cause a certificate to be *refused* rather than ignored,
 so this fails closed on an sshd too old to understand it.
 
+### Terminate sessions when their certificate expires
+
+Issue an empty-valued `terminate-on-cert-expiry@cerberus` extension to opt a
+certificate into expiry enforcement:
+
+```sh
+ssh-keygen -s ca_key -I "jsmith@CORP.EXAMPLE.COM" -n root-web -V +1h \
+  -O clear -O permit-pty -O force-command=/usr/sbin/logsh-entry \
+  -O extension:terminate-on-cert-expiry@cerberus user_key.pub
+```
+
+With `ExposeAuthInfo yes`, logsh reads the extension and the certificate's
+`ValidBefore` timestamp from the credential accepted by sshd. At that instant,
+it sends `SIGKILL` to the supervised shell or command and discovered processes
+in its Linux session, including separate job-control groups, closes its relay,
+and allows up to five seconds to finalize the recording. This applies to
+interactive shells, remote commands and routed file transfers. Already expired
+certificates are refused before launch, even if recording is configured to fail
+open. The extension must have no
+value; a nonempty value is refused. Infinite-validity certificates have no expiry
+deadline. Certificates without the extension and plain keys keep their usual
+session lifetime.
+
+Enforcement also applies when `record_users` excludes the account, nested
+recording is skipped, or a recording failure uses fail-open or break-glass.
+Those sessions retain a supervisor instead of replacing logsh with the target.
+SSH logins using the login-shell symlinks also enforce the extension when sshd
+exposes their authentication information; local logins are unaffected.
+
+This requires Linux pidfd support. OpenSSH ignores unknown extensions, so the
+flag has no effect on hosts that do not run a supporting logsh, or when
+`SSH_USER_AUTH` cannot be read. Expiry ends the supervised session, not other SSH
+channels such as forwarding; keep the forwarding restrictions above. Processes
+that logsh lacks permission to signal, processes that detach into a new session
+with `setsid`, and a privileged user who disables the supervisor, are outside
+this enforcement. It is not process containment.
+
 ## 4. logsh configuration
 
 Add a `force_command` section to `/etc/logsh/logsh.yaml`. The shipped

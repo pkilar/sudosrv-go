@@ -70,6 +70,18 @@ See
 for the sshd configuration, the certificate critical options, and the removal
 ordering.
 .PP
+An SSH certificate with the empty-valued extension
+.B terminate-on-cert-expiry@cerberus
+opts its session into forced termination at the certificate's expiry time.
+This requires
+.B ExposeAuthInfo yes
+in sshd and Linux pidfd support. logsh kills the supervised command and discovered
+processes in its Linux session, then finalizes the recording. Expired certificates
+are refused before launch. Recording exclusions, nested recording skips, fail-open
+and break-glass do not disable this policy. Certificates without the extension
+retain their normal session lifetime. Detached processes in other sessions and
+SSH forwarding channels are outside this enforcement.
+.PP
 An account that is not listed in
 .I record_users
 gets its real shell with no recording and no log entry, which is what makes it

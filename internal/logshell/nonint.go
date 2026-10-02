@@ -45,6 +45,10 @@ func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Std
 // thing. Positional arguments used to oblige the caller to name all of them; a
 // struct does not, so which is which is written down per field.
 type RunSpec struct {
+	// ExpiryDeadline forcibly ends the supervised session at this instant.
+	// Zero preserves the ordinary session lifetime.
+	ExpiryDeadline time.Time
+
 	// Config is required. RunNonInteractive dereferences it on entry, to decide
 	// whether any stream is being captured.
 	Config *Config
@@ -120,11 +124,29 @@ func RunNonInteractive(ctx context.Context, spec RunSpec) (Outcome, error) {
 // It keeps a record rather than exec'ing straight through so that a nested
 // session is still visible as a fact -- with both session UUIDs, so it joins to
 // whatever the outer recorder stored.
+// With certificate expiry enabled, interactive sessions use a private terminal
+// for job control and teardown while still omitting the transcript.
 func RunMetadataOnly(ctx context.Context, spec RunSpec, nesting Nesting) (Outcome, error) {
+	if !spec.ExpiryDeadline.IsZero() && spec.Std.In != nil && IsTerminal(spec.Std.In.Fd()) {
+		// A separate controlling terminal preserves shell job control while giving
+		// the expiry supervisor a session that it can terminate independently.
+		cfg := *spec.Config
+		cfg.LogTTYIn, cfg.LogTTYOut = false, false
+		spec.Config = &cfg
+		return runRecorded(ctx, spec, TerminalIO{In: spec.Std.In, Out: spec.Std.Out}, &nesting)
+	}
 	return runPassthrough(ctx, spec, nesting, false)
 }
 
 func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureStreams bool) (Outcome, error) {
+	if err := spec.checkExpiry(); err != nil {
+		return Outcome{}, err
+	}
+	if !spec.ExpiryDeadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), spec.ExpiryDeadline.Add(5*time.Second))
+		defer cancel()
+	}
 	argv0 := ChildArgv0(spec.ShellPath, spec.Invocation.LoginShell)
 	argv := append([]string{argv0}, spec.Invocation.Args...)
 
@@ -145,39 +167,43 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 	spec.CmdLog.Bind(meta, rec.LogID())
 
 	var wg sync.WaitGroup
-	var closers []*os.File
+	var pipes streamPipes
 	var cmd *exec.Cmd
 	var wireErr error
 
 	build := func() *exec.Cmd {
 		// Any previous attempt's pipes are spent along with its exec.Cmd, so the
 		// streams are rewired per attempt rather than shared.
-		closeAll(closers)
-		closers = nil
+		closeAll(pipes.child)
+		closeAll(pipes.drains)
 		cmd = exec.Command(spec.ShellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		cmd.Args = argv
 		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), spec.CmdLog.SessionID())
-		closers, wireErr = spec.wireStreams(cmd, rec, &wg, captureStreams)
+		pipes, wireErr = spec.wireStreams(cmd, rec, &wg, captureStreams)
 		return cmd
 	}
 
-	child, err := startChild(build, spec.Config, spec.CmdLog)
-	if err == nil && wireErr != nil {
-		err = wireErr
-	}
+	child, stopExpiry, err := startSessionChild(build, spec, func() { closeAll(pipes.drains) }, func() error { return wireErr })
 	if err != nil {
-		closeAll(closers)
+		closeAll(pipes.child)
+		closeAll(pipes.drains)
 		return Outcome{}, unavailable(err)
 	}
+	defer stopExpiry()
+	defer func() { closeAll(pipes.drains) }()
 	// Drop the parent's copies of the child's pipe ends, or the copying
 	// goroutines never see EOF and the wait below never returns.
-	closeAll(closers)
+	closeAll(pipes.child)
 
 	stopSignals := forwardSignals(cmd)
 	defer stopSignals()
 
 	outcome := child.Wait()
+	if !spec.ExpiryDeadline.IsZero() {
+		closeAll(pipes.stdin)
+	}
 	wg.Wait()
+	stopExpiry()
 	spec.CmdLog.End(outcome)
 
 	if err := rec.Exit(ctx, outcome.ExitCode, outcome.Signal, outcome.CoreDumped); err != nil {
@@ -189,8 +215,14 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 // wireStreams connects the child's three streams, teeing the ones being
 // recorded. It returns the parent-side descriptors that must be closed after
 // the child starts.
-func (spec RunSpec) wireStreams(cmd *exec.Cmd, rec *Recorder, wg *sync.WaitGroup, capture bool) ([]*os.File, error) {
-	var closers []*os.File
+type streamPipes struct {
+	child  []*os.File // parent's copies of child ends, closed after start
+	drains []*os.File // owned relay descriptors, interrupted at expiry
+	stdin  []*os.File // input relay, stopped when the child exits normally
+}
+
+func (spec RunSpec) wireStreams(cmd *exec.Cmd, rec *Recorder, wg *sync.WaitGroup, capture bool) (streamPipes, error) {
+	var pipes streamPipes
 
 	// Pass-through is the default and the fast path: handing os/exec the real
 	// *os.File means the child inherits the descriptor with no copy at all.
@@ -199,40 +231,68 @@ func (spec RunSpec) wireStreams(cmd *exec.Cmd, rec *Recorder, wg *sync.WaitGroup
 	if capture && spec.Config.LogStdin {
 		pr, pw, err := os.Pipe()
 		if err != nil {
-			return closers, err
+			return pipes, err
+		}
+		pipes.child = append(pipes.child, pr)
+		pipes.drains = append(pipes.drains, pw)
+		pipes.stdin = append(pipes.stdin, pw)
+		input := spec.Std.In
+		if !spec.ExpiryDeadline.IsZero() {
+			input, err = expiryFile(input, os.O_RDONLY, &pipes.drains)
+			if err != nil {
+				return pipes, err
+			}
+			if input != spec.Std.In {
+				pipes.stdin = append(pipes.stdin, input)
+			}
 		}
 		cmd.Stdin = pr
-		closers = append(closers, pr)
 		wg.Go(func() {
 			defer func() { _ = pw.Close() }()
-			copyRecording(pw, spec.Std.In, func(b []byte) { _ = rec.Stream("stdin", b) })
+			copyRecording(pw, input, func(b []byte) { _ = rec.Stream("stdin", b) })
 		})
 	}
 	if capture && spec.Config.LogStdout {
 		pr, pw, err := os.Pipe()
 		if err != nil {
-			return closers, err
+			return pipes, err
 		}
+		pipes.drains = append(pipes.drains, pr)
 		cmd.Stdout = pw
-		closers = append(closers, pw)
+		pipes.child = append(pipes.child, pw)
+		output := spec.Std.Out
+		if !spec.ExpiryDeadline.IsZero() {
+			output, err = expiryFile(output, os.O_WRONLY, &pipes.drains)
+			if err != nil {
+				return pipes, err
+			}
+		}
 		wg.Go(func() {
 			defer func() { _ = pr.Close() }()
-			copyRecording(spec.Std.Out, pr, func(b []byte) { _ = rec.Stream("stdout", b) })
+			copyRecording(output, pr, func(b []byte) { _ = rec.Stream("stdout", b) })
 		})
 	}
 	if capture && spec.Config.LogStderr {
 		pr, pw, err := os.Pipe()
 		if err != nil {
-			return closers, err
+			return pipes, err
 		}
+		pipes.drains = append(pipes.drains, pr)
 		cmd.Stderr = pw
-		closers = append(closers, pw)
+		pipes.child = append(pipes.child, pw)
+		output := spec.Std.Err
+		if !spec.ExpiryDeadline.IsZero() {
+			output, err = expiryFile(output, os.O_WRONLY, &pipes.drains)
+			if err != nil {
+				return pipes, err
+			}
+		}
 		wg.Go(func() {
 			defer func() { _ = pr.Close() }()
-			copyRecording(spec.Std.Err, pr, func(b []byte) { _ = rec.Stream("stderr", b) })
+			copyRecording(output, pr, func(b []byte) { _ = rec.Stream("stderr", b) })
 		})
 	}
-	return closers, nil
+	return pipes, nil
 }
 
 func closeAll(fs []*os.File) {

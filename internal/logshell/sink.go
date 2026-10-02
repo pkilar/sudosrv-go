@@ -121,7 +121,11 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 	} else {
 		proc, chosen, err := connectAny(ctx, cfgs)
 		if err == nil {
-			return newBufferedSink(&streamSink{proc: proc, cfg: chosen}), nil
+			s := &streamSink{proc: proc, cfg: chosen}
+			if _, bounded := ctx.Deadline(); bounded {
+				s.lifetime = ctx
+			}
+			return newBufferedSink(s), nil
 		}
 		streamErr = err
 	}
@@ -166,8 +170,11 @@ func connectAny(ctx context.Context, cfgs []logsrvclient.Config) (protocol.Proce
 
 // streamSink sends messages to the log server as they are produced.
 type streamSink struct {
-	proc protocol.Processor
-	cfg  logsrvclient.Config
+	// lifetime bounds sends and finalization for a supervised certificate session.
+	// Nil retains the ordinary unbounded streaming write path.
+	lifetime context.Context
+	proc     protocol.Processor
+	cfg      logsrvclient.Config
 	// expectAck records whether this session will be acknowledged at all. An
 	// I/O session gets a log id and, at the end, a commit point. An event-only
 	// session gets NEITHER: the server's EventSession returns no ServerMessage
@@ -213,13 +220,21 @@ func (s *streamSink) Start(ctx context.Context, accept *pb.ClientMessage) (strin
 	return logID, nil
 }
 
-func (s *streamSink) Send(msg *pb.ClientMessage) error { return s.proc.WriteClientMessage(msg) }
+func (s *streamSink) Send(msg *pb.ClientMessage) error {
+	if s.lifetime != nil {
+		return s.proc.WriteClientMessageContext(s.lifetime, msg)
+	}
+	return s.proc.WriteClientMessage(msg)
+}
 
 // Finish waits for the server's final commit point, which is its statement that
 // the transcript is durable. Returning before it would let logsh exit -- and
 // sshd tear the connection down -- while the session was still only in the
 // server's memory.
 func (s *streamSink) Finish(ctx context.Context, elapsed time.Duration) error {
+	if s.lifetime != nil {
+		ctx = s.lifetime
+	}
 	if !s.expectAck {
 		// Transmission IS completion for an event-only session. See expectAck.
 		return nil

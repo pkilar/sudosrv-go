@@ -3,15 +3,85 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"sudosrv/internal/logshell"
 )
+
+func TestRunSessionCertificateExpiryPolicy(t *testing.T) {
+	for _, mode := range []string{"excluded", "nested-skip", "fail-open", "expired-fail-open", "malformed-fail-open"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunSessionExpiryHelper$")
+			cmd.Env = append(os.Environ(), "LOGSH_EXPIRY_HELPER="+mode)
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("session did not terminate: %v, output: %s", ctx.Err(), out)
+			}
+			code := 0
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			refused := strings.HasPrefix(mode, "expired-") || strings.HasPrefix(mode, "malformed-")
+			if refused {
+				if code != exitRefused || strings.Contains(string(out), "CHILD-RAN") {
+					t.Fatalf("invalid policy ran or was not refused: code=%d output=%s", code, out)
+				}
+			} else if code != 137 || !strings.Contains(string(out), "CHILD-RAN") {
+				t.Fatalf("session did not run then expire: code=%d output=%s", code, out)
+			}
+		})
+	}
+}
+
+func TestRunSessionExpiryHelper(t *testing.T) {
+	mode := os.Getenv("LOGSH_EXPIRY_HELPER")
+	if mode == "" {
+		return
+	}
+	cfg := logshell.DefaultConfig()
+	cfg.CommandLog.Enabled = false
+	cfg.RecordUsers = []string{strconv.Itoa(os.Getuid())}
+	cfg.Server.LogServers = []string{"127.0.0.1:0"}
+	cfg.Server.JournalDirectory = ""
+	nesting := logshell.Nesting{Kind: logshell.NestedNone}
+	if mode == "excluded" {
+		cfg.RecordUsers = nil
+	}
+	if mode == "nested-skip" {
+		nesting.Kind = logshell.NestedLogsh
+	}
+	if strings.Contains(mode, "fail-open") {
+		cfg.FailClosed = false
+	}
+	auth := logshell.AuthInfo{
+		Method: logshell.AuthMethodCert, ValidBefore: uint64(time.Now().Unix() + 2),
+		Extensions: map[string]string{logshell.TerminateOnCertExpiryExtension: ""},
+	}
+	if mode == "expired-fail-open" {
+		auth.ValidBefore = uint64(time.Now().Unix())
+	}
+	if mode == "malformed-fail-open" {
+		auth.Extensions[logshell.TerminateOnCertExpiryExtension] = "true"
+	}
+	args := []string{"-c", "printf CHILD-RAN; trap '' HUP TERM; while :; do sleep 60; done"}
+	os.Exit(runSession(session{
+		Config: cfg, Target: &execTarget{path: "/bin/sh", argv0: "sh", args: args, envShell: "/bin/sh"},
+		Invocation: logshell.Invocation{Name: "sh", Args: args},
+		Info:       logshell.SessionInfo{Auth: auth}, Nesting: nesting,
+		UID: os.Getuid(), Kind: kindForceCommand,
+	}))
+}
 
 // TestRunSessionSkipsWhenNestedInsideAnotherLogsh pins the one behaviour the
 // two entry points did NOT previously share.

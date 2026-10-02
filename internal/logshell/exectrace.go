@@ -39,8 +39,9 @@ import (
 
 // ptrace requests and event codes that Go's syscall package does not export.
 const (
-	ptraceSeize  = 0x4206
-	ptraceListen = 0x4208
+	ptraceSeize     = 0x4206
+	ptraceInterrupt = 0x4207
+	ptraceListen    = 0x4208
 
 	ptraceEventFork      = 1
 	ptraceEventVfork     = 2
@@ -118,7 +119,7 @@ func (t *tracedChild) Wait() Outcome { return <-t.outcome }
 // operations to come from the thread that attached, and a Go goroutine migrates
 // between threads freely, so without LockOSThread the loop fails with ESRCH the
 // first time the scheduler moves it.
-func startTraced(cmd *exec.Cmd, onExec func(ExecEvent)) (*tracedChild, error) {
+func startTraced(cmd *exec.Cmd, onExec func(ExecEvent), hooks ...childStartHooks) (*tracedChild, error) {
 	started := make(chan error, 1)
 	tc := &tracedChild{outcome: make(chan Outcome, 1)}
 
@@ -140,6 +141,11 @@ func startTraced(cmd *exec.Cmd, onExec func(ExecEvent)) (*tracedChild, error) {
 			started <- err
 			return
 		}
+		for _, hook := range hooks {
+			if hook.started != nil {
+				hook.started(cmd)
+			}
+		}
 		pid := cmd.Process.Pid
 
 		if err := upgradeToSeize(pid); err != nil {
@@ -153,7 +159,13 @@ func startTraced(cmd *exec.Cmd, onExec func(ExecEvent)) (*tracedChild, error) {
 		}
 		started <- nil
 
-		tc.outcome <- traceLoop(pid, onExec)
+		tc.outcome <- traceLoop(pid, onExec, func() {
+			for _, hook := range hooks {
+				if hook.exiting != nil {
+					hook.exiting(cmd)
+				}
+			}
+		})
 	}()
 
 	if err := <-started; err != nil {
@@ -205,7 +217,7 @@ func upgradeToSeize(pid int) error {
 }
 
 // traceLoop is the tracer. It returns once the top-level process has exited.
-func traceLoop(top int, onExec func(ExecEvent)) Outcome {
+func traceLoop(top int, onExec func(ExecEvent), beforeExit ...func()) Outcome {
 	tracked := map[int]bool{top: true}
 	var outcome Outcome
 
@@ -239,8 +251,23 @@ func traceLoop(top int, onExec func(ExecEvent)) Outcome {
 			onExec(readExecEvent(pid))
 			_ = ptraceRaw(syscall.PTRACE_CONT, pid, 0, 0)
 
-		case ptraceEventFork, ptraceEventVfork, ptraceEventClone,
-			ptraceEventVforkDone, ptraceEventExit:
+		case ptraceEventFork, ptraceEventVfork, ptraceEventClone:
+			// Track the new tracee immediately, even if the shell exits before
+			// its initial stop has been consumed by this loop.
+			if child, err := syscall.PtraceGetEventMsg(pid); err == nil {
+				tracked[int(child)] = true
+			}
+			_ = ptraceRaw(syscall.PTRACE_CONT, pid, 0, 0)
+
+		case ptraceEventVforkDone:
+			_ = ptraceRaw(syscall.PTRACE_CONT, pid, 0, 0)
+
+		case ptraceEventExit:
+			if pid == top {
+				for _, fn := range beforeExit {
+					fn()
+				}
+			}
 			_ = ptraceRaw(syscall.PTRACE_CONT, pid, 0, 0)
 
 		case ptraceEventStop:
@@ -270,6 +297,18 @@ func traceLoop(top int, onExec func(ExecEvent)) Outcome {
 	// session rather than being frozen by a tracer that has gone away.
 	for pid := range tracked {
 		if pid != top {
+			// PTRACE_DETACH requires a ptrace stop. Leaving a running task
+			// attached would strand it at a later exit event, including SIGKILL
+			// from the certificate expiry supervisor.
+			if err := ptraceRaw(ptraceInterrupt, pid, 0, 0); err == nil {
+				var ws syscall.WaitStatus
+				for {
+					_, err = syscall.Wait4(pid, &ws, waitAll, nil)
+					if err != syscall.EINTR {
+						break
+					}
+				}
+			}
 			_ = ptraceRaw(syscall.PTRACE_DETACH, pid, 0, 0)
 		}
 	}
