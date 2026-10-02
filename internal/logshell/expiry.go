@@ -287,6 +287,8 @@ func RunUnrecorded(spec RunSpec) (Outcome, error) {
 			return Outcome{}, err
 		}
 	}
+	stopNotice := startTerminalExpiryNotice(spec.ExpiryDeadline, spec.Std.In, &owned)
+	defer stopNotice()
 	var running *exec.Cmd
 	build := func() *exec.Cmd {
 		cmd := exec.Command(spec.ShellPath) // #nosec G204 -- resolved shell/forced command
@@ -325,6 +327,7 @@ func RunUnrecorded(spec RunSpec) (Outcome, error) {
 		defer stopSignals()
 	}
 	outcome := child.Wait()
+	stopNotice()
 	stop()
 	return outcome, nil
 }

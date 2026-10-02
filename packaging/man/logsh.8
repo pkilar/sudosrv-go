@@ -81,6 +81,10 @@ are refused before launch. Recording exclusions, nested recording skips, fail-op
 and break-glass do not disable this policy. Certificates without the extension
 retain their normal session lifetime. Detached processes in other sessions and
 SSH forwarding channels are outside this enforcement.
+Terminal sessions display the expiry time in UTC and the time remaining at
+startup, then warn one minute before expiry (immediately if less time remains).
+Notices are written directly to the terminal; sessions without a terminal
+receive no notices in their command or file-transfer streams.
 .PP
 An account that is not listed in
 .I record_users

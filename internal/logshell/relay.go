@@ -180,6 +180,8 @@ func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNest
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
+	stopNotice := startTerminalExpiryNotice(spec.ExpiryDeadline, stdin, &owned)
+	defer stopNotice()
 
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
@@ -231,6 +233,7 @@ func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNest
 	relayOutput(pty.Master, tio.Out, rec)
 
 	outcome := child.Wait()
+	stopNotice()
 	stopExpiry()
 	cmdLog.End(outcome)
 

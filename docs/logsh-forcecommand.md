@@ -125,6 +125,14 @@ value; a nonempty value is refused. Infinite-validity certificates have no expir
 deadline. Certificates without the extension and plain keys keep their usual
 session lifetime.
 
+Terminal sessions show a startup banner with the expiration timestamp in UTC
+and the time remaining. A warning appears one minute before expiry; sessions
+starting with a minute or less remaining warn immediately. Notices go directly
+to the user's terminal, preserving program stdout and stderr. Sessions without
+a terminal, including ordinary SFTP, SCP and remote commands, receive no banner
+or warning. Notice writes are best effort and time-limited so a client that stops
+reading cannot hold up session termination.
+
 Enforcement also applies when `record_users` excludes the account, nested
 recording is skipped, or a recording failure uses fail-open or break-glass.
 Those sessions retain a supervisor instead of replacing logsh with the target.
