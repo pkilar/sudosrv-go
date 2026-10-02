@@ -3,6 +3,7 @@ package logshell
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -153,11 +154,53 @@ func TestExpiryNoticeTerminalDoesNotCorruptStdout(t *testing.T) {
 			defer w.Close()
 			data := make(chan string, 1)
 			go func() { b, _ := io.ReadAll(r); data <- string(b) }()
-			notice := make(chan string, 1)
-			go func() { b := make([]byte, 4096); n, _ := outer.Master.Read(b); notice <- string(b[:n]) }()
 			spec := RunSpec{Config: testConfig(newMockServer(t).addr), ShellPath: "/bin/sh", EnvShell: "/bin/sh",
 				Invocation: Invocation{Args: []string{"-c", "printf payload"}},
 				Std:        StdIO{In: slave, Out: w, Err: w}, ExpiryDeadline: time.Now().Add(2 * time.Minute)}
+			wantNotice := spec.ExpiryDeadline.UTC().Format("2006-01-02 15:04:05 UTC")
+			notice := make(chan string, 1)
+			stopReader := make(chan struct{})
+			readerDone := make(chan struct{})
+			fd := int(outer.Master.Fd())
+			go func() {
+				defer close(readerDone)
+				var received strings.Builder
+				defer func() { notice <- received.String() }()
+				buf := make([]byte, 4096)
+				poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+				limit := time.Now().Add(2 * time.Second)
+				for time.Now().Before(limit) {
+					select {
+					case <-stopReader:
+						return
+					default:
+					}
+					// PTY reads can split a notice at any byte. Poll in short
+					// intervals so cleanup can join the reader before the helper
+					// closes its terminal descriptors, even when no data arrives.
+					n, err := unix.Poll(poll, 50)
+					if errors.Is(err, unix.EINTR) {
+						continue
+					}
+					if err != nil {
+						return
+					}
+					if n == 0 {
+						continue
+					}
+					n, err = unix.Read(fd, buf)
+					if errors.Is(err, unix.EINTR) {
+						continue
+					}
+					if n > 0 {
+						_, _ = received.Write(buf[:n])
+					}
+					if strings.Contains(received.String(), wantNotice) || err != nil || n == 0 {
+						return
+					}
+				}
+			}()
+			t.Cleanup(func() { close(stopReader); <-readerDone })
 			var outcome Outcome
 			switch mode {
 			case "recorded":
@@ -176,7 +219,7 @@ func TestExpiryNoticeTerminalDoesNotCorruptStdout(t *testing.T) {
 			}
 			select {
 			case got := <-notice:
-				if !strings.Contains(got, spec.ExpiryDeadline.UTC().Format("2006-01-02 15:04:05 UTC")) {
+				if !strings.Contains(got, wantNotice) {
 					t.Fatalf("terminal notice = %q", got)
 				}
 			case <-time.After(2 * time.Second):

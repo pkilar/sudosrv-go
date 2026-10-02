@@ -4,6 +4,7 @@ package logshell
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -304,7 +305,7 @@ func traceLoop(top int, onExec func(ExecEvent), beforeExit ...func()) Outcome {
 				var ws syscall.WaitStatus
 				for {
 					_, err = syscall.Wait4(pid, &ws, waitAll, nil)
-					if err != syscall.EINTR {
+					if !errors.Is(err, syscall.EINTR) {
 						break
 					}
 				}

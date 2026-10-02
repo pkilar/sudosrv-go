@@ -261,7 +261,7 @@ func (p plainChild) Wait() Outcome {
 		var err error
 		for {
 			err = unix.Waitid(unix.P_PID, p.cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
-			if err != syscall.EINTR {
+			if !errors.Is(err, syscall.EINTR) {
 				break
 			}
 		}

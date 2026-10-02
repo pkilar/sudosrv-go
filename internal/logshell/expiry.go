@@ -18,8 +18,8 @@ import (
 // ErrSessionExpired means the credential deadline passed before a child started.
 var ErrSessionExpired = errors.New("SSH certificate expired")
 
-func (s RunSpec) checkExpiry() error {
-	if !s.ExpiryDeadline.IsZero() && !time.Now().Before(s.ExpiryDeadline) {
+func (spec RunSpec) checkExpiry() error {
+	if !spec.ExpiryDeadline.IsZero() && !time.Now().Before(spec.ExpiryDeadline) {
 		return ErrSessionExpired
 	}
 	return nil

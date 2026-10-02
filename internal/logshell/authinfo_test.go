@@ -26,7 +26,7 @@ func TestParseAuthInfoRetainsCertificateExpiryPolicy(t *testing.T) {
 	cert := &ssh.Certificate{
 		Key: signer.PublicKey(), CertType: ssh.UserCert, KeyId: "expiry-test",
 		ValidBefore: 2000000000,
-		Permissions: ssh.Permissions{Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}},
+		Extensions:  map[string]string{TerminateOnCertExpiryExtension: ""},
 	}
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		t.Fatal(err)
