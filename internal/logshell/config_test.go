@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -761,5 +762,60 @@ func TestValidateRejectsBadStripCertRealms(t *testing.T) {
 	c.StripCertRealms = []string{"CORP.EXAMPLE.COM", "eu.example.com"}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil for well-formed realms", err)
+	}
+}
+
+func TestExpirationReminderIntervals(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		want        []time.Duration
+		bad         bool
+	}{
+		{name: "disabled", value: ""},
+		{name: "trimmed and sorted", value: " 1m, 1h ,15m,5m ", want: []time.Duration{time.Hour, 15 * time.Minute, 5 * time.Minute, time.Minute}},
+		{name: "duplicate", value: "1m,60s", bad: true},
+		{name: "zero", value: "0s", bad: true},
+		{name: "negative", value: "-1m", bad: true},
+		{name: "invalid", value: "soon", bad: true},
+		{name: "empty element", value: "1m,", bad: true},
+		{name: "overflow", value: "999999999999999h", bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SessionExpirationReminders = tc.value
+			got, err := cfg.ExpirationReminderIntervals()
+			if (err != nil) != tc.bad {
+				t.Fatalf("intervals error = %v, want error %v", err, tc.bad)
+			}
+			if !tc.bad && !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("intervals = %v, want %v", got, tc.want)
+			}
+			if err := cfg.Validate(); (err != nil) != tc.bad {
+				t.Errorf("Validate error = %v, want error %v", err, tc.bad)
+			}
+		})
+	}
+}
+
+func TestLoadExpirationSettings(t *testing.T) {
+	cfg, err := LoadUnchecked(writeConfig(t, "record_users: [root]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SessionExpirationReminders != "1h,15m,5m,1m" || cfg.SessionExpirationTimezone != "UTC" {
+		t.Fatalf("unexpected expiration defaults: %q, %q", cfg.SessionExpirationReminders, cfg.SessionExpirationTimezone)
+	}
+	cfg, err = LoadUnchecked(writeConfig(t, "session_expiration_reminders: \"\"\nsession_expiration_timezone: local\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SessionExpirationReminders != "" || cfg.SessionExpirationTimezone != "local" {
+		t.Fatalf("explicit settings not preserved: %q, %q", cfg.SessionExpirationReminders, cfg.SessionExpirationTimezone)
+	}
+	for _, zone := range []string{"", "utc", "America/New_York"} {
+		cfg.SessionExpirationTimezone = zone
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("timezone %q accepted", zone)
+		}
 	}
 }

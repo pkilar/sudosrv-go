@@ -32,6 +32,13 @@ shells:
 record_users:
   - root
 
+# Terminal notices for certificates with terminate-on-cert-expiry@cerberus.
+# Positive, distinct Go durations; empty string disables reminders, not the banner.
+# Thresholds already passed at login are skipped.
+session_expiration_reminders: "1h,15m,5m,1m"
+# "local" uses the server's timezone, e.g. session_expiration_timezone: local.
+session_expiration_timezone: "UTC"
+
 # Stream capture.
 #
 # READ THIS BEFORE RELYING ON log_ttyin: false. It does NOT mean "we do not

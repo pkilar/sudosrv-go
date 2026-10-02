@@ -45,6 +45,9 @@ func StdStreams() StdIO { return StdIO{In: os.Stdin, Out: os.Stdout, Err: os.Std
 // thing. Positional arguments used to oblige the caller to name all of them; a
 // struct does not, so which is which is written down per field.
 type RunSpec struct {
+	Lease       *SessionLease
+	renewSocket string
+
 	// ExpiryDeadline forcibly ends the supervised session at this instant.
 	// Zero preserves the ordinary session lifetime.
 	ExpiryDeadline time.Time
@@ -139,12 +142,17 @@ func RunMetadataOnly(ctx context.Context, spec RunSpec, nesting Nesting) (Outcom
 }
 
 func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureStreams bool) (Outcome, error) {
+	cleanupRenewal, renewalErr := spec.prepareRenewal()
+	if renewalErr != nil {
+		return Outcome{}, renewalErr
+	}
+	defer cleanupRenewal()
 	if err := spec.checkExpiry(); err != nil {
 		return Outcome{}, err
 	}
 	if !spec.ExpiryDeadline.IsZero() {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), spec.ExpiryDeadline.Add(5*time.Second))
+		ctx, cancel = spec.recordingContext(ctx)
 		defer cancel()
 	}
 	argv0 := ChildArgv0(spec.ShellPath, spec.Invocation.LoginShell)
@@ -178,7 +186,7 @@ func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureS
 		closeAll(pipes.drains)
 		cmd = exec.Command(spec.ShellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		cmd.Args = argv
-		cmd.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), spec.CmdLog.SessionID())
+		cmd.Env = spec.childEnv(WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), spec.CmdLog.SessionID()))
 		pipes, wireErr = spec.wireStreams(cmd, rec, &wg, captureStreams)
 		return cmd
 	}

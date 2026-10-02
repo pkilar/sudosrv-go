@@ -125,10 +125,25 @@ value; a nonempty value is refused. Infinite-validity certificates have no expir
 deadline. Certificates without the extension and plain keys keep their usual
 session lifetime.
 
-Terminal sessions show a startup banner with the expiration timestamp in UTC
-and the time remaining. A warning appears one minute before expiry; sessions
-starting with a minute or less remaining warn immediately. Notices go directly
-to the user's terminal, preserving program stdout and stderr. Sessions without
+Terminal sessions show a startup banner with the expiration timestamp and the
+time remaining. Configure the terminal notices in `/etc/logsh/logsh.yaml`:
+
+```yaml
+session_expiration_reminders: "1h,15m,5m,1m"
+session_expiration_timezone: "UTC"
+```
+
+These defaults send reminders at one hour, fifteen minutes, five minutes and one
+minute before expiry. Use comma-separated positive Go durations (such as `30m`
+or `90s`); whitespace is trimmed and intervals are sorted automatically.
+Duplicate durations, zero, negative and invalid durations are rejected.
+Thresholds already passed at login are skipped to avoid a burst of reminders;
+the startup banner still reports the remaining time. Set
+`session_expiration_reminders: ""` to disable reminders while keeping the banner.
+Set `session_expiration_timezone: local` to display timestamps in the server's
+local timezone; the only accepted values are `UTC` and `local`.
+
+Notices go directly to the user's terminal, preserving program stdout and stderr. Sessions without
 a terminal, including ordinary SFTP, SCP and remote commands, receive no banner
 or warning. Notice writes are best effort and time-limited so a client that stops
 reading cannot hold up session termination.
@@ -146,6 +161,43 @@ channels such as forwarding; keep the forwarding restrictions above. Processes
 that logsh lacks permission to signal, processes that detach into a new session
 with `setsid`, and a privileged user who disables the supervisor, are outside
 this enforcement. It is not process containment.
+
+### Extending the connected session
+
+To permit renewal, issue certificates with both empty-valued extensions:
+`terminate-on-cert-expiry@cerberus` and `permit-session-renewal@cerberus`.
+Connect using the updated Cerberus `cssh` client, then run in that shell:
+
+```sh
+cssh --extend
+```
+
+The command extends only the connected session. No account, hostname or session
+identifier is needed. The local client requests a fresh certificate using the
+original Cerberus request mode and retains Kerberos/OIDC credentials and the
+private key locally. The supervisor verifies the CA, identity, underlying key,
+principals, certificate restrictions and fresh proof of key possession before
+adopting the new expiration. Failed renewal leaves the current deadline intact;
+an expired session cannot be revived. Reminders are rescheduled after renewal.
+
+The bridge uses remote Unix socket forwarding. Configure the SSH server:
+
+```text
+AcceptEnv CERBERUS_RENEW_SOCKET
+# Place this in the appropriate Match block for accounts using logsh:
+AllowTcpForwarding remote
+PermitListen none
+AllowStreamLocalForwarding remote
+```
+
+The certificate must also carry `permit-port-forwarding`; `DisableForwarding`
+or other forwarding restrictions can prevent the bridge from opening. OpenSSH
+also requires the remote forwarding permission for Unix sockets, so replace
+`AllowTcpForwarding no` with `AllowTcpForwarding remote` and `PermitListen none`
+in this account's existing Match block. The latter refuses remote TCP listeners;
+local TCP and agent forwarding remain disabled. Install Cerberus's `cerberus-session`
+helper on the client and its `cssh` shell function on both client and server;
+the server-side function dispatches renewal to `logsh extend`.
 
 ## 4. logsh configuration
 

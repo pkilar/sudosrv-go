@@ -125,6 +125,12 @@ type Config struct {
 	//
 	// logsh_cert_keyid is never shortened, whatever this is set to.
 	StripCertRealms []string `yaml:"strip_cert_realms"`
+
+	// SessionExpirationReminders lists positive durations before certificate
+	// expiration at which terminal reminders appear. Empty disables reminders.
+	SessionExpirationReminders string `yaml:"session_expiration_reminders"`
+	// SessionExpirationTimezone selects UTC or the server's local timezone.
+	SessionExpirationTimezone string `yaml:"session_expiration_timezone"`
 }
 
 // ServerConfig locates the log server logsh reports to.
@@ -224,7 +230,9 @@ func DefaultConfig() *Config {
 		// own passwd shell is used) and no routes (so every command reaches the
 		// default route). That is the correct posture for a host that has not
 		// enabled the forced-command entry point at all.
-		BreakGlassMarker: "/etc/logsh/bypass",
+		BreakGlassMarker:           "/etc/logsh/bypass",
+		SessionExpirationReminders: "1h,15m,5m,1m",
+		SessionExpirationTimezone:  "UTC",
 	}
 }
 
@@ -508,6 +516,12 @@ func CheckPerms(path string, ownerUID uint32) error {
 
 // Validate reports configuration that cannot work or cannot be trusted.
 func (c *Config) Validate() error {
+	if _, err := c.ExpirationReminderIntervals(); err != nil {
+		return err
+	}
+	if c.SessionExpirationTimezone != "UTC" && c.SessionExpirationTimezone != "local" {
+		return fmt.Errorf("session_expiration_timezone: %q is not one of UTC, local", c.SessionExpirationTimezone)
+	}
 	if len(c.Shells) == 0 {
 		return fmt.Errorf("shells: map is empty, so every invocation would be refused")
 	}
@@ -610,6 +624,41 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ExpirationReminderIntervals parses reminders and orders them from longest to
+// shortest time remaining. Equivalent durations count as duplicates.
+func (c *Config) ExpirationReminderIntervals() ([]time.Duration, error) {
+	if strings.TrimSpace(c.SessionExpirationReminders) == "" {
+		return nil, nil
+	}
+	var intervals []time.Duration
+	seen := make(map[time.Duration]bool)
+	for value := range strings.SplitSeq(c.SessionExpirationReminders, ",") {
+		value = strings.TrimSpace(value)
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return nil, fmt.Errorf("session_expiration_reminders: invalid duration %q: %w", value, err)
+		}
+		if duration <= 0 {
+			return nil, fmt.Errorf("session_expiration_reminders: duration %q must be positive", value)
+		}
+		if seen[duration] {
+			return nil, fmt.Errorf("session_expiration_reminders: duplicate duration %q", value)
+		}
+		seen[duration] = true
+		intervals = append(intervals, duration)
+	}
+	slices.SortFunc(intervals, func(a, b time.Duration) int {
+		if a > b {
+			return -1
+		}
+		if a < b {
+			return 1
+		}
+		return 0
+	})
+	return intervals, nil
 }
 
 // Warnings reports configuration that works but is probably a mistake. They are

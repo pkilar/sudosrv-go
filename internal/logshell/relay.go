@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -105,12 +104,17 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 // metadataNesting selects a metadata-only record for a nested interactive
 // session that still needs a private controlling terminal for expiry teardown.
 func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNesting *Nesting) (Outcome, error) {
+	cleanupRenewal, renewalErr := spec.prepareRenewal()
+	if renewalErr != nil {
+		return Outcome{}, renewalErr
+	}
+	defer cleanupRenewal()
 	if err := spec.checkExpiry(); err != nil {
 		return Outcome{}, err
 	}
 	if !spec.ExpiryDeadline.IsZero() {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), spec.ExpiryDeadline.Add(5*time.Second))
+		ctx, cancel = spec.recordingContext(ctx)
 		defer cancel()
 	}
 	cfg, inv, shellPath, cmdLog := spec.Config, spec.Invocation, spec.ShellPath, spec.CmdLog
@@ -180,13 +184,13 @@ func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNest
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
-	stopNotice := startTerminalExpiryNotice(spec.ExpiryDeadline, stdin, &owned)
+	stopNotice := spec.startTerminalExpiryNotice(stdin, &owned, spec.Config)
 	defer stopNotice()
 
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
 		c.Args = argv
-		c.Env = WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), cmdLog.SessionID())
+		c.Env = spec.childEnv(WithSessionEnv(PrepareEnv(os.Environ(), spec.EnvShell), cmdLog.SessionID()))
 		c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
 		// Setsid puts the shell in its own session with the INNER pty as
 		// controlling terminal, which is what makes job control, ^C and ^Z work

@@ -237,6 +237,26 @@ func refuseWithFallback(cfg *logshell.Config, tgt *execTarget, reason string, fa
 
 // runAdmin is the path taken when the binary is invoked under its own name.
 func runAdmin(inv logshell.Invocation) int {
+	if len(inv.Args) > 0 && inv.Args[0] == "extend" {
+		if len(inv.Args) != 1 {
+			fmt.Fprintln(os.Stderr, "logsh: usage: logsh extend")
+			return exitConfig
+		}
+		socket := os.Getenv("LOGSH_RENEW_SOCKET")
+		if socket == "" {
+			fmt.Fprintln(os.Stderr, "logsh: this session has no renewal bridge; connect with cssh using a renewal-enabled certificate")
+			return exitGeneral
+		}
+		_, err := logshell.RequestSessionExtension(socket)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "logsh: cannot extend session: %v\n", err)
+			return exitGeneral
+		}
+		// The supervisor prints the accepted deadline in the configured timezone
+		// on this session's terminal. This command reports success for callers
+		// without a terminal as well.
+		return exitOK
+	}
 	fs := flag.NewFlagSet(appName, flag.ContinueOnError)
 	configPath := fs.String("config", logshell.DefaultConfigPath, "Path to the configuration file")
 	validate := fs.Bool("validate", false, "Validate the configuration and exit")
