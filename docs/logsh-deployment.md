@@ -14,11 +14,23 @@ touching root's `/etc/passwd` entry. That is a different set of trade-offs and
 has its own runbook — see
 [logsh-forcecommand.md](logsh-forcecommand.md). The two can coexist.
 
+Terminal certificate-expiration notices default to reminders at `1h,15m,5m,1m`
+and timestamps in UTC. Set `session_expiration_timezone: local` in
+`/etc/logsh/logsh.yaml` to use the server's timezone, or
+`session_expiration_reminders: ""` to keep only the startup banner. Reminders
+whose thresholds have already passed at login are skipped.
+
 SSH certificates can opt sessions into forced termination at expiry with the
 empty-valued `terminate-on-cert-expiry@cerberus` extension. Set `ExposeAuthInfo yes`
 in sshd for either deployment; see the
 [certificate expiry instructions](logsh-forcecommand.md#terminate-sessions-when-their-certificate-expires)
 for issuance, enforcement and scope.
+
+Renewable certificates additionally carry `permit-session-renewal@cerberus`.
+The updated Cerberus client lets users run `cssh --extend` inside the connected
+shell, with no account, host or session ID arguments. See
+[session renewal](logsh-forcecommand.md#extending-the-connected-session) for the
+client helper and SSH Unix-socket forwarding setup.
 
 ---
 

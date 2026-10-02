@@ -19,6 +19,12 @@ import (
 var ErrSessionExpired = errors.New("SSH certificate expired")
 
 func (spec RunSpec) checkExpiry() error {
+	if spec.Lease != nil {
+		if spec.Lease.expire() {
+			return ErrSessionExpired
+		}
+		return nil
+	}
 	if !spec.ExpiryDeadline.IsZero() && !time.Now().Before(spec.ExpiryDeadline) {
 		return ErrSessionExpired
 	}
@@ -79,7 +85,7 @@ func startSessionChild(build func() *exec.Cmd, spec RunSpec, interruptDrain func
 		},
 		started: func(cmd *exec.Cmd) {
 			if rootFD >= 0 {
-				stopWatcher, captureMembers = watchExpiry(cmd.Process.Pid, rootFD, spec.ExpiryDeadline, interruptDrain)
+				stopWatcher, captureMembers = watchLeaseExpiry(cmd.Process.Pid, rootFD, spec.Lease, spec.ExpiryDeadline, interruptDrain)
 			}
 		},
 		exiting: func(*exec.Cmd) { captureMembers() },
@@ -106,6 +112,13 @@ func startSessionChild(build func() *exec.Cmd, spec RunSpec, interruptDrain func
 // Start the watcher immediately after fork/exec, including while ptrace startup
 // waits for stop events. Failed tracing attempts stop their watcher before retry.
 func watchExpiry(sid, rootFD int, deadline time.Time, interruptDrain func()) (func(), func()) {
+	return watchLeaseExpiry(sid, rootFD, nil, deadline, interruptDrain)
+}
+
+func watchLeaseExpiry(sid, rootFD int, lease *SessionLease, deadline time.Time, interruptDrain func()) (func(), func()) {
+	if lease == nil {
+		lease = NewSessionLease(deadline)
+	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var once sync.Once
@@ -129,37 +142,47 @@ func watchExpiry(sid, rootFD int, deadline time.Time, interruptDrain func()) (fu
 	}
 	go func() {
 		defer close(done)
-		timer := time.NewTimer(time.Until(deadline))
-		defer timer.Stop()
-		select {
-		case <-stop:
-			return
-		case <-timer.C:
-			mu.Lock()
-			expired = true
-			if !exiting {
-				// The before-reap hook needs this same lock, so the original
-				// leader cannot be reaped while this snapshot is taken.
-				if processFDID(rootFD) == sid {
-					current := pinSession(sid)
-					// Failed tracer startup can reap outside the normal exit hook.
-					// Retain the snapshot only if the pinned leader still exists.
+		for {
+			deadline, changed, _ := lease.snapshot()
+			timer := time.NewTimer(time.Until(deadline))
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-changed:
+				timer.Stop()
+				continue
+			case <-timer.C:
+				if !lease.expire() {
+					continue
+				}
+				mu.Lock()
+				expired = true
+				if !exiting {
+					// The before-reap hook needs this same lock, so the original
+					// leader cannot be reaped while this snapshot is taken.
 					if processFDID(rootFD) == sid {
-						members = append(members, current...)
-					} else {
-						for _, fd := range current {
-							_ = syscall.Close(fd)
+						current := pinSession(sid)
+						// Failed tracer startup can reap outside the normal exit hook.
+						// Retain the snapshot only if the pinned leader still exists.
+						if processFDID(rootFD) == sid {
+							members = append(members, current...)
+						} else {
+							for _, fd := range current {
+								_ = syscall.Close(fd)
+							}
 						}
 					}
 				}
-			}
-			_ = killProcessFD(rootFD)
-			for _, fd := range members {
-				_ = killProcessFD(fd)
-			}
-			mu.Unlock()
-			if interruptDrain != nil {
-				interruptDrain()
+				_ = killProcessFD(rootFD)
+				for _, fd := range members {
+					_ = killProcessFD(fd)
+				}
+				mu.Unlock()
+				if interruptDrain != nil {
+					interruptDrain()
+				}
+				return
 			}
 		}
 	}()
@@ -249,6 +272,11 @@ func processSession(pid int) int {
 // RunUnrecorded runs a session without a recorder while retaining an expiry
 // supervisor. The caller should keep using Exec when expiry enforcement is off.
 func RunUnrecorded(spec RunSpec) (Outcome, error) {
+	cleanupRenewal, renewalErr := spec.prepareRenewal()
+	if renewalErr != nil {
+		return Outcome{}, renewalErr
+	}
+	defer cleanupRenewal()
 	if err := spec.checkExpiry(); err != nil {
 		return Outcome{}, err
 	}
@@ -287,13 +315,13 @@ func RunUnrecorded(spec RunSpec) (Outcome, error) {
 			return Outcome{}, err
 		}
 	}
-	stopNotice := startTerminalExpiryNotice(spec.ExpiryDeadline, spec.Std.In, &owned)
+	stopNotice := spec.startTerminalExpiryNotice(spec.Std.In, &owned, spec.Config)
 	defer stopNotice()
 	var running *exec.Cmd
 	build := func() *exec.Cmd {
 		cmd := exec.Command(spec.ShellPath) // #nosec G204 -- resolved shell/forced command
 		cmd.Args = append([]string{ChildArgv0(spec.ShellPath, spec.Invocation.LoginShell)}, spec.Invocation.Args...)
-		cmd.Env = PrepareEnv(os.Environ(), spec.EnvShell)
+		cmd.Env = spec.childEnv(PrepareEnv(os.Environ(), spec.EnvShell))
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = spec.Std.In, spec.Std.Out, spec.Std.Err
 		if inner != nil {
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave

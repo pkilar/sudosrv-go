@@ -10,6 +10,16 @@ import (
 	"testing"
 )
 
+func TestExtendRequiresCurrentSession(t *testing.T) {
+	t.Setenv("LOGSH_RENEW_SOCKET", "")
+	if got := runAdmin(logshell.Invocation{Args: []string{"extend"}}); got != exitGeneral {
+		t.Fatalf("exit = %d, want %d outside a renewable session", got, exitGeneral)
+	}
+	if got := runAdmin(logshell.Invocation{Args: []string{"extend", "other-session"}}); got != exitConfig {
+		t.Fatalf("exit = %d, want %d for an unexpected argument", got, exitConfig)
+	}
+}
+
 // TestTargetFromRouteBuildsTheRightArgv.
 //
 // The interactive route must produce a LOGIN argv[0] -- "-bash", not "bash".

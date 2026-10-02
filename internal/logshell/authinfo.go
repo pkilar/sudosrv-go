@@ -32,6 +32,8 @@ const (
 // certificate. sshd writes the credentials it accepted to the file named by
 // SSH_USER_AUTH when ExposeAuthInfo is on, and this is that file, parsed.
 type AuthInfo struct {
+	Certificate *ssh.Certificate
+
 	// Method is one of the AuthMethod* constants, or "" when nothing was read.
 	Method string
 
@@ -136,6 +138,7 @@ func ParseAuthInfo(raw []byte) (AuthInfo, error) {
 		}
 		if cert, ok := pub.(*ssh.Certificate); ok {
 			return AuthInfo{
+				Certificate:    cert,
 				Method:         AuthMethodCert,
 				KeyID:          cert.KeyId,
 				Serial:         cert.Serial,

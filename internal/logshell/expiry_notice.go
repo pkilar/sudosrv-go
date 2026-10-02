@@ -12,7 +12,7 @@ import (
 
 // Notices go to the user's terminal, independently of the program's streams.
 // Failure to display an informational notice must not disable expiry enforcement.
-func startTerminalExpiryNotice(deadline time.Time, terminal *os.File, owned *[]*os.File) func() {
+func startTerminalExpiryNotice(deadline time.Time, terminal *os.File, owned *[]*os.File, cfg *Config) func() {
 	if deadline.IsZero() || terminal == nil || !IsTerminal(terminal.Fd()) {
 		return func() {}
 	}
@@ -20,14 +20,27 @@ func startTerminalExpiryNotice(deadline time.Time, terminal *os.File, owned *[]*
 	if err != nil {
 		return func() {}
 	}
-	return startExpiryNotice(deadline, out)
+	return startExpiryNotice(deadline, out, cfg)
 }
 
-func startExpiryNotice(deadline time.Time, out io.Writer) func() {
+func startExpiryNotice(deadline time.Time, out io.Writer, cfg *Config) func() {
 	if deadline.IsZero() || out == nil || !time.Now().Before(deadline) {
 		return func() {}
 	}
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	intervals, err := cfg.ExpirationReminderIntervals()
+	if err != nil {
+		// Configuration loading rejects malformed intervals. A caller supplying
+		// an unchecked config must still retain expiry enforcement.
+		intervals = nil
+	}
+	started := time.Now()
 	stamp := deadline.UTC().Format("2006-01-02 15:04:05 UTC")
+	if cfg.SessionExpirationTimezone == "local" {
+		stamp = deadline.In(time.Local).Format("2006-01-02 15:04:05 MST (UTC-07:00)")
+	}
 	writeExpiryNotice(out, deadline, fmt.Sprintf(
 		"\r\nlogsh: This session will automatically terminate when your SSH certificate expires.\r\n"+
 			"logsh: Expiration: %s (%s remaining).\r\n", stamp, expiryRemaining(time.Until(deadline))))
@@ -40,20 +53,25 @@ func startExpiryNotice(deadline time.Time, out io.Writer) func() {
 			"\r\nlogsh: WARNING: this session will automatically terminate in %s (SSH certificate expiration: %s).\r\n",
 			expiryRemaining(remaining), stamp))
 	}
-	if time.Until(deadline) <= time.Minute {
-		warn()
-		return func() {}
-	}
 	stop, done := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	go func() {
 		defer close(done)
-		timer := time.NewTimer(time.Until(deadline.Add(-time.Minute)))
-		defer timer.Stop()
-		select {
-		case <-stop:
-		case <-timer.C:
-			warn()
+		for _, interval := range intervals {
+			at := deadline.Add(-interval)
+			// The startup banner already gives the current remaining time.
+			// Do not replay reminders whose thresholds passed before login.
+			if !at.After(started) {
+				continue
+			}
+			timer := time.NewTimer(time.Until(at))
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+				warn()
+			}
 		}
 	}()
 	return func() { once.Do(func() { close(stop); <-done }) }
@@ -96,4 +114,49 @@ func expiryRemaining(d time.Duration) string {
 		parts = append(parts, fmt.Sprintf("%ds", seconds))
 	}
 	return strings.Join(parts, " ")
+}
+
+// startTerminalExpiryNotice follows the lease so extension replaces all old reminders.
+func (spec RunSpec) startTerminalExpiryNotice(terminal *os.File, owned *[]*os.File, cfg *Config) func() {
+	if spec.Lease == nil {
+		return startTerminalExpiryNotice(spec.ExpiryDeadline, terminal, owned, cfg)
+	}
+	if terminal == nil || !IsTerminal(terminal.Fd()) {
+		return func() {}
+	}
+	out, err := expiryFile(terminal, os.O_WRONLY, owned)
+	if err != nil {
+		return func() {}
+	}
+	return spec.startLeaseExpiryNotice(out, cfg)
+}
+
+func (spec RunSpec) startLeaseExpiryNotice(out io.Writer, cfg *Config) func() {
+	stop, done := make(chan struct{}), make(chan struct{})
+	deadline, changed, _ := spec.Lease.snapshot()
+	stopNotice := startExpiryNotice(deadline, out, cfg)
+	if spec.renewSocket != "" {
+		writeExpiryNotice(out, deadline, "\r\nlogsh: To extend this session, run: cssh --extend\r\n")
+	}
+	go func() {
+		defer close(done)
+		defer func() { stopNotice() }()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-changed:
+				stopNotice()
+				deadline, changed, _ = spec.Lease.snapshot()
+				stamp := deadline.UTC().Format("2006-01-02 15:04:05 UTC")
+				if cfg != nil && cfg.SessionExpirationTimezone == "local" {
+					stamp = deadline.In(time.Local).Format("2006-01-02 15:04:05 MST (UTC-07:00)")
+				}
+				writeExpiryNotice(out, deadline, fmt.Sprintf("\r\nlogsh: Session extended until %s.\r\n", stamp))
+				stopNotice = startExpiryNotice(deadline, out, cfg)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(stop); <-done }) }
 }

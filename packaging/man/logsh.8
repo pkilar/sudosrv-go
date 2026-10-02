@@ -81,10 +81,26 @@ are refused before launch. Recording exclusions, nested recording skips, fail-op
 and break-glass do not disable this policy. Certificates without the extension
 retain their normal session lifetime. Detached processes in other sessions and
 SSH forwarding channels are outside this enforcement.
-Terminal sessions display the expiry time in UTC and the time remaining at
-startup, then warn one minute before expiry (immediately if less time remains).
+Terminal sessions display the expiry time (UTC by default) and the time remaining at
+startup. The session_expiration_reminders setting defaults to "1h,15m,5m,1m":
+positive, distinct comma-separated Go durations before expiry. Thresholds already
+passed at login are skipped. An empty string disables reminders but keeps the
+banner. The session_expiration_timezone setting accepts UTC (the default) or
+local (the server's timezone).
 Notices are written directly to the terminal; sessions without a terminal
 receive no notices in their command or file-transfer streams.
+.PP
+Certificates with the additional empty-valued permit-session-renewal@cerberus
+extension permit extension through the updated Cerberus client. Run
+.B cssh --extend
+inside the connected shell. No account, host or session identifier is required.
+The client obtains a fresh certificate locally; logsh verifies its identity,
+restrictions and key possession before updating the deadline and reminders.
+This requires the cerberus-session helper, permit-port-forwarding on the
+certificate, AcceptEnv CERBERUS_RENEW_SOCKET, AllowStreamLocalForwarding remote,
+and AllowTcpForwarding remote with PermitListen none in sshd. PermitListen none
+refuses remote TCP listeners while allowing the Unix bridge.
+Failed renewal leaves the current deadline in force.
 .PP
 An account that is not listed in
 .I record_users
