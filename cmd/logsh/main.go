@@ -100,10 +100,15 @@ func runShell(inv logshell.Invocation) int {
 	}
 
 	uid := os.Getuid()
+	var info logshell.SessionInfo
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_USER_AUTH") != "" {
+		info = sessionInfoFromEnv()
+	}
 	return runSession(session{
 		Config:     cfg,
 		Target:     targetFromInvocation(inv, shellPath),
 		Invocation: inv,
+		Info:       info,
 		// Something above us may already be recording these keystrokes. `sudo -i`
 		// runs the target account's passwd shell, so once logsh IS that shell the
 		// session is captured twice -- three times when the invoking account also
@@ -204,10 +209,15 @@ func passthrough(tgt *execTarget) int {
 // failure -- and for a forced command it would also hand the client something
 // they did not ask for.
 func refuse(cfg *logshell.Config, tgt *execTarget, reason string) int {
+	return refuseWithFallback(cfg, tgt, reason, func() int { return passthrough(tgt) })
+}
+
+// refuseWithFallback keeps recording recovery separate from session supervision.
+func refuseWithFallback(cfg *logshell.Config, tgt *execTarget, reason string, fallback func() int) int {
 	if cfg != nil && !cfg.FailClosed && tgt != nil {
 		logshell.Alertf(syslog.LOG_ERR,
 			"proceeding UNRECORDED because fail_closed is disabled: %s", reason)
-		return passthrough(tgt)
+		return fallback()
 	}
 
 	if logshell.BreakGlassActive(cfg) && tgt != nil {
@@ -215,7 +225,7 @@ func refuse(cfg *logshell.Config, tgt *execTarget, reason string) int {
 			"proceeding UNRECORDED via break-glass marker %s: %s",
 			logshell.BreakGlassPath(cfg), reason)
 		fmt.Fprint(os.Stderr, logshell.BreakGlassBanner)
-		return passthrough(tgt)
+		return fallback()
 	}
 
 	logshell.Alertf(syslog.LOG_ERR, "session REFUSED for uid %d: %s", os.Getuid(), reason)

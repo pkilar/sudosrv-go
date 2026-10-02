@@ -13,6 +13,9 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // relayBufSize is the read size for both relay directions. 32 KiB is far below
@@ -96,8 +99,38 @@ func StdTerminal() TerminalIO { return TerminalIO{In: os.Stdin, Out: os.Stdout} 
 // forced command -- differ only in how they resolve what to run, and threading
 // each new field through six positional parameters is how the two drift apart.
 func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, error) {
+	return runRecorded(ctx, spec, tio, nil)
+}
+
+// metadataNesting selects a metadata-only record for a nested interactive
+// session that still needs a private controlling terminal for expiry teardown.
+func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNesting *Nesting) (Outcome, error) {
+	if err := spec.checkExpiry(); err != nil {
+		return Outcome{}, err
+	}
+	if !spec.ExpiryDeadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), spec.ExpiryDeadline.Add(5*time.Second))
+		defer cancel()
+	}
 	cfg, inv, shellPath, cmdLog := spec.Config, spec.Invocation, spec.ShellPath, spec.CmdLog
 	stdin := tio.In
+	var owned []*os.File
+	defer func() { closeAll(owned) }()
+	input := stdin
+	if !spec.ExpiryDeadline.IsZero() {
+		var err error
+		input, err = expiryFile(stdin, os.O_RDONLY, &owned)
+		if err != nil {
+			return Outcome{}, unavailable(err)
+		}
+		if output, ok := tio.Out.(*os.File); ok {
+			tio.Out, err = expiryFile(output, os.O_WRONLY, &owned)
+			if err != nil {
+				return Outcome{}, unavailable(err)
+			}
+		}
+	}
 
 	size, err := GetWinSize(stdin.Fd())
 	if err != nil {
@@ -123,9 +156,17 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 	meta := CollectMeta(pty.Name, size, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
 	meta.ApplyNesting(DetectNesting())
+	if metadataNesting != nil {
+		meta.ApplyNesting(*metadataNesting)
+	}
 	meta.ApplyAuthInfo(spec.Info, cfg.StripCertRealms)
 
-	rec, err := StartRecorder(ctx, cfg, meta)
+	var rec *Recorder
+	if metadataNesting != nil {
+		rec, err = StartEventRecorder(ctx, cfg, meta, false)
+	} else {
+		rec, err = StartRecorder(ctx, cfg, meta)
+	}
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
@@ -139,6 +180,8 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 	if err != nil {
 		return Outcome{}, unavailable(err)
 	}
+	stopNotice := startTerminalExpiryNotice(spec.ExpiryDeadline, stdin, &owned)
+	defer stopNotice()
 
 	build := func() *exec.Cmd {
 		c := exec.Command(shellPath) // #nosec G204 -- see .golangci.yml; allowlisted by ResolveShell
@@ -153,12 +196,13 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 		return c
 	}
 
-	child, err := startChild(build, cfg, cmdLog)
+	child, stopExpiry, err := startSessionChild(build, spec, func() { closeAll(owned); _ = pty.Close() })
 	if err != nil {
 		_ = slave.Close()
 		return Outcome{}, unavailable(err)
 	}
 
+	defer stopExpiry()
 	// Drop our copy of the slave. While any descriptor for it remains open in
 	// this process, reading the master never reports EOF, so the output relay
 	// would block forever after the shell exits and the session would never end.
@@ -175,16 +219,22 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 		rawState, _ = GetTermios(stdin.Fd())
 	}
 
-	stopWinch := watchWindowSize(stdin, pty, rec)
+	resizeRec := rec
+	if metadataNesting != nil {
+		resizeRec = nil
+	}
+	stopWinch := watchWindowSize(stdin, pty, resizeRec)
 	defer stopWinch()
 
 	stopSuspend := watchSuspend(stdin.Fd(), saved, rawState, rec)
 	defer stopSuspend()
 
-	relayInput(stdin, pty.Master, rec)
+	relayInput(input, pty.Master, rec)
 	relayOutput(pty.Master, tio.Out, rec)
 
 	outcome := child.Wait()
+	stopNotice()
+	stopExpiry()
 	cmdLog.End(outcome)
 
 	if err := rec.Exit(ctx, outcome.ExitCode, outcome.Signal, outcome.CoreDumped); err != nil {
@@ -200,9 +250,27 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 // childProc is a started child whose exit status can be collected.
 type childProc interface{ Wait() Outcome }
 
-type plainChild struct{ cmd *exec.Cmd }
+type plainChild struct {
+	cmd        *exec.Cmd
+	beforeReap func()
+}
 
-func (p plainChild) Wait() Outcome { return waitOutcome(p.cmd) }
+func (p plainChild) Wait() Outcome {
+	if p.beforeReap != nil {
+		var info unix.Siginfo
+		var err error
+		for {
+			err = unix.Waitid(unix.P_PID, p.cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+			if !errors.Is(err, syscall.EINTR) {
+				break
+			}
+		}
+		if err == nil {
+			p.beforeReap()
+		}
+	}
+	return waitOutcome(p.cmd)
+}
 
 // startChild launches the shell, under exec tracing when the command log wants
 // it, and plainly otherwise.
@@ -210,9 +278,43 @@ func (p plainChild) Wait() Outcome { return waitOutcome(p.cmd) }
 // build produces a FRESH exec.Cmd each call. That is not fussiness: a failed
 // trace attempt has already forked and killed a process, so its exec.Cmd is
 // spent and cannot be reused for the untraced fallback.
-func startChild(build func() *exec.Cmd, cfg *Config, cmdLog *CommandLog) (childProc, error) {
+type childStartHooks struct {
+	before  func() error
+	started func(*exec.Cmd)
+	exiting func(*exec.Cmd)
+}
+
+func startChild(build func() *exec.Cmd, cfg *Config, cmdLog *CommandLog, hooks ...childStartHooks) (childProc, error) {
+	check := func() error {
+		for _, hook := range hooks {
+			if hook.before != nil {
+				if err := hook.before(); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	started := func(cmd *exec.Cmd) {
+		for _, hook := range hooks {
+			if hook.started != nil {
+				hook.started(cmd)
+			}
+		}
+	}
+	exiting := func(cmd *exec.Cmd) {
+		for _, hook := range hooks {
+			if hook.exiting != nil {
+				hook.exiting(cmd)
+			}
+		}
+	}
 	if cfg.CommandLog.Enabled {
-		tc, err := startTraced(build(), cmdLog.Exec)
+		cmd := build()
+		if err := check(); err != nil {
+			return nil, err
+		}
+		tc, err := startTraced(cmd, cmdLog.Exec, childStartHooks{started: started, exiting: exiting})
 		if err == nil {
 			return tc, nil
 		}
@@ -228,10 +330,21 @@ func startChild(build func() *exec.Cmd, cfg *Config, cmdLog *CommandLog) (childP
 	}
 
 	cmd := build()
+	if err := check(); err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return plainChild{cmd}, nil
+	started(cmd)
+	var beforeReap func()
+	for _, hook := range hooks {
+		if hook.exiting != nil {
+			beforeReap = func() { exiting(cmd) }
+			break
+		}
+	}
+	return plainChild{cmd: cmd, beforeReap: beforeReap}, nil
 }
 
 // relayInput copies the user's keystrokes to the shell.
@@ -249,7 +362,9 @@ func relayInput(from *os.File, to *os.File, rec *Recorder) {
 				// Record before forwarding: a keystroke that reaches the shell
 				// but not the log is an audit gap, and the shell cannot act on
 				// it any faster than we can note it.
-				_ = rec.TTYIn(buf[:n])
+				if rec != nil {
+					_ = rec.TTYIn(buf[:n])
+				}
 				if _, werr := to.Write(buf[:n]); werr != nil {
 					return
 				}
@@ -278,7 +393,9 @@ func relayOutput(from *os.File, to io.Writer, rec *Recorder) {
 			if _, werr := to.Write(buf[:n]); werr != nil {
 				return
 			}
-			_ = rec.TTYOut(buf[:n])
+			if rec != nil {
+				_ = rec.TTYOut(buf[:n])
+			}
 		}
 		if err != nil {
 			// EIO here is normal, not an error: it is how Linux reports that the
@@ -306,7 +423,9 @@ func watchWindowSize(outer *os.File, pty *PTY, rec *Recorder) func() {
 					continue
 				}
 				_ = SetWinSize(pty.Master.Fd(), size)
-				_ = rec.WinSize(size)
+				if rec != nil {
+					_ = rec.WinSize(size)
+				}
 			case <-done:
 				return
 			}

@@ -14,6 +14,12 @@ touching root's `/etc/passwd` entry. That is a different set of trade-offs and
 has its own runbook — see
 [logsh-forcecommand.md](logsh-forcecommand.md). The two can coexist.
 
+SSH certificates can opt sessions into forced termination at expiry with the
+empty-valued `terminate-on-cert-expiry@cerberus` extension. Set `ExposeAuthInfo yes`
+in sshd for either deployment; see the
+[certificate expiry instructions](logsh-forcecommand.md#terminate-sessions-when-their-certificate-expires)
+for issuance, enforcement and scope.
+
 ---
 
 ## What it does and does not record

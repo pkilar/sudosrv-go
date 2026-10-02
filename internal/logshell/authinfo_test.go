@@ -3,9 +3,77 @@
 package logshell
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"math"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
+
+func TestParseAuthInfoRetainsCertificateExpiryPolicy(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &ssh.Certificate{
+		Key: signer.PublicKey(), CertType: ssh.UserCert, KeyId: "expiry-test",
+		ValidBefore: 2000000000,
+		Extensions:  map[string]string{TerminateOnCertExpiryExtension: ""},
+	}
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		t.Fatal(err)
+	}
+	raw := "publickey " + cert.Type() + " " + base64.StdEncoding.EncodeToString(cert.Marshal())
+	got, err := ParseAuthInfo([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, err := got.CertificateDeadline(time.Unix(1900000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deadline.Equal(time.Unix(2000000000, 0)) {
+		t.Fatalf("deadline = %v, want certificate ValidBefore", deadline)
+	}
+}
+
+func TestCertificateDeadline(t *testing.T) {
+	now := time.Unix(1900000000, 500000000)
+	for _, tt := range []struct {
+		name    string
+		auth    AuthInfo
+		want    time.Time
+		wantErr bool
+	}{
+		{name: "certificate without flag", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: 1}},
+		{name: "plain key ignores flag", auth: AuthInfo{Method: AuthMethodKey, ValidBefore: 1, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}},
+		{name: "opted in", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: 1900000001, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}, want: time.Unix(1900000001, 0)},
+		{name: "expired", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: 1899999999, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}, wantErr: true},
+		{name: "expiry second already reached", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: 1900000000, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}, wantErr: true},
+		{name: "zero expiry", auth: AuthInfo{Method: AuthMethodCert, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}, wantErr: true},
+		{name: "infinite validity", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: ssh.CertTimeInfinity, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}},
+		{name: "out of range", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: math.MaxInt64 + 1, Extensions: map[string]string{TerminateOnCertExpiryExtension: ""}}, wantErr: true},
+		{name: "flag with value", auth: AuthInfo{Method: AuthMethodCert, ValidBefore: 1900000001, Extensions: map[string]string{TerminateOnCertExpiryExtension: "true"}}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.auth.CertificateDeadline(now)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("deadline = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func authinfoPath(name string) string { return filepath.Join("testdata", "authinfo", name) }
 

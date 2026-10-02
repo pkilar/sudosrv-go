@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -51,6 +53,38 @@ type AuthInfo struct {
 	// KeyFingerprint identifies the presented credential itself, and is the only
 	// identifier available when it was a plain key.
 	KeyFingerprint string
+
+	// ValidBefore and Extensions retain the CA-signed session expiry policy.
+	ValidBefore uint64
+	Extensions  map[string]string
+}
+
+// TerminateOnCertExpiryExtension opts a certificate into session termination.
+// It is a flag: its value must be empty.
+const TerminateOnCertExpiryExtension = "terminate-on-cert-expiry@cerberus"
+
+// CertificateDeadline returns the expiry deadline only for an opted-in SSH
+// certificate. Infinite validity has no deadline. An expired or malformed
+// policy must be refused independently of the recording failure policy.
+func (a AuthInfo) CertificateDeadline(now time.Time) (time.Time, error) {
+	value, enabled := a.Extensions[TerminateOnCertExpiryExtension]
+	if a.Method != AuthMethodCert || !enabled {
+		return time.Time{}, nil
+	}
+	if value != "" {
+		return time.Time{}, fmt.Errorf("%s must have an empty value", TerminateOnCertExpiryExtension)
+	}
+	if a.ValidBefore == ssh.CertTimeInfinity {
+		return time.Time{}, nil
+	}
+	if a.ValidBefore > math.MaxInt64 {
+		return time.Time{}, errors.New("certificate expiry timestamp is out of range")
+	}
+	deadline := time.Unix(int64(a.ValidBefore), 0)
+	if !now.Before(deadline) {
+		return time.Time{}, errors.New("SSH certificate has expired")
+	}
+	return deadline, nil
 }
 
 // ErrNoCredential reports that nothing in the auth-info file parsed as a public
@@ -108,6 +142,8 @@ func ParseAuthInfo(raw []byte) (AuthInfo, error) {
 				Principals:     cert.ValidPrincipals,
 				CAFingerprint:  ssh.FingerprintSHA256(cert.SignatureKey),
 				KeyFingerprint: ssh.FingerprintSHA256(cert),
+				ValidBefore:    cert.ValidBefore,
+				Extensions:     cert.Extensions,
 			}, nil
 		}
 		if plain.Method == "" {

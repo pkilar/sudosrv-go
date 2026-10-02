@@ -9,6 +9,7 @@ import (
 	"log/syslog"
 	"os"
 	"sudosrv/internal/logshell"
+	"time"
 )
 
 // session is a resolved session, ready to run.
@@ -34,8 +35,8 @@ type session struct {
 	Invocation logshell.Invocation
 
 	// Info is what sshd told us about the session -- the authenticating
-	// credential, the client's command, the source address. Zero for a
-	// login-shell session, which stamps nothing.
+	// credential, the client's command, the source address. Zero for a local
+	// login-shell session.
 	Info logshell.SessionInfo
 
 	// Nesting is whether something above us is already recording. Passed in
@@ -86,11 +87,42 @@ func runSession(s session) int {
 		return refuse(s.Config, nil, "no target was resolved for this session")
 	}
 
-	if !s.Config.ShouldRecord(s.Username, s.UID) {
-		return passthrough(s.Target)
+	deadline, err := s.Info.Auth.CertificateDeadline(time.Now())
+	if err != nil {
+		logshell.Alertf(syslog.LOG_ERR, "SSH certificate session REFUSED: %v", err)
+		fmt.Fprintf(os.Stderr, "logsh: %v\n", err)
+		return exitRefused
 	}
 
 	ctx := context.Background()
+	spec := logshell.RunSpec{
+		Config:         s.Config,
+		Invocation:     s.Invocation,
+		ShellPath:      s.Target.path,
+		Std:            logshell.StdStreams(),
+		Info:           s.Info,
+		EnvShell:       s.Target.envShell,
+		ExpiryDeadline: deadline,
+	}
+	// Exec would remove the process responsible for enforcing the deadline.
+	fallback := func() int {
+		if deadline.IsZero() {
+			return passthrough(s.Target)
+		}
+		outcome, err := logshell.RunUnrecorded(spec)
+		if err != nil {
+			logshell.Alertf(syslog.LOG_ERR, "cannot run supervised session: %v", err)
+			fmt.Fprintf(os.Stderr, "logsh: %v\n", err)
+			return exitRefused
+		}
+		return outcome.ExitCode
+	}
+	refuseRecording := func(reason string) int {
+		return refuseWithFallback(s.Config, s.Target, reason, fallback)
+	}
+	if !s.Config.ShouldRecord(s.Username, s.UID) {
+		return fallback()
+	}
 
 	// The command log is independent of session recording in every direction:
 	// its own toggle, local syslog rather than the log server, and it runs
@@ -98,31 +130,22 @@ func runSession(s session) int {
 	cmdLog, cmdLogErr := logshell.OpenCommandLog(s.Config)
 	if cmdLogErr != nil {
 		if s.Config.CommandLog.Required {
-			return refuse(s.Config, s.Target, fmt.Sprintf("command log unavailable: %v", cmdLogErr))
+			return refuseRecording(fmt.Sprintf("command log unavailable: %v", cmdLogErr))
 		}
 		logshell.Alertf(syslog.LOG_WARNING, "command log unavailable, continuing without it: %v", cmdLogErr)
 	}
 	defer func() { _ = cmdLog.Close() }()
 
-	spec := logshell.RunSpec{
-		Config:     s.Config,
-		Invocation: s.Invocation,
-		ShellPath:  s.Target.path,
-		Std:        logshell.StdStreams(),
-		CmdLog:     cmdLog,
-		Info:       s.Info,
-		EnvShell:   s.Target.envShell,
-	}
+	spec.CmdLog = cmdLog
 
 	var outcome logshell.Outcome
-	var err error
 
 	switch mode := s.Config.NestedMode(s.Nesting); mode {
 	case logshell.NestedModeSkip:
 		logshell.Alertf(syslog.LOG_INFO,
 			"session nested inside %s; not recording here (nested_sessions=%s)",
 			s.Nesting.Kind, mode)
-		return passthrough(s.Target)
+		return fallback()
 
 	case logshell.NestedModeMetadata:
 		// Streams pass straight through, so no second pty and no duplicate
@@ -144,10 +167,15 @@ func runSession(s session) int {
 	}
 
 	if err != nil {
+		if errors.Is(err, logshell.ErrSessionExpired) {
+			logshell.Alertf(syslog.LOG_ERR, "SSH certificate expired before the session could start")
+			fmt.Fprintln(os.Stderr, "logsh: SSH certificate has expired")
+			return exitRefused
+		}
 		if errors.Is(err, logshell.ErrRecordingUnavailable) {
 			// Nothing was ever started, so the failure policy still has a
 			// meaningful choice to make.
-			return refuse(s.Config, s.Target, err.Error())
+			return refuseRecording(err.Error())
 		}
 		// The child ran. The audit gap has already happened and cannot be undone
 		// by refusing; the user's exit status is a fact they are owed. Report

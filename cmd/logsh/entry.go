@@ -30,15 +30,15 @@ func sessionInfoFromEnv() logshell.SessionInfo {
 	auth, err := logshell.ReadAuthInfo(os.Getenv("SSH_USER_AUTH"))
 	if err != nil {
 		logshell.Alertf(syslog.LOG_CRIT,
-			"no usable SSH_USER_AUTH (%v): this root session will be recorded without "+
-				"certificate attribution. Is ExposeAuthInfo enabled?", err)
+			"no usable SSH_USER_AUTH (%v): this SSH session will be recorded without "+
+				"certificate attribution or expiry enforcement. Is ExposeAuthInfo enabled?", err)
 		return info
 	}
 	if auth.Method == logshell.AuthMethodKey {
 		// Under the certificate design this is the break-glass account or a key
 		// the fallback audit missed. Worth saying out loud, not just recording.
 		logshell.Alertf(syslog.LOG_CRIT,
-			"root SSH session authenticated by a plain key (%s), not a certificate: "+
+			"SSH session authenticated by a plain key (%s), not a certificate: "+
 				"no human is named in this session's credential", auth.KeyFingerprint)
 	}
 	info.Auth = auth

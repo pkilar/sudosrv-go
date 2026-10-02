@@ -19,6 +19,33 @@ import (
 	"time"
 )
 
+// A server that stops reading must not hold the certificate session open while
+// its buffered recorder drains at exit.
+func TestBoundedStreamSinkReleasesStalledRecording(t *testing.T) {
+	local, remote := net.Pipe()
+	defer func() { _ = local.Close(); _ = remote.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	sink := newBufferedSink(&streamSink{
+		proc: protocol.NewProcessorWithCloser(local, local, local), lifetime: ctx,
+	})
+	defer func() { _ = sink.Close() }()
+	if err := sink.Send(acceptFor(t)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sink.Finish(t.Context(), 0) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Finish error = %v, want recording deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = local.Close()
+		t.Fatal("recording drain remained blocked after deadline")
+	}
+}
+
 // deadAddr returns an address nothing is listening on: bind one and release it.
 func deadAddr(t *testing.T) string {
 	t.Helper()
