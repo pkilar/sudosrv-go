@@ -3,13 +3,21 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sudosrv/internal/logshell"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // TestSessionInfoFromEnvReadsWhatSshdWrote.
@@ -219,4 +227,104 @@ func TestForcedCommandRoutesHelperProcess(t *testing.T) {
 	// Only returns on failure; on success runForceCommand's own passthrough has
 	// already replaced this process and nothing below runs.
 	os.Exit(runForceCommand(cfg))
+}
+
+// forgedAuthFile writes an auth-info file holding a self-signed certificate.
+func forgedAuthFile(t *testing.T, keyID string, extensions map[string]string) string {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &ssh.Certificate{
+		Key: signer.PublicKey(), CertType: ssh.UserCert, KeyId: keyID,
+		ValidBefore: 2000000000, Extensions: extensions,
+	}
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "auth")
+	raw := "publickey " + cert.Type() + " " + base64.StdEncoding.EncodeToString(cert.Marshal()) + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// captureStderr runs f and returns what it wrote to os.Stderr, where Alertf
+// mirrors every alert (Alertf has no test hook).
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	f()
+	os.Stderr = old
+	_ = w.Close()
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+// TestPolicyInfoFromEnvForgedCertDoesNotAttribute: the credential restricts but
+// never attributes, and expiry policy stays visible.
+func TestPolicyInfoFromEnvForgedCertDoesNotAttribute(t *testing.T) {
+	t.Setenv("SSH_USER_AUTH", forgedAuthFile(t, "alice@CORP",
+		map[string]string{logshell.TerminateOnCertExpiryExtension: ""}))
+	t.Setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+	t.Setenv("SSH_ORIGINAL_COMMAND", "evil")
+
+	info := policyInfoFromEnv()
+	if !info.PolicyOnly || info.Auth.KeyID != "alice@CORP" {
+		t.Fatalf("info = %+v, want PolicyOnly with the cert", info)
+	}
+	if info.SSHClient != "" || info.SSHCommand != "" {
+		t.Errorf("must not read SSH_CONNECTION/SSH_ORIGINAL_COMMAND: %+v", info)
+	}
+	meta := logshell.SessionMeta{SubmitUser: "bob"}
+	meta.ApplyAuthInfo(info, nil)
+	if meta.SubmitUser != "bob" || !reflect.DeepEqual(meta.Info, logshell.SessionInfo{}) {
+		t.Errorf("attributed a policy-only session: %q %+v", meta.SubmitUser, meta.Info)
+	}
+	dl, err := info.Auth.CertificateDeadline(time.Unix(1900000000, 0))
+	if err != nil || dl.IsZero() {
+		t.Errorf("deadline = %v, %v; want expiry policy visible", dl, err)
+	}
+}
+
+// TestPolicyInfoFromEnvRaisesNoAlerts: unset, unreadable, plain key and
+// no-credential files return a zero value and write nothing (Alertf mirrors to
+// stderr, which is what is captured).
+func TestPolicyInfoFromEnvRaisesNoAlerts(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain")
+	if err := os.WriteFile(plain, []byte("publickey ssh-ed25519 AAAA\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pw := filepath.Join(dir, "pw")
+	if err := os.WriteFile(pw, []byte("password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]string{"unset": "", "unreadable": filepath.Join(dir, "missing"), "plainkey": plain, "nocred": pw} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SSH_USER_AUTH", p)
+			var info logshell.SessionInfo
+			out := captureStderr(t, func() { info = policyInfoFromEnv() })
+			if out != "" {
+				t.Errorf("alerted: %q", out)
+			}
+			if info.SSHClient != "" || info.SSHCommand != "" {
+				t.Errorf("info = %+v", info)
+			}
+			if info.Auth.Certificate == nil && info.Auth.KeyID != "" {
+				t.Errorf("info = %+v", info)
+			}
+		})
+	}
 }

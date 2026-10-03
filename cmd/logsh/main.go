@@ -100,10 +100,9 @@ func runShell(inv logshell.Invocation) int {
 	}
 
 	uid := os.Getuid()
-	var info logshell.SessionInfo
-	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_USER_AUTH") != "" {
-		info = sessionInfoFromEnv()
-	}
+	// The environment is the user's to set, so the credential found here may
+	// restrict the session (expiry, renewal) but never attribute it.
+	info := policyInfoFromEnv()
 	return runSession(session{
 		Config:     cfg,
 		Target:     targetFromInvocation(inv, shellPath),

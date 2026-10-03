@@ -45,6 +45,31 @@ func sessionInfoFromEnv() logshell.SessionInfo {
 	return info
 }
 
+// policyInfoFromEnv is the login-shell counterpart of sessionInfoFromEnv.
+//
+// A login shell runs with an environment the user controls entirely (su without
+// a dash keeps it), and ParseAuthInfo does not verify certificate signatures, so
+// whatever SSH_USER_AUTH names may be forged. The result is therefore marked
+// PolicyOnly: it can restrict the session (certificate expiry, renewal) but
+// ApplyAuthInfo will not attribute the record to it. SSH_CONNECTION and
+// SSH_ORIGINAL_COMMAND are deliberately not read.
+//
+// Every failure returns the zero value silently. The CRIT alerts in
+// sessionInfoFromEnv were written for the forced-command certificate design and
+// would fire on every ordinary login here (no ExposeAuthInfo, plain keys,
+// password logins).
+func policyInfoFromEnv() logshell.SessionInfo {
+	path := os.Getenv("SSH_USER_AUTH")
+	if path == "" {
+		return logshell.SessionInfo{}
+	}
+	auth, err := logshell.ReadAuthInfo(path)
+	if err != nil {
+		return logshell.SessionInfo{}
+	}
+	return logshell.SessionInfo{Auth: auth, PolicyOnly: true}
+}
+
 // runForceCommand is the path taken when sshd runs logsh as a forced command.
 //
 // REVIEW THIS AS SECURITY-RELEVANT CODE. It runs before anything else in the

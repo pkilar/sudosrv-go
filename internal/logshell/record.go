@@ -33,6 +33,13 @@ type SessionInfo struct {
 
 	// SSHClient is the source address and port from SSH_CONNECTION.
 	SSHClient string
+
+	// PolicyOnly marks a credential that came from an environment the session
+	// user controls (the login-shell path). It may RESTRICT the session --
+	// certificate expiry and renewal read Auth -- but must never ATTRIBUTE it:
+	// ParseAuthInfo does not verify signatures, so such a credential can be
+	// forged. ApplyAuthInfo stamps nothing for a PolicyOnly session.
+	PolicyOnly bool
 }
 
 // SessionMeta is everything the log server needs to describe a session. The
@@ -245,7 +252,13 @@ func (m *SessionMeta) ApplyNesting(n Nesting) {
 // the name describes the authenticated identity. This is a real asymmetry with
 // sudo's records, where submituid is the invoking human's uid, and consumers
 // joining on submituid must not read it as identifying a person.
+//
+// A PolicyOnly session is not stamped at all: m.Info stays zero and SubmitUser
+// is untouched, so the record equals the pre-credential login-shell record.
 func (m *SessionMeta) ApplyAuthInfo(info SessionInfo, stripRealms []string) {
+	if info.PolicyOnly {
+		return
+	}
 	info.SSHCommand = truncateForRecord(info.SSHCommand)
 	m.Info = info
 

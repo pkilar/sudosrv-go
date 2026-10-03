@@ -75,9 +75,11 @@ type RunSpec struct {
 	CmdLog *CommandLog
 
 	// Info is what sshd told us about this session: the credential that
-	// authenticated it, the client's requested command, the source address. Its
-	// zero value stamps nothing, which is what leaves the login-shell path
-	// unchanged.
+	// authenticated it, the client's requested command, the source address.
+	// Neither its zero value nor a PolicyOnly value stamps anything into the
+	// record: the login-shell path passes PolicyOnly, so its credential --
+	// read from an environment the user controls -- can still drive certificate
+	// expiry and renewal but never names who ran the session.
 	Info SessionInfo
 
 	// EnvShell is the value to publish as $SHELL, or "" to leave the inherited

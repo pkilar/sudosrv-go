@@ -103,7 +103,7 @@ func ReadAuthInfo(path string) (AuthInfo, error) {
 	if path == "" {
 		return AuthInfo{}, errors.New("SSH_USER_AUTH is not set (is ExposeAuthInfo enabled?)")
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- path comes from sshd, read as the session user
+	raw, err := os.ReadFile(path) // #nosec G304 -- forced-command path: sshd supplies it; login-shell path: the environment does, used for policy only (never attribution) and read with the session user's own permissions
 	if err != nil {
 		return AuthInfo{}, fmt.Errorf("read %s: %w", path, err)
 	}

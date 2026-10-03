@@ -152,7 +152,10 @@ Enforcement also applies when `record_users` excludes the account, nested
 recording is skipped, or a recording failure uses fail-open or break-glass.
 Those sessions retain a supervisor instead of replacing logsh with the target.
 SSH logins using the login-shell symlinks also enforce the extension when sshd
-exposes their authentication information; local logins are unaffected.
+exposes their authentication information; local logins are unaffected. A login
+shell's environment is the user's to change (`su` without `-` keeps it), so on
+that path the credential only restricts the session: it drives expiry and
+renewal but never names who ran the session in the record.
 
 This requires Linux pidfd support. OpenSSH ignores unknown extensions, so the
 flag has no effect on hosts that do not run a supporting logsh, or when
