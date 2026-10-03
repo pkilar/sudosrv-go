@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 // Exec tracing: one record per execve inside the recorded session's process
@@ -294,26 +295,100 @@ func traceLoop(top int, onExec func(ExecEvent), beforeExit ...func()) Outcome {
 		}
 	}
 
-	// Let anything still alive run free. A backgrounded process must outlive the
-	// session rather than being frozen by a tracer that has gone away.
+	detachTracees(tracked, top)
+	return outcome
+}
+
+// detachDeadline bounds how long the tracer spends releasing tracees after the
+// session ends. A tracee that never reaches a ptrace stop (uninterruptible I/O
+// on a hung mount, say) must not be able to hold up logsh, and with it the SSH
+// connection and the recording.
+const detachDeadline = 2 * time.Second
+
+// detachPollInterval is the pause between collection rounds when no tracee
+// reported a stop.
+const detachPollInterval = 5 * time.Millisecond
+
+// detachSignal returns the signal to hand to PTRACE_DETACH for a tracee that
+// stopped with ws. A signal-delivery-stop must re-inject its signal: detaching
+// with 0 would suppress it, so a job the kernel just sent SIGHUP (the shell's
+// exit hangs up the foreground group) would keep running. Every event stop --
+// PTRACE_EVENT_STOP from our interrupt or a group-stop, exec/fork/exit and
+// friends, a new tracee's initial stop -- carries no signal worth delivering.
+func detachSignal(ws syscall.WaitStatus) uintptr {
+	if int(ws)>>16 != 0 {
+		return 0
+	}
+	sig := ws.StopSignal()
+	if sig == syscall.SIGTRAP || sig == syscall.SIGTRAP|0x80 {
+		return 0
+	}
+	return uintptr(sig)
+}
+
+// detachTracees lets everything still alive run free. A backgrounded process
+// must outlive the session rather than being frozen by a tracer that has gone
+// away.
+//
+// PTRACE_DETACH requires a ptrace stop. Leaving a running task attached would
+// strand it at a later exit event, including SIGKILL from the certificate
+// expiry supervisor. So every tracee is interrupted first, then all of them are
+// polled without blocking. Polling every one each round matters: a process
+// inside vfork cannot reach its interrupt stop until its child, itself parked in
+// an unconsumed exec stop, has been detached. Blocking on one pid at a time
+// deadlocks on exactly that pair.
+func detachTracees(tracked map[int]bool, top int) {
+	pending := make(map[int]bool, len(tracked))
 	for pid := range tracked {
-		if pid != top {
-			// PTRACE_DETACH requires a ptrace stop. Leaving a running task
-			// attached would strand it at a later exit event, including SIGKILL
-			// from the certificate expiry supervisor.
-			if err := ptraceRaw(ptraceInterrupt, pid, 0, 0); err == nil {
-				var ws syscall.WaitStatus
-				for {
-					_, err = syscall.Wait4(pid, &ws, waitAll, nil)
-					if !errors.Is(err, syscall.EINTR) {
-						break
-					}
+		if pid == top {
+			continue
+		}
+		pending[pid] = true
+		// Errors are ignored: ESRCH means the task is gone or was never ours.
+		_ = ptraceRaw(ptraceInterrupt, pid, 0, 0)
+	}
+
+	deadline := time.Now().Add(detachDeadline)
+	for len(pending) > 0 && time.Now().Before(deadline) {
+		progressed := false
+		for pid := range pending {
+			var ws syscall.WaitStatus
+			wpid, err := syscall.Wait4(pid, &ws, waitAll|syscall.WNOHANG, nil)
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			if err != nil {
+				delete(pending, pid) // ECHILD or similar: not ours to detach.
+				progressed = true
+				continue
+			}
+			if wpid == 0 {
+				continue // no status change yet
+			}
+			progressed = true
+			if !ws.Stopped() {
+				delete(pending, pid) // exited or was killed
+				continue
+			}
+			switch int(ws) >> 16 {
+			case ptraceEventFork, ptraceEventVfork, ptraceEventClone:
+				// The new child is auto-attached and must be detached too. Read
+				// it before detaching the parent. It starts with a stop already
+				// pending, so it needs no interrupt of its own.
+				if child, err := syscall.PtraceGetEventMsg(pid); err == nil && !pending[int(child)] {
+					pending[int(child)] = true
 				}
 			}
-			_ = ptraceRaw(syscall.PTRACE_DETACH, pid, 0, 0)
+			_ = ptraceRaw(syscall.PTRACE_DETACH, pid, 0, detachSignal(ws))
+			delete(pending, pid)
+		}
+		if !progressed {
+			time.Sleep(detachPollInterval)
 		}
 	}
-	return outcome
+	// Anything left is deliberately not waited for. logsh is about to exit and
+	// no PTRACE_O_EXITKILL is set, so the kernel detaches the remaining tracees
+	// itself.
 }
 
 // outcomeFromStatus translates a raw wait status, matching waitOutcome's
