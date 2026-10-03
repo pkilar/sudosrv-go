@@ -182,6 +182,12 @@ private key locally. The supervisor verifies the CA, identity, underlying key,
 principals, certificate restrictions and fresh proof of key possession before
 adopting the new expiration. Failed renewal leaves the current deadline intact;
 an expired session cannot be revived. Reminders are rescheduled after renewal.
+Nested logsh sessions (for example a login shell started in each tmux window)
+follow the outer session: they verify each renewed certificate against the
+original, adopt only later deadlines, and `cssh --extend` works from them too.
+A new nested session started after an extension is accepted even though its
+inherited certificate has expired. If the renewal socket cannot be created, the
+session still runs and the original deadline stands.
 
 The bridge uses remote Unix socket forwarding. Configure the SSH server:
 

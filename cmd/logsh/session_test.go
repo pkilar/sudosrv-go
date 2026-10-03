@@ -4,13 +4,20 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"sudosrv/internal/logshell"
 )
@@ -203,4 +210,98 @@ func TestRunSessionRefusesWithNoTarget(t *testing.T) {
 	}); got != exitRefused {
 		t.Errorf("runSession with no target = %d, want exitRefused (%d)", got, exitRefused)
 	}
+}
+
+// TestRunSessionRenewedByOuterSupervisor covers a nested logsh started from a
+// session whose certificate has since been renewed: the inherited certificate
+// is expired, but the outer supervisor holds a newer one.
+func TestRunSessionRenewedByOuterSupervisor(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key, _ := ssh.NewSignerFromKey(priv)
+	_, caPriv, _ := ed25519.GenerateKey(rand.Reader)
+	ca, _ := ssh.NewSignerFromKey(caPriv)
+	mk := func(exp time.Time) *ssh.Certificate {
+		c := &ssh.Certificate{Key: key.PublicKey(), Serial: 3, CertType: ssh.UserCert, KeyId: "person", ValidPrincipals: []string{"root"},
+			ValidAfter: uint64(time.Now().Add(-2 * time.Hour).Unix()), ValidBefore: uint64(exp.Unix()),
+			Extensions: map[string]string{logshell.TerminateOnCertExpiryExtension: "", logshell.PermitSessionRenewalExtension: ""}}
+		if err := c.SignCert(rand.Reader, ca); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	original, renewed := mk(time.Now().Add(-time.Minute)), mk(time.Now().Add(time.Hour))
+	path := filepath.Join(t.TempDir(), "outer")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				var req map[string]any
+				_ = json.NewDecoder(c).Decode(&req)
+				_ = json.NewEncoder(c).Encode(map[string]any{"certificate": string(ssh.MarshalAuthorizedKey(renewed))})
+				buf := make([]byte, 1)
+				_, _ = c.Read(buf)
+			}()
+		}
+	}()
+	for _, tc := range []struct {
+		name, socket string
+		wantCode     int
+	}{
+		{"renewed", path, 0},
+		{"no supervisor", "", exitRefused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunSessionRenewedHelper$")
+			cmd.Env = append(os.Environ(), "LOGSH_RENEWED_HELPER="+string(ssh.MarshalAuthorizedKey(original)),
+				"LOGSH_RENEW_SOCKET="+tc.socket, "CERBERUS_RENEW_SOCKET=")
+			out, err := cmd.CombinedOutput()
+			code := 0
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if code != tc.wantCode || (tc.wantCode == 0) != strings.Contains(string(out), "CHILD-RAN") {
+				t.Fatalf("code=%d output=%s", code, out)
+			}
+		})
+	}
+}
+
+func TestRunSessionRenewedHelper(t *testing.T) {
+	text := os.Getenv("LOGSH_RENEWED_HELPER")
+	if text == "" {
+		return
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("parsed %T, want *ssh.Certificate", pub)
+	}
+	cfg := logshell.DefaultConfig()
+	cfg.CommandLog.Enabled = false
+	cfg.RecordUsers = nil // unrecorded: the supervised fallback runs the child
+	args := []string{"-c", "printf CHILD-RAN"}
+	os.Exit(runSession(session{
+		Config: cfg, Target: &execTarget{path: "/bin/sh", argv0: "sh", args: args, envShell: "/bin/sh"},
+		Invocation: logshell.Invocation{Name: "sh", Args: args},
+		Info: logshell.SessionInfo{Auth: logshell.AuthInfo{
+			Method: logshell.AuthMethodCert, ValidBefore: cert.ValidBefore, Extensions: cert.Extensions, Certificate: cert,
+		}},
+		Nesting: logshell.Nesting{Kind: logshell.NestedNone}, UID: os.Getuid(), Kind: kindForceCommand,
+	}))
 }

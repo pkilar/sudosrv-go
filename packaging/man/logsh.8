@@ -101,6 +101,9 @@ certificate, AcceptEnv CERBERUS_RENEW_SOCKET, AllowStreamLocalForwarding remote,
 and AllowTcpForwarding remote with PermitListen none in sshd. PermitListen none
 refuses remote TCP listeners while allowing the Unix bridge.
 Failed renewal leaves the current deadline in force.
+Nested logsh sessions, such as a shell in each tmux window, follow the renewed
+deadline of the outer session, and a session started after an extension is
+accepted although its inherited certificate has expired.
 .PP
 An account that is not listed in
 .I record_users
