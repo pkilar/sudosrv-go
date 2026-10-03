@@ -241,3 +241,67 @@ type failingWriter struct{}
 func (f *failingWriter) Write(p []byte) (n int, err error) {
 	return 0, io.ErrShortWrite
 }
+
+type deadlineRecorder struct {
+	bytes.Buffer
+	calls int
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(time.Time) error { d.calls++; return nil }
+
+func TestWithWriteContextNotCancelledNoDeadlineCalls(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	w := &deadlineRecorder{}
+	if err := withWriteContext(ctx, w, func() error { _, err := w.Write([]byte("x")); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if w.calls != 0 {
+		t.Fatalf("SetWriteDeadline calls = %d, want 0", w.calls)
+	}
+}
+
+func TestWithWriteContextPrecancelledSkipsFn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := &deadlineRecorder{}
+	called := false
+	err := withWriteContext(ctx, w, func() error { called = true; return nil })
+	if !errors.Is(err, context.Canceled) || called || w.calls != 0 {
+		t.Fatalf("err=%v called=%v calls=%d", err, called, w.calls)
+	}
+}
+
+func TestWithWriteContextCancelDuringBlockedWrite(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	err := withWriteContext(ctx, c1, func() error { _, err := c1.Write([]byte("blocked")); return err })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("cancel not prompt: %v", time.Since(start))
+	}
+	// Deadline must have been reset: a fresh write with a reader succeeds.
+	go func() { _, _ = io.Copy(io.Discard, c2) }()
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	defer cancel2()
+	if err := withWriteContext(ctx2, c1, func() error { _, err := c1.Write([]byte("ok")); return err }); err != nil {
+		t.Fatalf("follow-up write: %v", err)
+	}
+}
+
+func BenchmarkWithWriteContextCancellable(b *testing.B) {
+	ctx, cancel := context.WithCancel(b.Context())
+	defer cancel()
+	w := &deadlineRecorder{}
+	b.ReportAllocs()
+	for b.Loop() {
+		w.Reset()
+		_ = withWriteContext(ctx, w, func() error { return nil })
+	}
+}
