@@ -251,3 +251,33 @@ func devNullFile(t *testing.T) *os.File {
 	t.Cleanup(func() { _ = f.Close() })
 	return f
 }
+
+// TestExpirySparesJobThatLeavesAfterPinning proves a job pinned while it was
+// still in the session -- the shell exited before the job's setsid ran -- is
+// not killed at expiry once it has left. A pin proves identity, not
+// membership. The ordinary job keeps the session anchored, which is what made
+// the pinned-but-departed job reachable before membership was rechecked.
+func TestExpirySparesJobThatLeavesAfterPinning(t *testing.T) {
+	dir := t.TempDir()
+	jobMarker := filepath.Join(dir, "job")
+	freeMarker := filepath.Join(dir, "free")
+	killOnCleanup(t, jobMarker)
+	killOnCleanup(t, freeMarker)
+	spec := expiryRunSpec(t)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	spec.ExpiryDeadline = deadline
+	spec.Invocation.Args = []string{"-c",
+		"trap '' HUP; sleep 30 >/dev/null 2>&1 </dev/null & echo $! > " + jobMarker + "; " +
+			"(sleep 0.3; exec setsid sleep 30) >/dev/null 2>&1 </dev/null & echo $! > " + freeMarker + "; exit 0"}
+	if _, err := RunUnrecorded(spec); err != nil {
+		t.Fatal(err)
+	}
+	job, free := readPIDFile(t, jobMarker), readPIDFile(t, freeMarker)
+	waitGone(t, job, time.Until(deadline)+3*time.Second, "job after expiry")
+	if !alive(free) {
+		t.Fatal("a job that left the session after being pinned was killed")
+	}
+	if procState(free) == "T" {
+		t.Fatal("a job that left the session was left stopped")
+	}
+}

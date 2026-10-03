@@ -103,12 +103,13 @@ func (p *sessionPins) refresh(extra ...int) pinRefresh {
 	return pinRefresh{added: len(fresh), anchored: true}
 }
 
-// running returns the pidfds of pinned members that are alive, not zombies.
+// running returns the pidfds of pinned members that are alive, not zombies,
+// and still in the session.
 func (p *sessionPins) running() []int {
 	var fds []int
 	for fd := range p.fds {
 		pid := processFDID(fd)
-		if pid <= 0 {
+		if pid <= 0 || !memberOf(fd, p.sid) {
 			continue
 		}
 		if state, _ := processStat(pid); state != 'Z' && state != 0 && processFDID(fd) == pid {
@@ -118,9 +119,16 @@ func (p *sessionPins) running() []int {
 	return fds
 }
 
-// handles returns every pinned pidfd, zombies included: a zombie still anchors.
+// handles returns the pidfd of every pinned process still in the session,
+// zombies included: a zombie still anchors.
 func (p *sessionPins) handles() []int {
-	return slices.Collect(maps.Keys(p.fds))
+	var fds []int
+	for fd := range p.fds {
+		if memberOf(fd, p.sid) {
+			fds = append(fds, fd)
+		}
+	}
+	return fds
 }
 
 func (p *sessionPins) close() {
@@ -130,19 +138,22 @@ func (p *sessionPins) close() {
 	clear(p.fds)
 }
 
-// signal sends sig to every pinned member and to extra. It returns how many were
-// signalled and, by PID, the failures other than ESRCH (already reaped).
-func (p *sessionPins) signal(sig syscall.Signal, extra ...int) (int, map[int]error) {
-	sent := 0
+// signal sends sig to every pinned process, and every one of extra, that is
+// STILL in the session. A pin proves identity, not membership: a job pinned
+// while it was starting up may since have called setsid, and a process that
+// left the session is outside this enforcement. It returns the pidfds signalled
+// and, by PID, the failures other than ESRCH (already reaped).
+func (p *sessionPins) signal(sig syscall.Signal, extra ...int) ([]int, map[int]error) {
+	var sent []int
 	var failed map[int]error
-	for _, fd := range append(slices.Clone(extra), p.handles()...) {
-		if fd < 0 {
+	for _, fd := range append(slices.Clone(extra), slices.Collect(maps.Keys(p.fds))...) {
+		if fd < 0 || !memberOf(fd, p.sid) {
 			continue
 		}
 		err := unix.PidfdSendSignal(fd, sig, nil, 0)
 		switch {
 		case err == nil:
-			sent++
+			sent = append(sent, fd)
 		case errors.Is(err, syscall.ESRCH):
 		default:
 			if failed == nil {
@@ -167,15 +178,22 @@ func (p *sessionPins) signal(sig syscall.Signal, extra ...int) (int, map[int]err
 // forked belongs here.
 func (p *sessionPins) terminate(serial uint64, extra ...int) expiryReport {
 	report := expiryReport{serial: serial, sid: p.sid, complete: true}
+	stopped := map[int]bool{}
 	for range expiryKillRounds {
 		r := p.refresh(extra...)
-		_, _ = p.signal(syscall.SIGSTOP, extra...)
+		sent, _ := p.signal(syscall.SIGSTOP, extra...)
+		for _, fd := range sent {
+			stopped[fd] = true
+		}
 		report.unproven = r.unproven
 		if !r.anchored || r.added == 0 {
 			break
 		}
 	}
-	report.signalled, report.failed = p.signal(syscall.SIGKILL, extra...)
+	// A stopped process cannot call setsid, so from here membership is fixed
+	// for everything the freeze reached.
+	killed, failed := p.signal(syscall.SIGKILL, extra...)
+	report.signalled, report.failed = len(killed), failed
 	// Sweep up anything that slipped the freeze -- a traced member resumed by
 	// its tracer -- for as long as the session can still be proven to be ours.
 	for range expiryKillRounds {
@@ -184,13 +202,21 @@ func (p *sessionPins) terminate(serial uint64, extra ...int) expiryReport {
 			report.unproven += r.unproven
 			break
 		}
-		n, failed := p.signal(syscall.SIGKILL, extra...)
-		report.signalled = max(report.signalled, n)
+		killed, failed := p.signal(syscall.SIGKILL, extra...)
+		report.signalled = max(report.signalled, len(killed))
 		for pid, err := range failed {
 			if report.failed == nil {
 				report.failed = map[int]error{}
 			}
 			report.failed[pid] = err
+		}
+	}
+	// One that called setsid between its membership check and its SIGSTOP is
+	// stopped but no longer in the session, so the kill skipped it. It left
+	// before the deadline and is not ours to end: let it run again.
+	for fd := range stopped {
+		if processFDID(fd) > 0 && !memberOf(fd, p.sid) {
+			_ = unix.PidfdSendSignal(fd, syscall.SIGCONT, nil, 0)
 		}
 	}
 	report.complete = len(report.failed) == 0 && report.unproven == 0
