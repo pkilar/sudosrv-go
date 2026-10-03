@@ -71,7 +71,9 @@ func watchSuspend(fd uintptr, saved, raw *syscall.Termios, rec *Recorder) func()
 				}
 				name := signalName(sysSig)
 
-				_ = rec.Suspend(name)
+				if rec != nil {
+					_ = rec.Suspend(name)
+				}
 				// Hand the user back a usable terminal before going away.
 				if saved != nil {
 					_ = SetTermios(fd, saved)
@@ -89,7 +91,9 @@ func watchSuspend(fd uintptr, saved, raw *syscall.Termios, rec *Recorder) func()
 				if raw != nil {
 					_ = SetTermios(fd, raw)
 				}
-				_ = rec.Suspend("CONT")
+				if rec != nil {
+					_ = rec.Suspend("CONT")
+				}
 			case <-done:
 				return
 			}

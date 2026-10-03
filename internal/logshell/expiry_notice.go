@@ -64,14 +64,19 @@ func startExpiryNotice(deadline time.Time, out io.Writer, cfg *Config) func() {
 			if !at.After(started) {
 				continue
 			}
-			timer := time.NewTimer(time.Until(at))
-			select {
-			case <-stop:
-				timer.Stop()
-				return
-			case <-timer.C:
-				warn()
+			// Re-read the wall clock rather than trusting one long timer: see
+			// wallClockRecheck. A reminder must not arrive hours late after a
+			// suspend, alongside the termination it was meant to precede.
+			for time.Now().Before(at) {
+				timer := time.NewTimer(untilWall(at))
+				select {
+				case <-stop:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
+			warn()
 		}
 	}()
 	return func() { once.Do(func() { close(stop); <-done }) }

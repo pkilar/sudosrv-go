@@ -50,19 +50,49 @@ func OpenPTY() (*PTY, error) {
 		return nil, fmt.Errorf("open /dev/ptmx: %w", err)
 	}
 
+	p := &PTY{Master: master}
+
 	var unlock int32 // 0 == unlocked
-	if err := ioctlPtr(master.Fd(), syscall.TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
+	if err := p.masterIoctl(syscall.TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
 		_ = master.Close()
 		return nil, fmt.Errorf("unlockpt: %w", err)
 	}
 
 	var n uint32
-	if err := ioctlPtr(master.Fd(), syscall.TIOCGPTN, unsafe.Pointer(&n)); err != nil {
+	if err := p.masterIoctl(syscall.TIOCGPTN, unsafe.Pointer(&n)); err != nil {
 		_ = master.Close()
 		return nil, fmt.Errorf("ptsname: %w", err)
 	}
 
-	return &PTY{Master: master, Name: fmt.Sprintf("/dev/pts/%d", n)}, nil
+	p.Name = fmt.Sprintf("/dev/pts/%d", n)
+	return p, nil
+}
+
+// masterIoctl issues an ioctl on the master WITHOUT calling Master.Fd().
+//
+// Fd() permanently switches an *os.File into blocking mode and takes it off the
+// runtime poller. A blocking read cannot be interrupted by Close -- the close is
+// deferred until the read returns -- so certificate expiry could not stop the
+// output relay while any process outside the kill set still held the slave
+// open: logsh, the SSH connection and the unfinalised recording would all hang.
+// Kept pollable, Close wakes the read at once.
+func (p *PTY) masterIoctl(req uintptr, arg unsafe.Pointer) error {
+	conn, err := p.Master.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ioctlErr error
+	if err := conn.Control(func(fd uintptr) { ioctlErr = ioctlPtr(fd, req, arg) }); err != nil {
+		return err
+	}
+	return ioctlErr
+}
+
+// SetWinSize sets the inner terminal's dimensions through the master. Use this,
+// never SetWinSize(p.Master.Fd(), ...): see masterIoctl.
+func (p *PTY) SetWinSize(s WinSize) error {
+	ws := winsize{rows: s.Rows, cols: s.Cols}
+	return p.masterIoctl(syscall.TIOCSWINSZ, unsafe.Pointer(&ws))
 }
 
 // OpenSlave opens the slave end. The caller must close it after starting the

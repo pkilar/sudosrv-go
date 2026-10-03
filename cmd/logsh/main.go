@@ -236,6 +236,11 @@ func refuseWithFallback(cfg *logshell.Config, tgt *execTarget, reason string, fa
 
 // runAdmin is the path taken when the binary is invoked under its own name.
 func runAdmin(inv logshell.Invocation) int {
+	if len(inv.Args) > 0 && inv.Args[0] == logshell.ExpirySupervisorArg {
+		// Started only by logsh itself, to keep enforcing certificate expiry on
+		// processes that outlive a session's shell. See startExpirySupervisor.
+		return logshell.RunExpirySupervisor(inv.Args[1:])
+	}
 	if len(inv.Args) > 0 && inv.Args[0] == "extend" {
 		if len(inv.Args) != 1 {
 			fmt.Fprintln(os.Stderr, "logsh: usage: logsh extend")

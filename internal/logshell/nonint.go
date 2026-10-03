@@ -146,7 +146,9 @@ func RunMetadataOnly(ctx context.Context, spec RunSpec, nesting Nesting) (Outcom
 func runPassthrough(ctx context.Context, spec RunSpec, nesting Nesting, captureStreams bool) (Outcome, error) {
 	cleanupRenewal, renewalErr := spec.prepareRenewal()
 	if renewalErr != nil {
-		return Outcome{}, renewalErr
+		// Nothing has been started. Returned bare, the caller would read this as
+		// "the child ran but was not recorded" and exit 0 having run nothing.
+		return Outcome{}, unavailable(renewalErr)
 	}
 	defer cleanupRenewal()
 	if err := spec.checkExpiry(); err != nil {

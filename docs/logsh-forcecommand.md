@@ -115,10 +115,23 @@ ssh-keygen -s ca_key -I "jsmith@CORP.EXAMPLE.COM" -n root-web -V +1h \
 
 With `ExposeAuthInfo yes`, logsh reads the extension and the certificate's
 `ValidBefore` timestamp from the credential accepted by sshd. At that instant,
-it sends `SIGKILL` to the supervised shell or command and discovered processes
-in its Linux session, including separate job-control groups, closes its relay,
-and allows up to five seconds to finalize the recording. This applies to
-interactive shells, remote commands and routed file transfers. Already expired
+it stops and then sends `SIGKILL` to the supervised shell or command and every
+process in its Linux session, including separate job-control groups and
+children forked while the session is being torn down, closes its relay, and
+allows up to five seconds to finalize the recording. This applies to
+interactive shells, remote commands and routed file transfers.
+
+Processes that outlive the shell (`nohup job &` followed by logging out) stay
+subject to the deadline. When the shell exits while members of its session are
+still running, logsh hands them to a detached supervisor
+(`logsh __expiry-supervisor`, an internal command) that kills them at expiry and
+exits as soon as the session is empty.
+
+Each termination is logged to syslog (`authpriv`, tag `logsh`) as
+`session_expired serial=<n> sid=<n> processes=<n>`, keyed by the certificate
+serial. A member that could not be killed is logged at `err` as
+`session_expiry_kill_failed`, and a session that could not be handed to the
+detached supervisor as `session_expiry_handoff_failed`. Already expired
 certificates are refused before launch, even if recording is configured to fail
 open. The extension must have no
 value; a nonempty value is refused. Infinite-validity certificates have no expiry
@@ -163,7 +176,10 @@ flag has no effect on hosts that do not run a supporting logsh, or when
 channels such as forwarding; keep the forwarding restrictions above. Processes
 that logsh lacks permission to signal, processes that detach into a new session
 with `setsid`, and a privileged user who disables the supervisor, are outside
-this enforcement. It is not process containment.
+this enforcement. After the shell exits, membership is tracked through
+processes already known to be in the session; a process forked by a member that
+then exits within about a second, before the detached supervisor rescans, can
+escape. It is not process containment.
 
 ### Extending the connected session
 
