@@ -4,6 +4,7 @@
 package logshell
 
 import (
+	"os"
 	"testing"
 
 	"go.uber.org/goleak"
@@ -19,5 +20,11 @@ import (
 // a test that failed to close its end of the pty would accumulate one per run,
 // and goleak is what says so.
 func TestMain(m *testing.M) {
+	// A test that hands survivors of a session to the detached expiry supervisor
+	// re-executes THIS binary (/proc/self/exe) with the supervisor's arguments.
+	// Run the supervisor, not the whole test suite again.
+	if len(os.Args) > 1 && os.Args[1] == ExpirySupervisorArg {
+		os.Exit(RunExpirySupervisor(os.Args[2:]))
+	}
 	goleak.VerifyTestMain(m)
 }

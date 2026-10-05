@@ -4,6 +4,7 @@ package logshell
 import (
 	"errors"
 	"fmt"
+	"log/syslog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -85,7 +86,7 @@ func startSessionChild(build func() *exec.Cmd, spec RunSpec, interruptDrain func
 		},
 		started: func(cmd *exec.Cmd) {
 			if rootFD >= 0 {
-				stopWatcher, captureMembers = watchLeaseExpiry(cmd.Process.Pid, rootFD, spec.Lease, spec.ExpiryDeadline, interruptDrain)
+				stopWatcher, captureMembers = watchLeaseExpiry(cmd.Process.Pid, rootFD, spec.Lease, spec.ExpiryDeadline, spec.Info.Auth.Serial, interruptDrain)
 			}
 		},
 		exiting: func(*exec.Cmd) { captureMembers() },
@@ -112,92 +113,155 @@ func startSessionChild(build func() *exec.Cmd, spec RunSpec, interruptDrain func
 // Start the watcher immediately after fork/exec, including while ptrace startup
 // waits for stop events. Failed tracing attempts stop their watcher before retry.
 func watchExpiry(sid, rootFD int, deadline time.Time, interruptDrain func()) (func(), func()) {
-	return watchLeaseExpiry(sid, rootFD, nil, deadline, interruptDrain)
+	return watchLeaseExpiry(sid, rootFD, nil, deadline, 0, interruptDrain)
 }
 
-func watchLeaseExpiry(sid, rootFD int, lease *SessionLease, deadline time.Time, interruptDrain func()) (func(), func()) {
+// watchLeaseExpiry supervises one session until its returned stop function is
+// called. The second function is the before-reap hook: it must run while the
+// leader is still an unreaped zombie, because that zombie is what proves the
+// session number still names this session (see sessionPins).
+//
+// serial identifies the certificate in the audit lines; zero when there is none.
+func watchLeaseExpiry(sid, rootFD int, lease *SessionLease, deadline time.Time, serial uint64, interruptDrain func()) (func(), func()) {
 	if lease == nil {
 		lease = NewSessionLease(deadline)
 	}
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	var once sync.Once
-	var mu sync.Mutex
-	var members []int
-	exiting := false
-	expired := false
-	// Pin identities before the leader is reaped. Once it exits, numeric session
-	// IDs alone are insufficient authority to signal newly discovered processes.
-	capture := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		exiting = true
-		current := pinSession(sid)
-		if expired {
-			for _, fd := range current {
-				_ = killProcessFD(fd)
-			}
-		}
-		members = append(members, current...)
+	w := &expiryWatch{
+		sid:    sid,
+		rootFD: rootFD,
+		lease:  lease,
+		serial: serial,
+		pins:   newSessionPins(sid),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
-	go func() {
-		defer close(done)
-		for {
-			deadline, changed, _ := lease.snapshot()
-			timer := time.NewTimer(time.Until(deadline))
-			select {
-			case <-stop:
-				timer.Stop()
-				return
-			case <-changed:
-				timer.Stop()
+	go w.run(interruptDrain)
+	return w.close, w.capture
+}
+
+type expiryWatch struct {
+	sid, rootFD int
+	lease       *SessionLease
+	serial      uint64
+	stop, done  chan struct{}
+	once        sync.Once
+
+	// mu serialises the expiry transition with the before-reap hook, so the
+	// leader cannot be reaped while a kill is under way.
+	mu      sync.Mutex
+	pins    *sessionPins
+	exiting bool
+	expired bool
+}
+
+func (w *expiryWatch) run(interruptDrain func()) {
+	defer close(w.done)
+	for {
+		deadline, changed, _ := w.lease.snapshot()
+		timer := time.NewTimer(untilWall(deadline))
+		select {
+		case <-w.stop:
+			timer.Stop()
+			return
+		case <-changed:
+			timer.Stop()
+			continue
+		case <-timer.C:
+			// Also the recheck untilWall relies on: a timer that fired early
+			// against the wall clock simply re-arms.
+			if !w.lease.expire() {
 				continue
-			case <-timer.C:
-				if !lease.expire() {
-					continue
-				}
-				mu.Lock()
-				expired = true
-				if !exiting {
-					// The before-reap hook needs this same lock, so the original
-					// leader cannot be reaped while this snapshot is taken.
-					if processFDID(rootFD) == sid {
-						current := pinSession(sid)
-						// Failed tracer startup can reap outside the normal exit hook.
-						// Retain the snapshot only if the pinned leader still exists.
-						if processFDID(rootFD) == sid {
-							members = append(members, current...)
-						} else {
-							for _, fd := range current {
-								_ = syscall.Close(fd)
-							}
-						}
-					}
-				}
-				_ = killProcessFD(rootFD)
-				for _, fd := range members {
-					_ = killProcessFD(fd)
-				}
-				mu.Unlock()
-				if interruptDrain != nil {
-					interruptDrain()
-				}
-				return
 			}
+			w.mu.Lock()
+			report := w.expireLocked()
+			w.mu.Unlock()
+			if interruptDrain != nil {
+				interruptDrain()
+			}
+			// Logged after the drain is interrupted: syslog can be slow, and the
+			// session's teardown should not wait on it.
+			report.log()
+			return
 		}
-	}()
-	return func() {
-		once.Do(func() {
-			close(stop)
-			<-done
-			mu.Lock()
-			defer mu.Unlock()
-			for _, fd := range members {
-				_ = syscall.Close(fd)
-			}
-			members = nil
-		})
-	}, capture
+	}
+}
+
+// expireLocked kills the whole session. The leader's pidfd joins the anchors:
+// until the before-reap hook has run, the leader is unreaped, and it is the one
+// member certain to prove the session number has not been reused.
+func (w *expiryWatch) expireLocked() expiryReport {
+	w.expired = true
+	return w.pins.terminate(w.serial, w.rootFD)
+}
+
+// capture is the before-reap hook. It pins every member the leader leaves
+// behind, so that they can still be told apart from strangers once the leader is
+// reaped and the session number alone no longer proves anything.
+func (w *expiryWatch) capture() {
+	w.mu.Lock()
+	w.exiting = true
+	if !w.expired {
+		w.pins.refresh(w.rootFD)
+		w.mu.Unlock()
+		return
+	}
+	// Expiry already fired; anything forked since its last scan dies too.
+	report := w.pins.terminate(w.serial, w.rootFD)
+	w.mu.Unlock()
+	report.logFailures()
+}
+
+// close stops the watcher. When the leader exited on its own and members of its
+// session are still running -- `nohup job &` and log out -- enforcement must
+// outlive this process, so the pinned members are handed to a detached
+// supervisor that kills them at the deadline. Without the handoff anything that
+// survived the shell would run on indefinitely past certificate expiry.
+func (w *expiryWatch) close() {
+	w.once.Do(func() {
+		close(w.stop)
+		<-w.done
+		w.mu.Lock()
+		report := w.handoffLocked()
+		w.pins.close()
+		w.mu.Unlock()
+		if report != nil {
+			report.log()
+		}
+	})
+}
+
+// handoffLocked does close's work under mu. It returns a report only when it had
+// to carry out the expiry itself.
+func (w *expiryWatch) handoffLocked() *expiryReport {
+	if !w.exiting || w.expired {
+		// Not started, retried, or already killed: nothing to hand on.
+		return nil
+	}
+	if w.lease.expire() {
+		// The deadline passed between the shell's exit and now.
+		report := w.expireLocked()
+		return &report
+	}
+	r := w.pins.refresh()
+	if !r.anchored {
+		if r.unproven > 0 {
+			expiryAuditf(syslog.LOG_WARNING,
+				"session_expiry_tracking_lost serial=%d sid=%d processes=%d: they will outlive the certificate",
+				w.serial, w.sid, r.unproven)
+		}
+		return nil
+	}
+	running := len(w.pins.running())
+	if running == 0 {
+		return nil
+	}
+	deadline := w.lease.Deadline()
+	if err := startExpirySupervisor(w.sid, w.pins.handles(), deadline, w.serial); err != nil {
+		expiryAuditf(syslog.LOG_ERR,
+			"session_expiry_handoff_failed serial=%d sid=%d processes=%d deadline=%s error=%q: they will outlive the certificate",
+			w.serial, w.sid, running, deadline.UTC().Format(time.RFC3339), err)
+	}
+	return nil
 }
 
 // A pidfd pins process identity even after exit and PID reuse.
@@ -205,6 +269,8 @@ func openProcessFD(pid int) (int, error) {
 	return unix.PidfdOpen(pid, 0)
 }
 
+// processFDID is the PID a pidfd refers to, or -1 once that process has been
+// reaped (or fd is not a pidfd). A zombie still reports its PID.
 func processFDID(fd int) int {
 	raw, err := os.ReadFile("/proc/self/fdinfo/" + strconv.Itoa(fd))
 	if err != nil {
@@ -220,20 +286,20 @@ func processFDID(fd int) int {
 	}
 	return -1
 }
-func killProcessFD(fd int) error {
-	return unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
-}
 
-// pinSession snapshots and pins members while the leader has not been reaped. Rechecking
-// session membership after opening each handle prevents a reused PID from
-// adding an unrelated process. Processes that explicitly detach with setsid
-// are outside this session; this is not a cgroup or descendant containment.
-func pinSession(sid int) []int {
+// pinSession opens a pidfd for every process now in session sid except the
+// leader (pid == sid, which the caller holds already) and those in skip.
+// Rechecking membership after opening each handle stops a reused PID from adding
+// an unrelated process. The caller must still prove the session NUMBER denotes
+// the original session (sessionPins.refresh) before trusting the result.
+// Processes that explicitly detach with setsid are outside this session; this is
+// not a cgroup or descendant containment.
+func pinSession(sid int, skip map[int]bool) map[int]int {
 	entries, _ := os.ReadDir("/proc")
-	var handles []int
+	handles := map[int]int{}
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid == sid || processSession(pid) != sid {
+		if err != nil || pid == sid || skip[pid] || processSession(pid) != sid {
 			continue
 		}
 		fd, err := openProcessFD(pid)
@@ -244,29 +310,38 @@ func pinSession(sid int) []int {
 			_ = syscall.Close(fd)
 			continue
 		}
-		handles = append(handles, fd)
+		handles[fd] = pid
 	}
 	return handles
 }
 
 func processSession(pid int) int {
+	_, sid := processStat(pid)
+	return sid
+}
+
+// processStat returns a process's state letter and session ID from
+// /proc/<pid>/stat, or (0, -1) if it cannot be read.
+func processStat(pid int) (byte, int) {
 	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		return -1
+		return 0, -1
 	}
+	// The command name is parenthesised and may itself contain ") ", so parse
+	// from the LAST one.
 	end := strings.LastIndexByte(string(raw), ')')
 	if end < 0 {
-		return -1
+		return 0, -1
 	}
 	fields := strings.Fields(string(raw[end+1:]))
-	if len(fields) < 4 {
-		return -1
+	if len(fields) < 4 || len(fields[0]) != 1 {
+		return 0, -1
 	}
 	sid, err := strconv.Atoi(fields[3])
 	if err != nil {
-		return -1
+		return 0, -1
 	}
-	return sid
+	return fields[0][0], sid
 }
 
 // RunUnrecorded runs a session without a recorder while retaining an expiry
@@ -309,7 +384,7 @@ func RunUnrecorded(spec RunSpec) (Outcome, error) {
 		}
 		defer func() { _ = slave.Close() }()
 		size, _ := GetWinSize(spec.Std.In.Fd())
-		_ = SetWinSize(inner.Master.Fd(), size)
+		_ = inner.SetWinSize(size)
 		output, err = expiryFile(spec.Std.Out, os.O_WRONLY, &owned)
 		if err != nil {
 			return Outcome{}, err

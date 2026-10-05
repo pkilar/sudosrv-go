@@ -122,7 +122,10 @@ func OpenSink(ctx context.Context, cfg *Config) (Sink, error) {
 		proc, chosen, err := connectAny(ctx, cfgs)
 		if err == nil {
 			s := &streamSink{proc: proc, cfg: chosen}
-			if _, bounded := ctx.Deadline(); bounded || ctx.Value(recordingLifetimeKey{}) == true {
+			// Only a context marked by recordingContext is a session lifetime. Any
+			// other deadline belongs to the caller's connect/accept step, and
+			// keeping it would silently fail every later Send once it lapsed.
+			if ctx.Value(recordingLifetimeKey{}) == true {
 				s.lifetime = ctx
 			}
 			return newBufferedSink(s), nil

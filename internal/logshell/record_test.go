@@ -5,6 +5,7 @@ package logshell
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -492,5 +493,29 @@ func TestApplyAuthInfoLeavesSubmitUserWhenRealmUnlisted(t *testing.T) {
 	}, []string{"CORP.EXAMPLE.COM"})
 	if m.SubmitUser != full {
 		t.Errorf("SubmitUser = %q, want the unstripped %q", m.SubmitUser, full)
+	}
+}
+
+// TestApplyAuthInfoPolicyOnlyStampsNothing: a credential from a user-controlled
+// environment may restrict a session but must not attribute it.
+func TestApplyAuthInfoPolicyOnlyStampsNothing(t *testing.T) {
+	meta := SessionMeta{User: "bob", SubmitUser: "bob"}
+	meta.ApplyAuthInfo(SessionInfo{
+		Auth: AuthInfo{Method: AuthMethodCert, KeyID: "alice@CORP", Serial: 7,
+			Principals: []string{"p"}, CAFingerprint: "SHA256:x"},
+		SSHCommand: "x", SSHClient: "1.2.3.4 5", PolicyOnly: true,
+	}, []string{"CORP"})
+	if meta.SubmitUser != "bob" {
+		t.Errorf("SubmitUser = %q, want bob", meta.SubmitUser)
+	}
+	if !reflect.DeepEqual(meta.Info, SessionInfo{}) {
+		t.Errorf("Info = %+v, want zero", meta.Info)
+	}
+	for _, m := range meta.InfoMessages() {
+		if strings.HasPrefix(m.GetKey(), "logsh_") && m.GetKey() != "logsh_version" {
+			if strings.Contains(m.GetStrval(), "alice") {
+				t.Errorf("attribution leaked via %s", m.GetKey())
+			}
+		}
 	}
 }

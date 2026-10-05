@@ -75,8 +75,11 @@ An SSH certificate with the empty-valued extension
 opts its session into forced termination at the certificate's expiry time.
 This requires
 .B ExposeAuthInfo yes
-in sshd and Linux pidfd support. logsh kills the supervised command and discovered
-processes in its Linux session, then finalizes the recording. Expired certificates
+in sshd and Linux pidfd support. logsh stops and kills the supervised command and
+every process in its Linux session, then finalizes the recording. Processes that
+outlive the shell, such as nohup jobs, are handed to a detached supervisor
+(logsh __expiry-supervisor, an internal command) that kills them at expiry.
+Terminations are logged to syslog as session_expired, keyed by certificate serial. Expired certificates
 are refused before launch. Recording exclusions, nested recording skips, fail-open
 and break-glass do not disable this policy. Certificates without the extension
 retain their normal session lifetime. Detached processes in other sessions and
@@ -101,6 +104,9 @@ certificate, AcceptEnv CERBERUS_RENEW_SOCKET, AllowStreamLocalForwarding remote,
 and AllowTcpForwarding remote with PermitListen none in sshd. PermitListen none
 refuses remote TCP listeners while allowing the Unix bridge.
 Failed renewal leaves the current deadline in force.
+Nested logsh sessions, such as a shell in each tmux window, follow the renewed
+deadline of the outer session, and a session started after an extension is
+accepted although its inherited certificate has expired.
 .PP
 An account that is not listed in
 .I record_users

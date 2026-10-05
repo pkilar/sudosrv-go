@@ -87,7 +87,7 @@ func runSession(s session) int {
 		return refuse(s.Config, nil, "no target was resolved for this session")
 	}
 
-	deadline, err := s.Info.Auth.CertificateDeadline(time.Now())
+	deadline, err := logshell.SessionDeadline(s.Info.Auth, time.Now())
 	if err != nil {
 		logshell.Alertf(syslog.LOG_ERR, "SSH certificate session REFUSED: %v", err)
 		fmt.Fprintf(os.Stderr, "logsh: %v\n", err)

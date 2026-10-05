@@ -106,7 +106,9 @@ func RunRecorded(ctx context.Context, spec RunSpec, tio TerminalIO) (Outcome, er
 func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNesting *Nesting) (Outcome, error) {
 	cleanupRenewal, renewalErr := spec.prepareRenewal()
 	if renewalErr != nil {
-		return Outcome{}, renewalErr
+		// Nothing has been started. Returned bare, the caller would read this as
+		// "the child ran but was not recorded" and exit 0 having run nothing.
+		return Outcome{}, unavailable(renewalErr)
 	}
 	defer cleanupRenewal()
 	if err := spec.checkExpiry(); err != nil {
@@ -151,13 +153,21 @@ func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNest
 	defer func() { _ = pty.Close() }()
 
 	if size.Rows != 0 || size.Cols != 0 {
-		_ = SetWinSize(pty.Master.Fd(), size)
+		_ = pty.SetWinSize(size)
 	}
 
 	argv0 := ChildArgv0(shellPath, inv.LoginShell)
 	argv := append([]string{argv0}, inv.Args...)
 
-	meta := CollectMeta(pty.Name, size, shellPath, argv)
+	// A metadata-only nested record names the terminal the user is actually on,
+	// as runPassthrough does: that is what joins it to the enclosing recorder's
+	// transcript. The private pty below exists only so expiry can tear the
+	// session down, and its name appears in no other record.
+	ttyName := pty.Name
+	if metadataNesting != nil {
+		ttyName = TTYNameOf(stdin.Fd())
+	}
+	meta := CollectMeta(ttyName, size, shellPath, argv)
 	meta.SessionID = cmdLog.SessionID()
 	meta.ApplyNesting(DetectNesting())
 	if metadataNesting != nil {
@@ -223,14 +233,17 @@ func runRecorded(ctx context.Context, spec RunSpec, tio TerminalIO, metadataNest
 		rawState, _ = GetTermios(stdin.Fd())
 	}
 
-	resizeRec := rec
+	// An event-only session accepts no I/O events at all: the server rejects a
+	// window-size or suspend event and drops the connection, losing the exit
+	// status that is the whole point of a metadata record.
+	ioRec := rec
 	if metadataNesting != nil {
-		resizeRec = nil
+		ioRec = nil
 	}
-	stopWinch := watchWindowSize(stdin, pty, resizeRec)
+	stopWinch := watchWindowSize(stdin, pty, ioRec)
 	defer stopWinch()
 
-	stopSuspend := watchSuspend(stdin.Fd(), saved, rawState, rec)
+	stopSuspend := watchSuspend(stdin.Fd(), saved, rawState, ioRec)
 	defer stopSuspend()
 
 	relayInput(input, pty.Master, rec)
@@ -426,7 +439,7 @@ func watchWindowSize(outer *os.File, pty *PTY, rec *Recorder) func() {
 				if err != nil {
 					continue
 				}
-				_ = SetWinSize(pty.Master.Fd(), size)
+				_ = pty.SetWinSize(size)
 				if rec != nil {
 					_ = rec.WinSize(size)
 				}

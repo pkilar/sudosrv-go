@@ -128,21 +128,26 @@ func withWriteContext(ctx context.Context, writer io.Writer, fn func() error) er
 		return err
 	}
 
-	done := make(chan struct{})
-	watcherDone := make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		select {
-		case <-ctx.Done():
-			_ = setter.SetWriteDeadline(time.Now())
-		case <-done:
-		}
-	}()
+	// context.AfterFunc instead of a watcher goroutine: logsh passes a
+	// long-lived cancellable ctx on every terminal-output message, so the
+	// per-message goroutine + two channels + deadline reset were a measurable
+	// cost on the relay hot path. When ctx is not cancelled during the write
+	// (the overwhelmingly common case) this spawns nothing and never touches
+	// the write deadline.
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		_ = setter.SetWriteDeadline(time.Now())
+	})
 
 	err := fn()
-	close(done)
-	<-watcherDone
-	_ = setter.SetWriteDeadline(time.Time{})
+	if !stop() {
+		// The callback already started. Wait for it before resetting the
+		// deadline: otherwise its "deadline = now" could land after our
+		// reset and poison the next write on this connection.
+		<-fired
+		_ = setter.SetWriteDeadline(time.Time{})
+	}
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
