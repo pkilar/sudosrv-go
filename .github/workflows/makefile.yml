@@ -80,6 +80,8 @@ jobs:
     - name: Run tests
       run: make test
 
+  # The README's golangci-lint badge selects this job's check run by its name,
+  # `lint`. Renaming the job turns the badge into "no check runs".
   lint:
     runs-on: ubuntu-latest
     steps:

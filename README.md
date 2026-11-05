@@ -1,6 +1,6 @@
 # Go Sudo I/O Log Server
 
-[![CI][ci-badge]][ci] [![Go Report Card][go-reportcard-badge]][go-reportcard] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev] [![License: Apache 2.0][license-badge]][license]
+[![CI][ci-badge]][ci] [![golangci-lint][golangci-lint-badge]][golangci-lint] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev] [![License: Apache 2.0][license-badge]][license]
 
 A high-performance, standalone I/O log server for sudo, written in Go. It is a fully compatible alternative to sudo's native `sudo_logsrvd`, capable of receiving and processing I/O logs from any sudo client (version 1.9.0+).
 
@@ -386,8 +386,8 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the f
 
 [ci-badge]: https://github.com/pkilar/sudosrv-go/actions/workflows/makefile.yml/badge.svg
 [ci]: https://github.com/pkilar/sudosrv-go/actions/workflows/makefile.yml
-[go-reportcard-badge]: https://goreportcard.com/badge/github.com/pkilar/sudosrv-go
-[go-reportcard]: https://goreportcard.com/report/github.com/pkilar/sudosrv-go
+[golangci-lint-badge]: https://img.shields.io/github/check-runs/pkilar/sudosrv-go/main?nameFilter=lint&label=golangci-lint
+[golangci-lint]: https://github.com/pkilar/sudosrv-go/actions/workflows/makefile.yml?query=branch%3Amain
 [pkg.go.dev-badge]: https://pkg.go.dev/badge/github.com/pkilar/sudosrv-go.svg
 [pkg.go.dev]: https://pkg.go.dev/github.com/pkilar/sudosrv-go
 [license-badge]: https://img.shields.io/badge/License-Apache_2.0-blue.svg
