@@ -98,6 +98,10 @@ func TestNonInteractiveDoesNotWaitForAnAcknowledgement(t *testing.T) {
 			"never sends; every scp on the host would hang like this")
 	}
 
+	// The client returned without an acknowledgement, so the server may not
+	// have read the accept yet.
+	waitForExit(t, srv)
+
 	_, _, _, _, acc := srv.snapshot()
 	if acc == nil {
 		t.Fatal("no AcceptMessage reached the server")
@@ -193,7 +197,9 @@ func TestNonInteractivePassesStreamsThroughUntouched(t *testing.T) {
 			"through intact", len(got), len(payload))
 	}
 
-	// And none of it may have been recorded.
+	// And none of it may have been recorded. Wait for the exit first, or an
+	// early snapshot would pass without having seen anything the client sent.
+	waitForExit(t, srv)
 	out, in, _, _, _ := srv.snapshot()
 	if out != "" || in != "" {
 		t.Errorf("a metadata-only session recorded stream data: out=%d bytes in=%d bytes",
