@@ -153,7 +153,7 @@ test:
 # `go run pkg@version` resolves in an isolated module, so the version is pinned
 # WITHOUT adding golangci-lint's dependency graph to go.mod/go.sum -- a tool
 # directive here would add ~900 lines of go.sum for a binary that never ships.
-GOLANGCI_LINT_VERSION = v2.13.1
+GOLANGCI_LINT_VERSION = v2.15.0
 
 lint:
 	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION)..."
