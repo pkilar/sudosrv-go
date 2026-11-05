@@ -24,7 +24,7 @@ jobs:
     # Without this the job runs on whatever Go the runner image ships, so the
     # go directive in go.mod forces a full toolchain download on every run and
     # nothing is cached. Matches the lint and govulncheck jobs.
-    - uses: actions/setup-go@v5
+    - uses: actions/setup-go@v7
       with:
         go-version-file: go.mod
         cache: true
@@ -85,7 +85,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - uses: actions/setup-go@v5
+    - uses: actions/setup-go@v7
       with:
         go-version-file: go.mod
         cache: true
@@ -155,7 +155,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - uses: actions/setup-go@v5
+    - uses: actions/setup-go@v7
       with:
         go-version-file: go.mod
         cache: true
