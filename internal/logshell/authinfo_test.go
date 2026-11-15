@@ -25,8 +25,10 @@ func TestParseAuthInfoRetainsCertificateExpiryPolicy(t *testing.T) {
 	}
 	cert := &ssh.Certificate{
 		Key: signer.PublicKey(), CertType: ssh.UserCert, KeyId: "expiry-test",
-		ValidBefore: 2000000000,
-		Extensions:  map[string]string{TerminateOnCertExpiryExtension: ""},
+		// x/crypto >= 0.59 refuses to sign a certificate with no principals.
+		ValidPrincipals: []string{"root"},
+		ValidBefore:     2000000000,
+		Extensions:      map[string]string{TerminateOnCertExpiryExtension: ""},
 	}
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		t.Fatal(err)

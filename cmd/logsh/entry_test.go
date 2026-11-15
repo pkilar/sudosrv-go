@@ -242,7 +242,9 @@ func forgedAuthFile(t *testing.T, keyID string, extensions map[string]string) st
 	}
 	cert := &ssh.Certificate{
 		Key: signer.PublicKey(), CertType: ssh.UserCert, KeyId: keyID,
-		ValidBefore: 2000000000, Extensions: extensions,
+		// x/crypto >= 0.59 refuses to sign a certificate with no principals.
+		ValidPrincipals: []string{"alice"},
+		ValidBefore:     2000000000, Extensions: extensions,
 	}
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		t.Fatal(err)
