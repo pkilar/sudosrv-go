@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sudosrv/internal/config"
 	"sudosrv/internal/protocol"
 	"sudosrv/internal/sessions"
@@ -1763,4 +1764,98 @@ func TestOutOfOrderMessageIsFatal(t *testing.T) {
 		default:
 		}
 	})
+}
+
+// TestValidateEvlogInfo pins the AcceptMessage bounds C added in 5e3b8b04a and
+// documented in sudo_logsrv.proto(5). The limits are inclusive, so the
+// at-the-limit cases below must be accepted: a server that refused them would
+// reject conforming clients.
+func TestValidateEvlogInfo(t *testing.T) {
+	str := func(key, val string) *pb.InfoMessage {
+		return &pb.InfoMessage{Key: key, Value: &pb.InfoMessage_Strval{Strval: val}}
+	}
+	num := func(key string, val int64) *pb.InfoMessage {
+		return &pb.InfoMessage{Key: key, Value: &pb.InfoMessage_Numval{Numval: val}}
+	}
+
+	tests := []struct {
+		name    string
+		info    *pb.InfoMessage
+		wantErr bool
+	}{
+		// User and group names: 255 bytes.
+		{"submituser at the limit", str("submituser", strings.Repeat("u", 255)), false},
+		{"submituser over the limit", str("submituser", strings.Repeat("u", 256)), true},
+		{"runuser over the limit", str("runuser", strings.Repeat("u", 256)), true},
+		{"rungroup over the limit", str("rungroup", strings.Repeat("g", 256)), true},
+		{"submitgroup over the limit", str("submitgroup", strings.Repeat("g", 256)), true},
+
+		// Host names: 1023 bytes.
+		{"submithost at the limit", str("submithost", strings.Repeat("h", 1023)), false},
+		{"submithost over the limit", str("submithost", strings.Repeat("h", 1024)), true},
+
+		// Paths and other long strings: 4095 bytes.
+		{"command at the limit", str("command", strings.Repeat("c", 4095)), false},
+		{"command over the limit", str("command", strings.Repeat("c", 4096)), true},
+		{"runcwd over the limit", str("runcwd", strings.Repeat("d", 4096)), true},
+		{"runchroot over the limit", str("runchroot", strings.Repeat("d", 4096)), true},
+		{"submitcwd over the limit", str("submitcwd", strings.Repeat("d", 4096)), true},
+		{"source over the limit", str("source", strings.Repeat("s", 4096)), true},
+		{"ttyname over the limit", str("ttyname", strings.Repeat("t", 4096)), true},
+
+		// Run-as IDs: 0 <= id < UINT_MAX.
+		{"runuid zero", num("runuid", 0), false},
+		{"runuid just under the limit", num("runuid", 4294967294), false},
+		{"runuid at UINT_MAX is the -1 sentinel", num("runuid", 4294967295), true},
+		{"runuid negative", num("runuid", -1), true},
+		{"rungid negative", num("rungid", -1), true},
+		{"rungid over the limit", num("rungid", 4294967296), true},
+
+		// C bounds only the run-as IDs, so these stay unchecked here too.
+		{"submituid is not range checked", num("submituid", 4294967295), false},
+		{"submitgid is not range checked", num("submitgid", -1), false},
+
+		// An unrecognized key must still be accepted: the protocol requires a
+		// server to tolerate variables it does not know.
+		{"unknown key of any length", str("futurekey", strings.Repeat("x", 9000)), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateEvlogInfo("AcceptMessage", []*pb.InfoMessage{tc.info})
+			if tc.wantErr && err == nil {
+				t.Errorf("validateEvlogInfo(%q) = nil, want an error", tc.info.GetKey())
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateEvlogInfo(%q) = %v, want nil", tc.info.GetKey(), err)
+			}
+		})
+	}
+}
+
+// TestHandleAcceptRejectsOversizedField checks the bounds are actually wired
+// into the accept path, not just available as a helper.
+func TestHandleAcceptRejectsOversizedField(t *testing.T) {
+	h := &Handler{config: &config.Config{}}
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix()},
+		ExpectIobufs: true,
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: strings.Repeat("u", 256)}},
+			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "host"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}
+
+	_, err := h.handleAccept(acceptMsg)
+	if err == nil {
+		t.Fatal("handleAccept accepted a 256-byte submituser, want an error")
+	}
+	// Be specific about WHICH error: an empty config makes the accept path fail
+	// further down for unrelated reasons, and a bare "got an error" assertion
+	// would keep passing if the bounds check were removed.
+	if !strings.Contains(err.Error(), "submituser") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("want the submituser length error, got: %v", err)
+	}
 }

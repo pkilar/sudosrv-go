@@ -501,6 +501,9 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		for _, info := range event.AlertMsg.GetInfoMsgs() {
 			slog.Info("Alert info", "key", info.GetKey(), "value", info.GetStrval())
 		}
+		if err := validateEvlogInfo("AlertMessage", event.AlertMsg.GetInfoMsgs()); err != nil {
+			return nil, err
+		}
 		h.emitEvent(eventlog.Alert, infoStrings(protocol.InfoMsgsToMap(event.AlertMsg.GetInfoMsgs())),
 			event.AlertMsg.GetReason())
 		return nil, nil // No response needed for alerts
@@ -799,6 +802,10 @@ func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value
 // has already been denied, so a server-side persistence failure should not
 // escalate into a protocol error.
 func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
+	if err := validateEvlogInfo("RejectMessage", rejectMsg.GetInfoMsgs()); err != nil {
+		return nil, err
+	}
+
 	// Emitted before the mode check: a refused command is an audit event in
 	// every mode, and only local mode writes the metadata-only log.json below.
 	h.emitEvent(eventlog.Reject, infoStrings(protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs())), rejectMsg.GetReason())
@@ -902,10 +909,71 @@ func (h *Handler) handleRestart(restartMsg *pb.RestartMessage) (*pb.ServerMessag
 	}
 }
 
+// Upper bounds on the info values a client may send, from C's evlog_new
+// (logsrvd/iolog_writer.c, upstream 5e3b8b04a). The limits are inclusive: 255
+// bytes of user name is accepted, 256 is refused. They are documented in
+// sudo_logsrv.proto(5), so a conforming client already respects them; refusing
+// the rest keeps an oversized value out of the path expander, the event line
+// and log.json rather than letting it through to produce an ENAMETOOLONG or a
+// multi-kilobyte audit record.
+const (
+	evlogLoginNameMax = 255  // user and group names
+	evlogHostNameMax  = 1023 // host names
+	evlogPathMax      = 4095 // paths and other long strings
+)
+
+// evlogStringLimits maps an info key to its maximum length in bytes. Keys that
+// are absent are unbounded, which is what C does too -- it bounds only the
+// values that reach a log line or a path.
+var evlogStringLimits = map[string]int{
+	"command":     evlogPathMax,
+	"runchroot":   evlogPathMax,
+	"runcwd":      evlogPathMax,
+	"source":      evlogPathMax,
+	"submitcwd":   evlogPathMax,
+	"ttyname":     evlogPathMax,
+	"submithost":  evlogHostNameMax,
+	"runuser":     evlogLoginNameMax,
+	"rungroup":    evlogLoginNameMax,
+	"submituser":  evlogLoginNameMax,
+	"submitgroup": evlogLoginNameMax,
+}
+
+// evlogIDMax is the exclusive upper bound on runuid/rungid, matching C's
+// "numval < 0 || numval >= UINT_MAX". The bound is exclusive so (uid_t)-1,
+// the "no such ID" sentinel, is refused.
+const evlogIDMax = 4294967295
+
+// validateEvlogInfo applies the evlog_new bounds to the info list of an
+// Accept, Reject or Alert message -- the same three message types C validates,
+// since all of them build an eventlog record.
+func validateEvlogInfo(msgType string, infoMsgs []*pb.InfoMessage) error {
+	for _, info := range infoMsgs {
+		key := info.GetKey()
+		if maxLen, bounded := evlogStringLimits[key]; bounded {
+			if n := len(info.GetStrval()); n > maxLen {
+				return fmt.Errorf("%s: %s is %d bytes, limit is %d", msgType, key, n, maxLen)
+			}
+		}
+		if key == "runuid" || key == "rungid" {
+			// Only the run-as IDs, matching C. submituid/submitgid are stored
+			// unchecked there, so they are left alone here too.
+			if v := info.GetNumval(); v < 0 || v >= evlogIDMax {
+				return fmt.Errorf("%s: %s is %d, must be 0 <= id < %d", msgType, key, v, evlogIDMax)
+			}
+		}
+	}
+	return nil
+}
+
 // handleAccept sets up a session for an accepted command.
 func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
 	// Apply the three-tier runcwd fallback logic before processing
 	h.applyRuncwdFallback(acceptMsg)
+
+	if err := validateEvlogInfo("AcceptMessage", acceptMsg.GetInfoMsgs()); err != nil {
+		return nil, err
+	}
 
 	// Validate required fields, matching C sudo_logsrvd behavior.
 	infoMap := make(map[string]string)
