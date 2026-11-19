@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -1762,11 +1763,23 @@ func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (i
 			if len(fields) < 3 {
 				return 0, nil, fmt.Errorf("I/O timing record missing byte count: %q", line)
 			}
-			nbytes, err := strconv.ParseInt(fields[2], 10, 64)
+			// ParseUint, not ParseInt: a byte count is never negative, and a
+			// negative one would drive the resume offset backwards (or cancel
+			// out a later record) so the session resumes mid-transcript and
+			// overwrites bytes already stored. The running sum is checked for
+			// overflow for the same reason -- a wrapped sum is a small positive
+			// offset that silently truncates the stream. C rejects both with
+			// EOVERFLOW (upstream 2642dc5d2, ce87ba7f0); the timing file is
+			// ours, so this only bites on corruption or tampering, but the
+			// fallback (append mode) is strictly safer than a bad seek.
+			nbytes, err := strconv.ParseUint(fields[2], 10, 63)
 			if err != nil {
 				return 0, nil, fmt.Errorf("bad timing byte count %q: %w", fields[2], err)
 			}
-			streamOffsets[stream] += nbytes
+			if int64(nbytes) > math.MaxInt64-streamOffsets[stream] {
+				return 0, nil, fmt.Errorf("timing byte counts for %s overflow at record %q", stream, line)
+			}
+			streamOffsets[stream] += int64(nbytes)
 		}
 
 		if elapsed >= target {

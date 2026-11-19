@@ -2280,6 +2280,47 @@ func TestIologEscapeValuesAreLiteral(t *testing.T) {
 	}
 }
 
+// TestComputeResumeOffsetsRejectsBadByteCounts covers the two timing-file
+// guards C added in 2642dc5d2 and ce87ba7f0. A negative count would walk the
+// resume offset backwards and a wrapped sum would land it near zero; either way
+// the session seeks into the middle of the stored transcript and overwrites
+// bytes that are already there. Both must be reported so the caller falls back
+// to append mode.
+func TestComputeResumeOffsetsRejectsBadByteCounts(t *testing.T) {
+	tests := []struct {
+		name   string
+		timing string
+	}{
+		{
+			name:   "negative byte count",
+			timing: "1 0.000000 10\n1 1.000000 -40\n",
+		},
+		{
+			name:   "byte counts overflow int64",
+			timing: "1 0.000000 9223372036854775807\n1 1.000000 9223372036854775807\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "timing"), []byte(tc.timing), 0o600); err != nil {
+				t.Fatalf("write timing file: %v", err)
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatalf("OpenRoot: %v", err)
+			}
+			defer func() { _ = root.Close() }()
+
+			_, _, err = computeResumeOffsetsAt(root, "timing", time.Second)
+			if err == nil {
+				t.Fatal("expected an error for a timing file with an unusable byte count, got nil")
+			}
+		})
+	}
+}
+
 // TestExpandIologTemplate pins the full path-template pipeline -- the single
 // %{...} pass followed by the strftime pass -- against C's expand_iolog_path
 // (lib/iolog/iolog_path.c:88-175, post-dd3e52b14).
