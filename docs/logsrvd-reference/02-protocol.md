@@ -482,11 +482,16 @@ restartable — before calling the storage layer.
 - **C source:** `logsrvd/logsrvd.c:684-693`
 - **Severity if divergent:** high
 
-Unlike every other handler, `handle_restart()` does *not* return false when the storage
-layer fails. It calls `schedule_error_message(closure->errstr, closure)` itself and returns
-true, so the specific reason ("unable to parse log_id", "log is already complete, cannot be
-restarted", "unable to restart log") reaches the client rather than being replaced by a
-generic string. The connection is still closed after the error is written.
+The specific reason ("unable to parse log_id", "log is already complete, cannot be
+restarted", "unable to restart log") MUST reach the client rather than being replaced by a
+generic string, and the connection is closed after the error is written.
+
+How C gets there changed in upstream `fcc315fa7`. Through sudo 1.9.18 `handle_restart()`
+was the one handler that did *not* return false on failure: it called
+`schedule_error_message(closure->errstr, closure)` itself and returned true. It now sets
+`closure->errstr` and returns false like every other handler, leaving `client_msg_cb()` to
+schedule the message. The observable protocol behaviour — one specific error, then close
+— is unchanged; only the C citation above moves.
 
 ### PROTO-023 — Restart `log_id` decoding: 16-byte UUID prefix, path with no NUL and no `..`, verified against the on-disk `uuid` file
 
@@ -917,3 +922,32 @@ casts its own `long tv_nsec` down to `int32_t` when building a commit point. Whe
 `valid_timespec()` is applied (PROTO-021, PROTO-027, PROTO-028, PROTO-029) the range is
 further constrained to `tv_sec >= 0` and `0 <= tv_nsec < 1000000000`; where it is not
 applied (`submit_time`, `alert_time`, `run_time`) no range check occurs at all.
+
+### PROTO-054 — `AcceptMessage`, `RejectMessage` and `AlertMessage` info values have documented length and ID bounds
+
+- **C source:** `logsrvd/iolog_writer.c:52-54,197-432`, `logsrvd/logsrvd_local.c:202,280,646`, `docs/sudo_logsrv.proto.man.in:734-738`
+- **Severity if divergent:** low
+
+`evlog_new()` bounds a subset of the info values before building an eventlog record, and
+returns failure (with `errno = ERANGE`) when one is over. Because all three of
+`store_accept_local()`, `store_reject_local()` and `store_alert_local()` call it, the
+limits apply to every message type that carries an info list, not just `AcceptMessage`.
+They are part of the documented protocol (`sudo_logsrv.proto(5)`), so a conforming client
+already respects them.
+
+| Limit (inclusive) | Keys |
+|--:|---|
+| 255 bytes | `runuser`, `rungroup`, `submituser`, `submitgroup` |
+| 1023 bytes | `submithost` |
+| 4095 bytes | `command`, `runchroot`, `runcwd`, `source`, `submitcwd`, `ttyname` |
+
+`runuid` and `rungid` MUST satisfy `0 <= id < 4294967295`. The upper bound is exclusive so
+that `UINT_MAX` — the `(uid_t)-1` "no such ID" sentinel — is refused. `submituid` and
+`submitgid` are **not** range-checked, and keys absent from the table above are not
+length-checked; a server must tolerate unknown variables of any length.
+
+Added in upstream `5e3b8b04a`. The rationale there is C-specific (bounding what reaches
+fixed log-message buffers), but the limits are worth enforcing in any implementation: an
+oversized value otherwise flows into the I/O log path, the event line and `log.json`,
+producing an `ENAMETOOLONG` at session setup or a multi-kilobyte audit record instead of a
+clean protocol error.

@@ -792,6 +792,13 @@
    "notes": "The spec records this as an ordering artifact and states that an implementation validating up front should not be marked divergent. reload() does exactly that: LoadConfigRequired, then conf…"
   },
   {
+   "id": "CONF-069",
+   "status": "MATCH",
+   "severity": "high",
+   "go_source": "internal/eventlog/eventlog.go:209 (escapeControl applied before sink.write), internal/eventlog/sink.go:122-135,215-222",
+   "notes": "Ported from upstream e6f482a8d. Escaping happens once at the single sink.write call site, so both the syslog and logfile sinks are covered and splitSyslogLine budgets against the escaped length as C does. Go also escapes the prefix in json format, where C has no prefix at all -- harmless, and a consequence of the pre-existing divergence that Go prefixes JSON records (see CONF-059). Covered by TestFileSinkEscapesSubmitUser and TestSplitSyslogLineBudgetsEscapedUser."
+  },
+  {
    "id": "IOLOG-001",
    "status": "PARTIAL",
    "severity": "informational",
@@ -831,7 +838,7 @@
    "status": "PARTIAL",
    "severity": "low",
    "go_source": "internal/storage/session.go:208-271,683-684",
-   "notes": "Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable - the operat…"
+   "notes": "Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable. strftimeExpand supports the atomic codes and copies the slash-bearing ones (%D, %F, %T) through verbatim, so an unknown code can never inject a path separator. The ordering half of upstream dd3e52b14 is ported in full: expandIologTemplate substitutes %{...} in one left-to-right pass and doubles every '%' in a substituted value, so a value is never re-read by the strftime pass and '%%{user}' yields a literal '%{user}' as in C. Covered by TestExpandIologTemplate, TestIologEscapeValuesAreLiteral and TestBuildSessionPathEscapedBraceIsLiteral."
   },
   {
    "id": "IOLOG-007",
@@ -1076,7 +1083,7 @@
    "status": "MATCH",
    "severity": "none",
    "go_source": "internal/storage/filter.go",
-   "notes": ""
+   "notes": "Per-session filter state (PasswordFilter is constructed per session in session.go and owns isFiltering plus the rolling tail). Upstream converged on this model in bcecbce99, which moved is_filtered out of the process-wide pwfilt handle into per-connection closure->pwfilt_active."
   },
   {
    "id": "IOLOG-042",
@@ -1300,7 +1307,7 @@
    "status": "DIVERGENT",
    "severity": "low",
    "go_source": "internal/connection/handler.go:673-676,691-694; internal/co…",
-   "notes": "Diagnosability only, and only for sudo_sendlog -R since production sudo never sends RestartMessage."
+   "notes": "Diagnosability only, and only for sudo_sendlog -R since production sudo never sends RestartMessage: every handleRestart failure path returns an error and the caller sends one generic 'Internal Server Error' before closing, where C sends the specific reason. Upstream fcc315fa7 restructured how C reaches that point (handle_restart now returns false and client_msg_cb schedules closure->errstr) without changing the observable behaviour, so this verdict is unaffected."
   },
   {
    "id": "PROTO-023",
@@ -1518,6 +1525,13 @@
    "severity": "none",
    "go_source": "pkg/sudosrv_proto/sudo_logsrv.proto:42-45; internal/storage…",
    "notes": ""
+  },
+  {
+   "id": "PROTO-054",
+   "status": "MATCH",
+   "severity": "low",
+   "go_source": "internal/connection/handler.go (validateEvlogInfo; called from handleAccept, handleReject and the AlertMessage case)",
+   "notes": "Ported from upstream 5e3b8b04a. Limits are inclusive (255 user/group, 1023 host, 4095 path) and runuid/rungid must be 0 <= id < 4294967295, matching C exactly: submituid/submitgid are left unchecked and unknown keys are unbounded. Applied to Accept, Reject and Alert, as C does via evlog_new. Covered by TestValidateEvlogInfo and TestHandleAcceptRejectsOversizedField."
   },
   {
    "id": "RELAY-001",
@@ -2014,7 +2028,7 @@
    "status": "ABSENT",
    "severity": "informational",
    "go_source": "internal/connection/handler.go:102-114, internal/connection…",
-   "notes": "No reverse DNS lookup happens anywhere on the inbound path; only conn.RemoteAddr() is recorded (registerSession's RemoteAddr, and every slog \"remote_addr\" field). Because the resolved name…"
+   "notes": "No reverse DNS lookup happens anywhere on the inbound path; only conn.RemoteAddr() is recorded (registerSession's RemoteAddr, and every slog \"remote_addr\" field). Because the resolved name Upstream 8fe928fb9 later made C forward-confirm the PTR name (name_resolves_to_peer) and discard it on mismatch; if tls_checkhost is ever implemented here, that step is mandatory."
   },
   {
    "id": "TLS-018",
@@ -2091,7 +2105,7 @@
    "status": "MATCH",
    "severity": "none",
    "go_source": "internal/relay/session.go:965-972",
-   "notes": ""
+   "notes": "The Go relay client has no custom verify callback, so the C type-confusion has no analogue: the stdlib verifies the upstream chain and hostname by default, and only tls_skip_verify (default false) turns that off. Upstream fixed the C bug in 1633d1178 by installing the peer_info callback for relay contexts."
   },
   {
    "id": "TLS-029",
