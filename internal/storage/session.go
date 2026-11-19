@@ -227,6 +227,70 @@ func (s *Session) logSummaryCommand(command string) string {
 	return b.String()
 }
 
+// expandIologTemplate substitutes the sudoers-style "%{name}" escapes in a
+// single left-to-right pass over the template, reproducing the scan loop of C's
+// expand_iolog_path (lib/iolog/iolog_path.c:88-126). A single pass is the whole
+// point: nothing it writes is ever re-read, so a substituted value cannot be
+// mistaken for a template construct.
+//
+// Four cases, and the order they are tested in is what makes the semantics
+// match C:
+//
+//  1. "%{name}" with a known name expands to its value, with every "%" in that
+//     value DOUBLED so the strftimeExpand pass that follows reads it as a
+//     literal. Without the doubling a client-supplied submituser of "%H" would
+//     become the hour (upstream dd3e52b14, escape_percent()).
+//  2. "%%" is copied through as "%%", not collapsed here. The single collapse
+//     happens in strftimeExpand, exactly as C defers it to strftime (or to its
+//     own collapse loop when no strftime pass is needed). Consuming BOTH bytes
+//     here is also what keeps "%%{user}" from being read as "%" followed by
+//     "%{user}": it yields a literal "%{user}", as C does.
+//  3. An unknown "%{name}", or a "%{" with no closing brace, leaves the "%"
+//     literal and lets the braces be copied as ordinary characters -- C's
+//     fall-through when no escape matches.
+//  4. Any other "%X" is left alone for strftimeExpand to interpret.
+//
+// Values are looked up by the bare name, so there is no longest-match ordering
+// hazard between overlapping escapes such as %{command} and %{command_path}.
+func expandIologTemplate(template string, values map[string]string) string {
+	if !strings.ContainsRune(template, '%') {
+		return template
+	}
+	var b strings.Builder
+	b.Grow(len(template))
+	for i := 0; i < len(template); {
+		if template[i] != '%' || i+1 >= len(template) {
+			b.WriteByte(template[i])
+			i++
+			continue
+		}
+		switch template[i+1] {
+		case '%':
+			b.WriteString("%%")
+			i += 2
+		case '{':
+			end := strings.IndexByte(template[i+2:], '}')
+			if end < 0 {
+				b.WriteByte('%') // unterminated: the '%' is literal
+				i++
+				continue
+			}
+			value, known := values[template[i+2:i+2+end]]
+			if !known {
+				b.WriteByte('%') // unknown escape: the '%' is literal
+				i++
+				continue
+			}
+			b.WriteString(strings.ReplaceAll(value, "%", "%%"))
+			i += end + 3 // past "%{", the name, and "}"
+		default:
+			b.WriteByte('%') // a bare strftime code; leave it for strftimeExpand
+			i++
+		}
+	}
+	return b.String()
+}
+
 // strftimeExpand expands C strftime-style "%X" date/time escapes against t,
 // matching the strftime pass C sudo applies to an iolog path after %{...}
 // expansion (lib/iolog/iolog_path.c). "%%" collapses to a literal "%". Only the
@@ -821,49 +885,52 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 	now := time.Now()
 	epochStr := strconv.FormatInt(now.Unix(), 10)
 
-	// Replacer for sudoers-style escape sequences.
+	// Values for the sudoers-style %{...} escapes.
 	// User-controlled values are sanitized ("/" -> "_") to prevent traversal,
 	// matching C sudo_logsrvd's strlcpy_no_slash() behavior.
 	runuser := sanitizePathComponent(infoMap["runuser"])
 	rungroup := sanitizePathComponent(infoMap["rungroup"])
-	replacer := strings.NewReplacer(
+	escapes := map[string]string{
 		// User/Group escapes (sanitized — user-controlled)
-		"%{user}", sanitizePathComponent(infoMap["submituser"]),
-		"%{uid}", sanitizePathComponent(infoMap["submituid"]),
-		"%{group}", sanitizePathComponent(infoMap["submitgroup"]),
-		"%{gid}", sanitizePathComponent(infoMap["submitgid"]),
-		"%{runuser}", runuser,
-		"%{runuid}", sanitizePathComponent(infoMap["runuid"]),
-		"%{rungroup}", rungroup,
-		"%{rungid}", sanitizePathComponent(infoMap["rungid"]),
+		"user":  sanitizePathComponent(infoMap["submituser"]),
+		"uid":   sanitizePathComponent(infoMap["submituid"]),
+		"group": sanitizePathComponent(infoMap["submitgroup"]),
+		"gid":   sanitizePathComponent(infoMap["submitgid"]),
+
+		"runuser":  runuser,
+		"runuid":   sanitizePathComponent(infoMap["runuid"]),
+		"rungroup": rungroup,
+		"rungid":   sanitizePathComponent(infoMap["rungid"]),
 		// Canonical sudo names for the run-as identity (lib/iolog/iolog_path.c:
 		// fill_runas_user / fill_runas_group). Aliased to the same values so a
 		// template copied from a C sudoers config expands identically.
-		"%{runas_user}", runuser,
-		"%{runas_group}", rungroup,
-		// Host/Command escapes (sanitized — user-controlled)
-		"%{hostname}", sanitizePathComponent(infoMap["submithost"]),
-		"%{command_path}", sanitizePathComponent(infoMap["command"]),
-		"%{command}", sanitizePathComponent(filepath.Base(infoMap["command"])),
-		// Sequence and Random escapes (server-generated, safe)
-		"%{seq}", seq,
-		"%{rand}", randStr,
-		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
-		"%{year}", fmt.Sprintf("%04d", now.Year()),
-		"%{month}", fmt.Sprintf("%02d", now.Month()),
-		"%{day}", fmt.Sprintf("%02d", now.Day()),
-		"%{hour}", fmt.Sprintf("%02d", now.Hour()),
-		"%{minute}", fmt.Sprintf("%02d", now.Minute()),
-		"%{second}", fmt.Sprintf("%02d", now.Second()),
-		"%{epoch}", epochStr,
-		// Path escapes
-		"%{LIVEDIR}", cfg.LogDirectory,
-		// NOTE: literal "%%" and bare strftime "%X" codes are handled by
-		// strftimeExpand below (after brace expansion), matching C's model.
-	)
+		"runas_user":  runuser,
+		"runas_group": rungroup,
 
-	iologDir := replacer.Replace(cfg.IologDir)
-	iologFile := replacer.Replace(cfg.IologFile)
+		// Host/Command escapes (sanitized — user-controlled)
+		"hostname":     sanitizePathComponent(infoMap["submithost"]),
+		"command_path": sanitizePathComponent(infoMap["command"]),
+		"command":      sanitizePathComponent(filepath.Base(infoMap["command"])),
+
+		// Sequence and Random escapes (server-generated, safe)
+		"seq":  seq,
+		"rand": randStr,
+
+		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
+		"year":   fmt.Sprintf("%04d", now.Year()),
+		"month":  fmt.Sprintf("%02d", now.Month()),
+		"day":    fmt.Sprintf("%02d", now.Day()),
+		"hour":   fmt.Sprintf("%02d", now.Hour()),
+		"minute": fmt.Sprintf("%02d", now.Minute()),
+		"second": fmt.Sprintf("%02d", now.Second()),
+		"epoch":  epochStr,
+
+		// Path escapes
+		"LIVEDIR": cfg.LogDirectory,
+	}
+
+	iologDir := expandIologTemplate(cfg.IologDir, escapes)
+	iologFile := expandIologTemplate(cfg.IologFile, escapes)
 
 	// After %{...} expansion, apply C-style strftime over the path for bare
 	// "%X" date/time codes and to collapse "%%" -> "%". C sudo runs strftime on

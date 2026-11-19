@@ -2202,3 +2202,233 @@ func TestLogSummaryFileInjection(t *testing.T) {
 		t.Errorf("newline in command field survived sanitization:\n%s", content)
 	}
 }
+
+// TestIologEscapeValuesAreLiteral verifies that a value substituted for a
+// %{...} escape is never re-read by the strftime pass that follows it.
+//
+// The submituser arrives in the AcceptMessage, so it is entirely
+// client-controlled. Before upstream dd3e52b14 (and before the matching fix
+// here) C expanded %{user} first and then ran strftime over the result, so a
+// client calling itself "%H" got the hour as its directory name -- it could
+// pick a bucket it was never assigned, colliding with whatever a time-templated
+// path puts there. In C the same flaw re-introduced a '/' via "%D";
+// strftimeExpand refuses the slash-bearing codes, so only the misdirection
+// applies here, but the fix is the same one: double the '%' in each substituted
+// value and let the existing "%%" -> "%" collapse undo it.
+func TestIologEscapeValuesAreLiteral(t *testing.T) {
+	tests := []struct {
+		name       string
+		submitUser string
+		iologFile  string
+		wantFile   string
+	}{
+		{
+			name:       "time code in value stays literal",
+			submitUser: "%H",
+			iologFile:  "%{user}",
+			wantFile:   "%H",
+		},
+		{
+			name:       "year code in value stays literal",
+			submitUser: "%Y",
+			iologFile:  "%{user}",
+			wantFile:   "%Y",
+		},
+		{
+			name:       "trailing percent does not consume the next template byte",
+			submitUser: "x%",
+			iologFile:  "%{user}Y",
+			wantFile:   "x%Y",
+		},
+		{
+			name:       "double percent in value survives verbatim",
+			submitUser: "a%%b",
+			iologFile:  "%{user}",
+			wantFile:   "a%%b",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfg := &config.LocalStorageConfig{
+				LogDirectory:    tmpDir,
+				IologDir:        "%{LIVEDIR}",
+				IologFile:       tc.iologFile,
+				DirPermissions:  0o755,
+				FilePermissions: 0o644,
+			}
+			acceptMsg := &pb.AcceptMessage{
+				SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: tc.submitUser}},
+					{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+				},
+			}
+
+			got, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
+			if err != nil {
+				t.Fatalf("buildSessionPath() failed: %v", err)
+			}
+			want := filepath.Join(tmpDir, tc.wantFile)
+			if got != want {
+				t.Errorf("buildSessionPath() with submituser %q and iolog_file %q\n got  %q\n want %q",
+					tc.submitUser, tc.iologFile, got, want)
+			}
+		})
+	}
+}
+
+// TestExpandIologTemplate pins the full path-template pipeline -- the single
+// %{...} pass followed by the strftime pass -- against C's expand_iolog_path
+// (lib/iolog/iolog_path.c:88-175, post-dd3e52b14).
+//
+// The expectations are the FINAL path text, so each case reads as what an
+// operator would see on disk. The clock is fixed so the date codes are
+// deterministic.
+func TestExpandIologTemplate(t *testing.T) {
+	clock := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		template string
+		values   map[string]string
+		want     string
+	}{
+		// Ordinary substitution.
+		{
+			name:     "known escape expands",
+			template: "%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "alice",
+		},
+		{
+			name:     "bare strftime code still expands",
+			template: "%Y-%m-%d",
+			want:     "2026-03-04",
+		},
+
+		// "%%" guards the brace form: this is the case the Replacer got wrong.
+		{
+			name:     "escaped percent before a brace is not an escape",
+			template: "%%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{user}",
+		},
+		{
+			name:     "escaped percent before a time code stays literal",
+			template: "%%Y",
+			want:     "%Y",
+		},
+		{
+			name:     "escaped percent then a real escape",
+			template: "%%%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%alice",
+		},
+
+		// A substituted value is never re-read (upstream dd3e52b14).
+		{
+			name:     "time code in a value stays literal",
+			template: "%{user}",
+			values:   map[string]string{"user": "%H"},
+			want:     "%H",
+		},
+		{
+			name:     "trailing percent in a value cannot consume the next byte",
+			template: "%{user}Y",
+			values:   map[string]string{"user": "x%"},
+			want:     "x%Y",
+		},
+		{
+			name:     "double percent in a value survives verbatim",
+			template: "%{user}",
+			values:   map[string]string{"user": "a%%b"},
+			want:     "a%%b",
+		},
+		{
+			name:     "trailing percent in a value is kept",
+			template: "%{user}",
+			values:   map[string]string{"user": "100%"},
+			want:     "100%",
+		},
+
+		// Fall-through cases: C leaves the '%' literal and copies the braces.
+		{
+			name:     "unknown escape is left alone",
+			template: "%{bogus}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{bogus}",
+		},
+		{
+			name:     "unterminated brace is left alone",
+			template: "%{user",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{user",
+		},
+		{
+			name:     "empty escape name is unknown",
+			template: "%{}",
+			want:     "%{}",
+		},
+		{
+			name:     "trailing percent in the template is kept",
+			template: "logs%",
+			want:     "logs%",
+		},
+
+		// Name lookup is exact, so overlapping escapes cannot shadow each other.
+		{
+			name:     "command and command_path do not shadow each other",
+			template: "%{command}|%{command_path}",
+			values:   map[string]string{"command": "ls", "command_path": "/bin/ls"},
+			want:     "ls|/bin/ls",
+		},
+		{
+			name:     "no percent at all is passed straight through",
+			template: "/var/log/sudo-io",
+			want:     "/var/log/sudo-io",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strftimeExpand(expandIologTemplate(tc.template, tc.values), clock)
+			if got != tc.want {
+				t.Errorf("expand(%q)\n got  %q\n want %q", tc.template, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildSessionPathEscapedBraceIsLiteral is the end-to-end form of the
+// "%%{user}" case: an operator who writes "%%{user}" in iolog_file wants a
+// directory literally named "%{user}", not the client's user name.
+func TestBuildSessionPathEscapedBraceIsLiteral(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        "%{LIVEDIR}",
+		IologFile:       "%%{user}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "alice"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}
+
+	got, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
+	if err != nil {
+		t.Fatalf("buildSessionPath() failed: %v", err)
+	}
+	want := filepath.Join(tmpDir, "%{user}")
+	if got != want {
+		t.Errorf("buildSessionPath()\n got  %q\n want %q", got, want)
+	}
+}
