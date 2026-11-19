@@ -206,7 +206,17 @@ func (l *Logger) Log(e *Event) {
 	if active.format == "json" {
 		line = e.JSONLine()
 	}
-	active.sink.write(pri, e.SubmitUser, line, e.Time)
+	// The submituser comes straight from the client's AcceptMessage and reaches
+	// both sinks as a bare prefix, so it has to be escaped here the way
+	// SudoLine escapes every other field. Without this a submituser containing
+	// a newline forges a complete second audit record. C escapes it in
+	// do_syslog_sudo and do_logfile_sudo with the same LBUF_ESC_CNTRL used by
+	// new_logline (lib/eventlog/eventlog.c, e6f482a8d).
+	//
+	// Escaping before the sink also makes splitSyslogLine budget against the
+	// ESCAPED length, which is what C does (its maxlen subtracts
+	// strlen(submituser) after escaping).
+	active.sink.write(pri, escapeControl(e.SubmitUser), line, e.Time)
 }
 
 // Close releases the current sink. Safe to call when none is installed.
