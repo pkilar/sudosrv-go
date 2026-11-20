@@ -925,7 +925,7 @@ applied (`submit_time`, `alert_time`, `run_time`) no range check occurs at all.
 
 ### PROTO-054 — `AcceptMessage`, `RejectMessage` and `AlertMessage` info values have documented length and ID bounds
 
-- **C source:** `logsrvd/iolog_writer.c:52-54,197-432`, `logsrvd/logsrvd_local.c:202,280,646`, `docs/sudo_logsrv.proto.man.in:734-738`
+- **C source:** `logsrvd/iolog_writer.c:52-54,197-432`, `logsrvd/logsrvd_local.c:202,280,646`, `logsrvd/logsrvd.c:514-545`, `docs/sudo_logsrv.proto.man.in:734-738`
 - **Severity if divergent:** low
 
 `evlog_new()` bounds a subset of the info values before building an eventlog record, and
@@ -934,6 +934,18 @@ returns failure (with `errno = ERANGE`) when one is over. Because all three of
 limits apply to every message type that carries an info list, not just `AcceptMessage`.
 They are part of the documented protocol (`sudo_logsrv.proto(5)`), so a conforming client
 already respects them.
+
+The bounds apply **regardless of session state**. `handle_accept`
+(`logsrvd/logsrvd.c:514-545`) carries the comment *"We can get an AcceptMessage for a
+sub-command during a session"*, gates only on `EXITED`/`FINISHED`, and then calls
+`closure->cms->accept()` unconditionally — so a sub-command `AcceptMessage` arriving
+mid-session reaches `evlog_new` and its limits exactly as the first one does. The same
+holds for a mid-session `RejectMessage` or `AlertMessage`. A server that validates only
+the message that opens a session leaves the rest unchecked, which in store-and-forward
+mode is worse than a local divergence: the oversized message is journalled and replayed
+to an upstream that does enforce the limits, and that rejection parks the entire journal
+(RELAY-049) rather than the one bad message. A client that would rather not be recorded
+can trigger that on purpose.
 
 | Limit (inclusive) | Keys |
 |--:|---|

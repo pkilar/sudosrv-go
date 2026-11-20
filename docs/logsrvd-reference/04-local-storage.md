@@ -1035,6 +1035,14 @@ For an uncompressed log the server MUST:
    or flush between reading and writing the same `FILE*`
    (`logsrvd/logsrvd_local.c:588-592`).
 
+Every failure in that loop is fatal, not just the two resume-point mismatches. The
+`default:` arm of the `iolog_read_timing_record` switch goes straight to `bad`
+(`logsrvd/logsrv_util.c:144-153`), so an unreadable timing file, a malformed record, an
+unparseable marker or delay and a missing or out-of-range byte count all return `false`,
+which `store_restart_local` reports to the client as `"unable to restart log"`
+(`logsrvd/logsrvd_local.c:617-620`). There is no append-mode fallback anywhere in C: a
+restart either seeks to an exact offset or does not happen.
+
 No file is truncated. Writes resume at the seeked offsets and overwrite forward; any
 bytes in a stream file beyond the resume point that the resumed session does not
 overwrite remain in the file. The same is true of the `timing` file.

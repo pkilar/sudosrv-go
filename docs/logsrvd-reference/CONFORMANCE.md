@@ -142,7 +142,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-051` | On shutdown, I/O-logging connections get one last commit po… | ABSENT | low | `internal/server/server.go:278-340; internal/connection/hand…` | An active I/O session is dropped with no last commit point and shutdown takes the full 30s. For a real sudo client the end result is the same either way — C's commit point is immediately fo… |
 | `PROTO-052` | `InfoMessage` values may be int64, string, string list, or… | PARTIAL | low | `internal/protocol/infomsg.go:19-39; internal/storage/sessio…` | An InfoMessage carrying an int64 list vanishes from log.json where C would record it; forward-compatibility gap only, plus a Debug-level skip where C warns "protocol error: NULL value found… |
 | `PROTO-053` | `TimeSpec.tv_sec` is int64 and `tv_nsec` is int32 | MATCH | none | `pkg/sudosrv_proto/sudo_logsrv.proto:42-45; internal/storage…` | — |
-| `PROTO-054` | `AcceptMessage`, `RejectMessage` and `AlertMessage` info va… | MATCH | none | `internal/connection/handler.go (validateEvlogInfo; called f…` | — |
+| `PROTO-054` | `AcceptMessage`, `RejectMessage` and `AlertMessage` info va… | MATCH | none | `internal/connection/handler.go:468,956-990` | — |
 
 ### Configuration Surface & Defaults
 
@@ -270,7 +270,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-042` | `log_id` is base64 of the 16-byte UUID concatenated with th… | PARTIAL | low | `internal/storage/session.go:315-340,350-351,1366-1380` | No amplification: an empty-path log_id resolves to log_directory itself, which then fails the uuid check; a NUL-bearing path fails the os.Stat. Only sendlog or a hand-rolled client reaches… |
 | `IOLOG-043` | Restart verifies the decoded UUID against the session's `uu… | PARTIAL | low | `internal/storage/session.go:1551-1558` | none beyond IOLOG-020's mixed-tree case. The security-relevant half (a caller cannot resume a directory whose UUID it does not already hold) is intact. |
 | `IOLOG-044` | A completed log cannot be restarted | MATCH | none | `internal/storage/session.go:1561-1567` | — |
-| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | PARTIAL | low | `internal/storage/session.go:1411-1505,1582-1624` | Only the overshoot/EOF fallback diverges: Go logs a warning and appends instead of failing the restart (1585-1589), so the overlap region is duplicated in both the stream and the timing fil… |
+| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | PARTIAL | low | `internal/storage/session.go:1721-1838,1911-1943` | Only the overshoot/EOF case diverges: a resume_point that does not land on a record boundary is wrapped in errResumePointMisaligned (1721), and NewRestartSession logs a warning and appends… |
 | `IOLOG-046` | Compressed logs are resumed by rewriting prefixes through a… | INTENTIONAL | low | `internal/storage/session.go:1569-1572` | A sendlog- or relay-originated RestartMessage against a compressed tree gets 'Internal Server Error' and a dropped connection. Unreachable from the production client. |
 | `IOLOG-047` | Restart does not rewrite `log`/`log.json`, but does finaliz… | PARTIAL | low | `internal/storage/session.go:1600-1604,1652-1666,1673-1712` | C leaves log.json byte-identical across a restart; Go does not. 'restarts' is an unknown key that eventlog_json_parse tolerates. Restart-path only. |
 | `IOLOG-048` | An aborted session leaves its files in place, writable and… | MATCH | none | `internal/storage/session.go:1720-1765; internal/connection/…` | — |

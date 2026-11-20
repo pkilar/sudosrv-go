@@ -1110,8 +1110,8 @@
    "id": "IOLOG-045",
    "status": "PARTIAL",
    "severity": "low",
-   "go_source": "internal/storage/session.go:1411-1505,1582-1624",
-   "notes": "Only the overshoot/EOF fallback diverges: Go logs a warning and appends instead of failing the restart (1585-1589), so the overlap region is duplicated in both the stream and the timing fil…"
+   "go_source": "internal/storage/session.go:1721-1838,1911-1943",
+   "notes": "Only the overshoot/EOF case diverges: a resume_point that does not land on a record boundary is wrapped in errResumePointMisaligned (1721), and NewRestartSession logs a warning and appends instead of failing the restart (1937-1941), so the overlap region is duplicated in both the stream and the timing file. The fallback exists for older clients that sent per-stream commit points. Every OTHER iolog_seekto-equivalent failure -- an unreadable timing file, a malformed record, a bad marker or delay, a missing/negative/overflowing byte count -- refuses the restart as C does (1933-1935), leaving the stored files byte-for-byte untouched. Go also never truncates (IOLOG-045's no-truncate rule), guarded by TestRestartResumeSeek/{AlignedResumePointOverwrites,MisalignedResumePointFallsBackToAppend,ZeroResumePointDoesNotDestroyTranscript,CorruptTimingRefusesRestartAndTouchesNothing}."
   },
   {
    "id": "IOLOG-046",
@@ -1530,8 +1530,8 @@
    "id": "PROTO-054",
    "status": "MATCH",
    "severity": "low",
-   "go_source": "internal/connection/handler.go (validateEvlogInfo; called from handleAccept, handleReject and the AlertMessage case)",
-   "notes": "Ported from upstream 5e3b8b04a. Limits are inclusive (255 user/group, 1023 host, 4095 path) and runuid/rungid must be 0 <= id < 4294967295, matching C exactly: submituid/submitgid are left unchecked and unknown keys are unbounded. Applied to Accept, Reject and Alert, as C does via evlog_new. Covered by TestValidateEvlogInfo and TestHandleAcceptRejectsOversizedField."
+   "go_source": "internal/connection/handler.go:468,956-990",
+   "notes": "Ported from upstream 5e3b8b04a. Limits are inclusive (255 user/group, 1023 host, 4095 path) and runuid/rungid must be 0 <= id < 4294967295, matching C exactly: submituid/submitgid are left unchecked and unknown keys are unbounded. Applied to Accept, Reject and Alert from a single chokepoint at the top of processMessage (468), so the bounds also cover the sub-command Accept/Reject and the Alert that arrive mid-session -- C validates those too, since handle_accept gates only on EXITED/FINISHED before calling cms->accept. Covered by TestValidateEvlogInfo and TestEvlogBoundsApplyOnEveryPath."
   },
   {
    "id": "RELAY-001",
