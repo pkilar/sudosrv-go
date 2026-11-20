@@ -456,6 +456,19 @@ func (e *stateMachineViolation) Error() string { return e.detail }
 
 // processMessage contains the main state machine for the protocol.
 func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage, error) {
+	// Field bounds first, before the active-session branch below can hand a
+	// message straight to the store or the relay cache. Accept, Reject and
+	// Alert all arrive DURING a session as well as before one: C says so in
+	// handle_accept ("We can get an AcceptMessage for a sub-command during a
+	// session", logsrvd/logsrvd.c:514-545), which gates only on EXITED/FINISHED
+	// and then calls cms->accept unconditionally, so every sub-command accept
+	// still reaches evlog_new and its bounds. Validating inside handleAccept /
+	// handleReject instead would cover only the pre-session messages and leave
+	// the mid-session ones unchecked.
+	if err := validateMessageEvlogInfo(clientMsg); err != nil {
+		return nil, err
+	}
+
 	// If a session (relay or local) is active, pass the message to it.
 	if h.session != nil {
 		// ClientHello and RestartMessage are valid only in INITIAL, so with a
@@ -500,9 +513,6 @@ func (h *Handler) processMessage(clientMsg *pb.ClientMessage) (*pb.ServerMessage
 		}
 		for _, info := range event.AlertMsg.GetInfoMsgs() {
 			slog.Info("Alert info", "key", info.GetKey(), "value", info.GetStrval())
-		}
-		if err := validateEvlogInfo("AlertMessage", event.AlertMsg.GetInfoMsgs()); err != nil {
-			return nil, err
 		}
 		h.emitEvent(eventlog.Alert, infoStrings(protocol.InfoMsgsToMap(event.AlertMsg.GetInfoMsgs())),
 			event.AlertMsg.GetReason())
@@ -802,10 +812,6 @@ func (h *Handler) setOrUpdateInfoMessage(acceptMsg *pb.AcceptMessage, key, value
 // has already been denied, so a server-side persistence failure should not
 // escalate into a protocol error.
 func (h *Handler) handleReject(rejectMsg *pb.RejectMessage) (*pb.ServerMessage, error) {
-	if err := validateEvlogInfo("RejectMessage", rejectMsg.GetInfoMsgs()); err != nil {
-		return nil, err
-	}
-
 	// Emitted before the mode check: a refused command is an audit event in
 	// every mode, and only local mode writes the metadata-only log.json below.
 	h.emitEvent(eventlog.Reject, infoStrings(protocol.InfoMsgsToMap(rejectMsg.GetInfoMsgs())), rejectMsg.GetReason())
@@ -944,6 +950,21 @@ var evlogStringLimits = map[string]int{
 // the "no such ID" sentinel, is refused.
 const evlogIDMax = 4294967295
 
+// validateMessageEvlogInfo applies the evlog_new bounds to whichever client
+// messages carry an eventlog record. Returning nil for every other type is
+// deliberate: ExitMessage, IoBuffer and the rest never reach evlog_new.
+func validateMessageEvlogInfo(clientMsg *pb.ClientMessage) error {
+	switch event := clientMsg.Type.(type) {
+	case *pb.ClientMessage_AcceptMsg:
+		return validateEvlogInfo("AcceptMessage", event.AcceptMsg.GetInfoMsgs())
+	case *pb.ClientMessage_RejectMsg:
+		return validateEvlogInfo("RejectMessage", event.RejectMsg.GetInfoMsgs())
+	case *pb.ClientMessage_AlertMsg:
+		return validateEvlogInfo("AlertMessage", event.AlertMsg.GetInfoMsgs())
+	}
+	return nil
+}
+
 // validateEvlogInfo applies the evlog_new bounds to the info list of an
 // Accept, Reject or Alert message -- the same three message types C validates,
 // since all of them build an eventlog record.
@@ -970,10 +991,6 @@ func validateEvlogInfo(msgType string, infoMsgs []*pb.InfoMessage) error {
 func (h *Handler) handleAccept(acceptMsg *pb.AcceptMessage) (*pb.ServerMessage, error) {
 	// Apply the three-tier runcwd fallback logic before processing
 	h.applyRuncwdFallback(acceptMsg)
-
-	if err := validateEvlogInfo("AcceptMessage", acceptMsg.GetInfoMsgs()); err != nil {
-		return nil, err
-	}
 
 	// Validate required fields, matching C sudo_logsrvd behavior.
 	infoMap := make(map[string]string)

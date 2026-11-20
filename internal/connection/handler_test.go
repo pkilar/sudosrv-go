@@ -1835,27 +1835,93 @@ func TestValidateEvlogInfo(t *testing.T) {
 
 // TestHandleAcceptRejectsOversizedField checks the bounds are actually wired
 // into the accept path, not just available as a helper.
-func TestHandleAcceptRejectsOversizedField(t *testing.T) {
-	h := &Handler{config: &config.Config{}}
-	acceptMsg := &pb.AcceptMessage{
-		SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix()},
-		ExpectIobufs: true,
-		InfoMsgs: []*pb.InfoMessage{
+// requireBoundsError pins the failure to the bounds check itself. The empty
+// test config makes several accept paths fail further down for unrelated
+// reasons ("unknown server mode"), so a bare "got an error" assertion would
+// keep passing with the bounds check deleted.
+func requireBoundsError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("a 256-byte submituser was accepted, want an error")
+	}
+	if !strings.Contains(err.Error(), "submituser") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("want the submituser length error, got: %v", err)
+	}
+}
+
+// TestEvlogBoundsApplyOnEveryPath drives the bounds through processMessage --
+// the one chokepoint every client message passes -- instead of calling
+// handleAccept directly, because the pre-session Accept was never the gap.
+// Accept, Reject and Alert also arrive mid-session, and those went straight to
+// the session: in local mode an oversized sub-command field lands in log.json,
+// and in relay mode it is cached and replayed to an upstream that enforces the
+// same bounds, which parks the whole journal as *.rejected (RELAY-049) and
+// loses the recording. A client that wants its session unrecorded can trigger
+// that on purpose. C validates the sub-command accept too -- handle_accept
+// gates only on EXITED/FINISHED before calling cms->accept unconditionally
+// (logsrvd/logsrvd.c:514-545).
+//
+// Conformance: docs/logsrvd-reference/ PROTO-054.
+func TestEvlogBoundsApplyOnEveryPath(t *testing.T) {
+	oversizedInfo := func() []*pb.InfoMessage {
+		return []*pb.InfoMessage{
 			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: strings.Repeat("u", 256)}},
 			{Key: "submithost", Value: &pb.InfoMessage_Strval{Strval: "host"}},
 			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
 			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
-		},
+		}
+	}
+	acceptMsg := func() *pb.ClientMessage {
+		return &pb.ClientMessage{Type: &pb.ClientMessage_AcceptMsg{AcceptMsg: &pb.AcceptMessage{
+			SubmitTime:   &pb.TimeSpec{TvSec: time.Now().Unix()},
+			ExpectIobufs: true,
+			InfoMsgs:     oversizedInfo(),
+		}}}
 	}
 
-	_, err := h.handleAccept(acceptMsg)
-	if err == nil {
-		t.Fatal("handleAccept accepted a 256-byte submituser, want an error")
+	// A real conn, because processMessage logs the peer address before it
+	// reaches any handler -- a bare &Handler{} panics there instead of
+	// reporting the bounds error, which would make these pass for the wrong
+	// reason.
+	newHandler := func(t *testing.T, session SessionHandler) *Handler {
+		t.Helper()
+		clientConn, serverConn := net.Pipe()
+		t.Cleanup(func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+		})
+		h := NewHandler(serverConn, &config.Config{})
+		h.session = session
+		return h
 	}
-	// Be specific about WHICH error: an empty config makes the accept path fail
-	// further down for unrelated reasons, and a bare "got an error" assertion
-	// would keep passing if the bounds check were removed.
-	if !strings.Contains(err.Error(), "submituser") || !strings.Contains(err.Error(), "limit") {
-		t.Fatalf("want the submituser length error, got: %v", err)
+
+	// Pre-session: a regression guard, since this path was already covered.
+	t.Run("PreSessionAccept", func(t *testing.T) {
+		_, err := newHandler(t, nil).processMessage(acceptMsg())
+		requireBoundsError(t, err)
+	})
+
+	// Mid-session is the real gap. A nil HandleClientFn makes the mock t.Fatal
+	// the moment a message reaches the session, so each of these fails loudly
+	// if the check ever moves back behind the active-session branch.
+	midSession := map[string]*pb.ClientMessage{
+		"SubCommandAccept": acceptMsg(),
+		"SubCommandReject": {Type: &pb.ClientMessage_RejectMsg{RejectMsg: &pb.RejectMessage{
+			SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+			Reason:     "denied",
+			InfoMsgs:   oversizedInfo(),
+		}}},
+		"Alert": {Type: &pb.ClientMessage_AlertMsg{AlertMsg: &pb.AlertMessage{
+			AlertTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+			Reason:    "alert",
+			InfoMsgs:  oversizedInfo(),
+		}}},
+	}
+	for name, msg := range midSession {
+		t.Run("MidSession"+name, func(t *testing.T) {
+			h := newHandler(t, &mockSessionHandler{t: t})
+			_, err := h.processMessage(msg)
+			requireBoundsError(t, err)
+		})
 	}
 }
