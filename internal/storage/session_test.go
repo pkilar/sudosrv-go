@@ -5,6 +5,7 @@ package storage
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1875,6 +1876,28 @@ func TestIologEscapeParity(t *testing.T) {
 // OVERWRITES the post-resume data (matching C's iolog_seekto) when the point
 // aligns, and falls back to append (preserving the old, never-fail behavior)
 // when it does not.
+// snapshotDir reads every regular file in dir, keyed by name, so a test can
+// assert that a failed operation changed nothing.
+func snapshotDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read session dir: %v", err)
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		out[e.Name()] = string(data)
+	}
+	return out
+}
+
 func TestRestartResumeSeek(t *testing.T) {
 	newCfg := func(dir string) *config.LocalStorageConfig {
 		return &config.LocalStorageConfig{
@@ -2015,6 +2038,73 @@ func TestRestartResumeSeek(t *testing.T) {
 		if string(after) != string(before) {
 			t.Errorf("ttyout = %q, want %q unchanged: a restart that sends no data must not "+
 				"alter recorded bytes", after, before)
+		}
+	})
+
+	// A timing file that cannot be read or parsed is not a misaligned
+	// resume_point: there is no offset to seek to and no honest way to append,
+	// since the records already on disk describe something the server could
+	// not understand. Appending would leave a transcript sudoreplay walks off
+	// the end of, with nothing in the files saying why. C refuses every
+	// iolog_seekto failure (logsrvd/logsrvd_local.c:617-620, "unable to
+	// restart log") and so must this, which also means every stored byte is
+	// still there afterwards -- the point of the snapshot comparison below.
+	//
+	// Each timing file here is a VALID first record plus one corrupt second
+	// record, so the only thing wrong with it is the thing being tested; a
+	// wholesale garbage file would be refused whatever the classification.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
+	t.Run("CorruptTimingRefusesRestartAndTouchesNothing", func(t *testing.T) {
+		const validFirst = "1 0.000000 5\n"
+		corruptions := map[string]string{
+			"malformed record":    validFirst + "1\n",
+			"bad marker":          validFirst + "x 1.000000 5\n",
+			"bad delay":           validFirst + "1 notanumber 5\n",
+			"missing byte count":  validFirst + "1 1.000000\n",
+			"negative byte count": validFirst + "1 1.000000 -40\n",
+			"byte counts overflow": validFirst +
+				"1 1.000000 9223372036854775807\n1 2.000000 9223372036854775807\n",
+		}
+
+		for name, timing := range corruptions {
+			t.Run(name, func(t *testing.T) {
+				cfg := newCfg(t.TempDir())
+				logID, sessDir := seed(t, cfg)
+				if err := os.WriteFile(filepath.Join(sessDir, "timing"), []byte(timing), 0o600); err != nil {
+					t.Fatalf("write corrupt timing: %v", err)
+				}
+
+				before := snapshotDir(t, sessDir)
+
+				s2, err := NewRestartSession(&pb.RestartMessage{
+					LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1},
+				}, cfg)
+				if err == nil {
+					_ = s2.Close()
+					t.Fatal("NewRestartSession accepted a corrupt timing file, want a refusal")
+				}
+				// Not just "an error": a misaligned resume_point is a DIFFERENT
+				// outcome that legitimately succeeds in append mode, and this
+				// assertion would pass if corruption were ever reclassified
+				// into it.
+				if errors.Is(err, errResumePointMisaligned) {
+					t.Fatalf("corrupt timing was classified as a misaligned resume_point, "+
+						"which falls back to append instead of refusing: %v", err)
+				}
+
+				for name, want := range before {
+					got, ok := snapshotDir(t, sessDir)[name]
+					if !ok {
+						t.Errorf("%s disappeared during a refused restart", name)
+						continue
+					}
+					if got != want {
+						t.Errorf("%s changed during a refused restart: %q -> %q "+
+							"(a restart that was refused must not write a byte)", name, want, got)
+					}
+				}
+			})
 		}
 	})
 }
@@ -2200,5 +2290,283 @@ func TestLogSummaryFileInjection(t *testing.T) {
 	}
 	if strings.Contains(content, "\n/bin/innocent") {
 		t.Errorf("newline in command field survived sanitization:\n%s", content)
+	}
+}
+
+// TestIologEscapeValuesAreLiteral verifies that a value substituted for a
+// %{...} escape is never re-read by the strftime pass that follows it.
+//
+// The submituser arrives in the AcceptMessage, so it is entirely
+// client-controlled. Before upstream dd3e52b14 (and before the matching fix
+// here) C expanded %{user} first and then ran strftime over the result, so a
+// client calling itself "%H" got the hour as its directory name -- it could
+// pick a bucket it was never assigned, colliding with whatever a time-templated
+// path puts there. In C the same flaw re-introduced a '/' via "%D";
+// strftimeExpand refuses the slash-bearing codes, so only the misdirection
+// applies here, but the fix is the same one: double the '%' in each substituted
+// value and let the existing "%%" -> "%" collapse undo it.
+func TestIologEscapeValuesAreLiteral(t *testing.T) {
+	tests := []struct {
+		name       string
+		submitUser string
+		iologFile  string
+		wantFile   string
+	}{
+		{
+			name:       "time code in value stays literal",
+			submitUser: "%H",
+			iologFile:  "%{user}",
+			wantFile:   "%H",
+		},
+		{
+			name:       "year code in value stays literal",
+			submitUser: "%Y",
+			iologFile:  "%{user}",
+			wantFile:   "%Y",
+		},
+		{
+			name:       "trailing percent does not consume the next template byte",
+			submitUser: "x%",
+			iologFile:  "%{user}Y",
+			wantFile:   "x%Y",
+		},
+		{
+			name:       "double percent in value survives verbatim",
+			submitUser: "a%%b",
+			iologFile:  "%{user}",
+			wantFile:   "a%%b",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfg := &config.LocalStorageConfig{
+				LogDirectory:    tmpDir,
+				IologDir:        "%{LIVEDIR}",
+				IologFile:       tc.iologFile,
+				DirPermissions:  0o755,
+				FilePermissions: 0o644,
+			}
+			acceptMsg := &pb.AcceptMessage{
+				SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+				InfoMsgs: []*pb.InfoMessage{
+					{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: tc.submitUser}},
+					{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+					{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+				},
+			}
+
+			got, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
+			if err != nil {
+				t.Fatalf("buildSessionPath() failed: %v", err)
+			}
+			want := filepath.Join(tmpDir, tc.wantFile)
+			if got != want {
+				t.Errorf("buildSessionPath() with submituser %q and iolog_file %q\n got  %q\n want %q",
+					tc.submitUser, tc.iologFile, got, want)
+			}
+		})
+	}
+}
+
+// TestComputeResumeOffsetsRejectsBadByteCounts covers the two timing-file
+// guards C added in 2642dc5d2 and ce87ba7f0. A negative count would walk the
+// resume offset backwards and a wrapped sum would land it near zero; either way
+// the session seeks into the middle of the stored transcript and overwrites
+// bytes that are already there. Both must be reported as corruption, which the
+// restart path refuses rather than appending past.
+func TestComputeResumeOffsetsRejectsBadByteCounts(t *testing.T) {
+	tests := []struct {
+		name   string
+		timing string
+	}{
+		{
+			name:   "negative byte count",
+			timing: "1 0.000000 10\n1 1.000000 -40\n",
+		},
+		{
+			name:   "byte counts overflow int64",
+			timing: "1 0.000000 9223372036854775807\n1 1.000000 9223372036854775807\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "timing"), []byte(tc.timing), 0o600); err != nil {
+				t.Fatalf("write timing file: %v", err)
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatalf("OpenRoot: %v", err)
+			}
+			defer func() { _ = root.Close() }()
+
+			_, _, err = computeResumeOffsetsAt(root, "timing", time.Second)
+			if err == nil {
+				t.Fatal("expected an error for a timing file with an unusable byte count, got nil")
+			}
+			// Which error matters: errResumePointMisaligned is the one class
+			// the restart path continues past in append mode, so an unusable
+			// byte count must not be reported as that.
+			if errors.Is(err, errResumePointMisaligned) {
+				t.Fatalf("unusable byte count reported as a misaligned resume_point, "+
+					"which falls back to append instead of refusing: %v", err)
+			}
+		})
+	}
+}
+
+// TestExpandIologTemplate pins the full path-template pipeline -- the single
+// %{...} pass followed by the strftime pass -- against C's expand_iolog_path
+// (lib/iolog/iolog_path.c:88-175, post-dd3e52b14).
+//
+// The expectations are the FINAL path text, so each case reads as what an
+// operator would see on disk. The clock is fixed so the date codes are
+// deterministic.
+func TestExpandIologTemplate(t *testing.T) {
+	clock := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		template string
+		values   map[string]string
+		want     string
+	}{
+		// Ordinary substitution.
+		{
+			name:     "known escape expands",
+			template: "%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "alice",
+		},
+		{
+			name:     "bare strftime code still expands",
+			template: "%Y-%m-%d",
+			want:     "2026-03-04",
+		},
+
+		// "%%" guards the brace form: this is the case the Replacer got wrong.
+		{
+			name:     "escaped percent before a brace is not an escape",
+			template: "%%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{user}",
+		},
+		{
+			name:     "escaped percent before a time code stays literal",
+			template: "%%Y",
+			want:     "%Y",
+		},
+		{
+			name:     "escaped percent then a real escape",
+			template: "%%%{user}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%alice",
+		},
+
+		// A substituted value is never re-read (upstream dd3e52b14).
+		{
+			name:     "time code in a value stays literal",
+			template: "%{user}",
+			values:   map[string]string{"user": "%H"},
+			want:     "%H",
+		},
+		{
+			name:     "trailing percent in a value cannot consume the next byte",
+			template: "%{user}Y",
+			values:   map[string]string{"user": "x%"},
+			want:     "x%Y",
+		},
+		{
+			name:     "double percent in a value survives verbatim",
+			template: "%{user}",
+			values:   map[string]string{"user": "a%%b"},
+			want:     "a%%b",
+		},
+		{
+			name:     "trailing percent in a value is kept",
+			template: "%{user}",
+			values:   map[string]string{"user": "100%"},
+			want:     "100%",
+		},
+
+		// Fall-through cases: C leaves the '%' literal and copies the braces.
+		{
+			name:     "unknown escape is left alone",
+			template: "%{bogus}",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{bogus}",
+		},
+		{
+			name:     "unterminated brace is left alone",
+			template: "%{user",
+			values:   map[string]string{"user": "alice"},
+			want:     "%{user",
+		},
+		{
+			name:     "empty escape name is unknown",
+			template: "%{}",
+			want:     "%{}",
+		},
+		{
+			name:     "trailing percent in the template is kept",
+			template: "logs%",
+			want:     "logs%",
+		},
+
+		// Name lookup is exact, so overlapping escapes cannot shadow each other.
+		{
+			name:     "command and command_path do not shadow each other",
+			template: "%{command}|%{command_path}",
+			values:   map[string]string{"command": "ls", "command_path": "/bin/ls"},
+			want:     "ls|/bin/ls",
+		},
+		{
+			name:     "no percent at all is passed straight through",
+			template: "/var/log/sudo-io",
+			want:     "/var/log/sudo-io",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strftimeExpand(expandIologTemplate(tc.template, tc.values), clock)
+			if got != tc.want {
+				t.Errorf("expand(%q)\n got  %q\n want %q", tc.template, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildSessionPathEscapedBraceIsLiteral is the end-to-end form of the
+// "%%{user}" case: an operator who writes "%%{user}" in iolog_file wants a
+// directory literally named "%{user}", not the client's user name.
+func TestBuildSessionPathEscapedBraceIsLiteral(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.LocalStorageConfig{
+		LogDirectory:    tmpDir,
+		IologDir:        "%{LIVEDIR}",
+		IologFile:       "%%{user}",
+		DirPermissions:  0o755,
+		FilePermissions: 0o644,
+	}
+	acceptMsg := &pb.AcceptMessage{
+		SubmitTime: &pb.TimeSpec{TvSec: time.Now().Unix()},
+		InfoMsgs: []*pb.InfoMessage{
+			{Key: "submituser", Value: &pb.InfoMessage_Strval{Strval: "alice"}},
+			{Key: "runuser", Value: &pb.InfoMessage_Strval{Strval: "root"}},
+			{Key: "command", Value: &pb.InfoMessage_Strval{Strval: "/bin/ls"}},
+		},
+	}
+
+	got, err := buildSessionPath(uuid.NewV4(), cfg, acceptMsg)
+	if err != nil {
+		t.Fatalf("buildSessionPath() failed: %v", err)
+	}
+	want := filepath.Join(tmpDir, "%{user}")
+	if got != want {
+		t.Errorf("buildSessionPath()\n got  %q\n want %q", got, want)
 	}
 }

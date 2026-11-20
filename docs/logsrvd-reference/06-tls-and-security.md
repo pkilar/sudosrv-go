@@ -153,8 +153,9 @@ Two disagreements were found while reading the source. The C code wins.
    fails to start. See TLS-026.
 2. The relay-side identity check reads `SSL_get_ex_data(ssl, 1)` as a
    `struct connection_closure *`, but for relay connections that slot holds a
-   `struct peer_info *`. See TLS-028 — this looks like an upstream bug, and it means the
-   documented relay host-name check does not do what the manual describes.
+   `struct peer_info *`. See TLS-028 — an upstream bug through 1.9.18, fixed in
+   `1633d1178`; before that the documented relay host-name check did not do what the
+   manual describes.
 
 ## Requirements
 
@@ -402,8 +403,17 @@ with a NULL name, which means only the IP address can match (TLS-019, TLS-021). 
 IP itself is always recorded, from `inet_ntop()` on the accepted `sockaddr`; a socket
 family that is neither `AF_INET` nor `AF_INET6` is rejected with `EAFNOSUPPORT`.
 
-Note that the resolved name is *not* re-validated by a forward lookup, so identity
-ultimately rests on the certificate matching either the PTR name or the literal IP.
+Through sudo 1.9.18 the resolved name was *not* re-validated by a forward lookup, so a
+client holding a certificate for host X could present it from any address whose PTR record
+said X — and the PTR record belongs to the reverse-zone owner, not the certificate owner.
+Upstream `8fe928fb9` added `name_resolves_to_peer()`: the PTR name is resolved forward and
+discarded unless one of the returned addresses is the peer's, which leaves only the literal
+IP to match. `d58e85d86` then dropped a redundant `ai_socktype` hint from that lookup.
+
+This server does not implement `tls_checkhost` at all (it performs no reverse lookup and
+no peer name matching, only chain verification via `RequireAndVerifyClientCert`), so the
+spoofing vector does not exist here. If `tls_checkhost` is ever added, the
+forward-confirmation step is mandatory, not optional.
 
 ### TLS-018 — Identity matching follows RFC 6125 §6.4.4: SAN first, CN only if no SAN extension exists
 
@@ -547,7 +557,7 @@ handshake regardless of whether the upstream certificate chains to a trusted CA 
 the configured relay host name. Enabling upstream verification requires explicitly setting
 `tls_checkpeer = true` in `[relay]` (or in `[server]`, which the relay inherits).
 
-### TLS-028 — When relay peer verification *is* enabled, the identity check reads mistyped ex_data (apparent upstream bug)
+### TLS-028 — Relay peer verification read mistyped ex_data through 1.9.18 (upstream bug, since fixed)
 
 - **C source:** `logsrvd/logsrvd.c:1413-1425`, `logsrvd/logsrvd.c:1463-1468`, `logsrvd/tls_client.c:210-215`, `logsrvd/logsrv_util.h:38-45`, `logsrvd/logsrvd.h:89-127`
 - **Severity if divergent:** informational
@@ -570,6 +580,10 @@ sibling callback in `tls_client.c:55-103` — which correctly interprets slot 1 
 `struct peer_info *` and is the one `tls_client_setup()` installs — is never reached by
 `sudo_logsrvd`, because the daemon calls `tls_ctx_client_setup()` directly
 (`logsrvd_relay.c:312`) and installs its own callback.
+
+Upstream `1633d1178` fixed this: `set_tls_verify_peer()` now installs the `peer_info`
+callback for relay contexts, so the slot-1 type matches what `tls_ctx_client_setup()` put
+there and the relay host-name check does what the manual describes.
 
 This requirement records the C behavior for fidelity, not as something to reproduce. A
 reimplementation should verify the upstream certificate against the configured relay host

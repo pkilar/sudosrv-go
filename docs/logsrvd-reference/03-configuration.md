@@ -1079,3 +1079,28 @@ one stays active, but the process-global syslog facility has already been switch
 rejected configuration's value. This is a small ordering artifact rather than a contract;
 it is recorded so a reimplementation that performs all validation up front is not marked
 divergent for being stricter.
+
+### CONF-069 — The `submituser` prefix on `sudo`-format records is control-char escaped, and the syslog budget uses the escaped length
+
+- **C source:** `lib/eventlog/eventlog.c:72-92` (`escape_cntrl`), `lib/eventlog/eventlog.c:1051-1115` (`do_syslog_sudo`), `lib/eventlog/eventlog.c:1215-1280` (`do_logfile_sudo`)
+- **Severity if divergent:** high
+
+`sudo`-format records are assembled in two pieces: `new_logline()` builds the
+`KEY=value; ...` body and escapes control characters in every field it touches, while the
+`submituser` is pasted on separately as a prefix — `"%8s : "` for syslog,
+`"<time> : <user> : "` for a logfile. Through sudo 1.9.18 that prefix used the raw value,
+so the one field a client fully controls was the one field that was never escaped: a
+`submituser` containing a newline appended a second, syntactically complete audit record
+that a log reader cannot distinguish from a real one.
+
+Upstream `e6f482a8d` escapes it with the same `LBUF_ESC_CNTRL` that `new_logline()` uses
+(control characters become octal `#0nn`). Two details matter for a reimplementation:
+
+1. The escaping MUST be applied for both the syslog and logfile destinations.
+2. The syslog split budget MUST be computed from the **escaped** length
+   (`maxlen - (strlen(fmt) - 5 + strlen(escaped_submituser))`). Escaping after the budget
+   is computed pushes every emitted part over `maxlen` (CONF-061).
+
+The JSON formats are unaffected in C, because their records carry no `submituser` prefix
+at all — `do_syslog_json()` emits `@cee:{"sudo":{...}}` and `do_logfile_json()` writes the
+bare object.

@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -222,6 +223,70 @@ func (s *Session) logSummaryCommand(command string) string {
 		for _, arg := range argv[min(1, len(argv)):] {
 			b.WriteByte(' ')
 			b.WriteString(sanitizeLogSummaryField(arg, false))
+		}
+	}
+	return b.String()
+}
+
+// expandIologTemplate substitutes the sudoers-style "%{name}" escapes in a
+// single left-to-right pass over the template, reproducing the scan loop of C's
+// expand_iolog_path (lib/iolog/iolog_path.c:88-126). A single pass is the whole
+// point: nothing it writes is ever re-read, so a substituted value cannot be
+// mistaken for a template construct.
+//
+// Four cases, and the order they are tested in is what makes the semantics
+// match C:
+//
+//  1. "%{name}" with a known name expands to its value, with every "%" in that
+//     value DOUBLED so the strftimeExpand pass that follows reads it as a
+//     literal. Without the doubling a client-supplied submituser of "%H" would
+//     become the hour (upstream dd3e52b14, escape_percent()).
+//  2. "%%" is copied through as "%%", not collapsed here. The single collapse
+//     happens in strftimeExpand, exactly as C defers it to strftime (or to its
+//     own collapse loop when no strftime pass is needed). Consuming BOTH bytes
+//     here is also what keeps "%%{user}" from being read as "%" followed by
+//     "%{user}": it yields a literal "%{user}", as C does.
+//  3. An unknown "%{name}", or a "%{" with no closing brace, leaves the "%"
+//     literal and lets the braces be copied as ordinary characters -- C's
+//     fall-through when no escape matches.
+//  4. Any other "%X" is left alone for strftimeExpand to interpret.
+//
+// Values are looked up by the bare name, so there is no longest-match ordering
+// hazard between overlapping escapes such as %{command} and %{command_path}.
+func expandIologTemplate(template string, values map[string]string) string {
+	if !strings.ContainsRune(template, '%') {
+		return template
+	}
+	var b strings.Builder
+	b.Grow(len(template))
+	for i := 0; i < len(template); {
+		if template[i] != '%' || i+1 >= len(template) {
+			b.WriteByte(template[i])
+			i++
+			continue
+		}
+		switch template[i+1] {
+		case '%':
+			b.WriteString("%%")
+			i += 2
+		case '{':
+			end := strings.IndexByte(template[i+2:], '}')
+			if end < 0 {
+				b.WriteByte('%') // unterminated: the '%' is literal
+				i++
+				continue
+			}
+			value, known := values[template[i+2:i+2+end]]
+			if !known {
+				b.WriteByte('%') // unknown escape: the '%' is literal
+				i++
+				continue
+			}
+			b.WriteString(strings.ReplaceAll(value, "%", "%%"))
+			i += end + 3 // past "%{", the name, and "}"
+		default:
+			b.WriteByte('%') // a bare strftime code; leave it for strftimeExpand
+			i++
 		}
 	}
 	return b.String()
@@ -821,49 +886,52 @@ func buildSessionPath(sessionUUID uuid.UUID, cfg *config.LocalStorageConfig, acc
 	now := time.Now()
 	epochStr := strconv.FormatInt(now.Unix(), 10)
 
-	// Replacer for sudoers-style escape sequences.
+	// Values for the sudoers-style %{...} escapes.
 	// User-controlled values are sanitized ("/" -> "_") to prevent traversal,
 	// matching C sudo_logsrvd's strlcpy_no_slash() behavior.
 	runuser := sanitizePathComponent(infoMap["runuser"])
 	rungroup := sanitizePathComponent(infoMap["rungroup"])
-	replacer := strings.NewReplacer(
+	escapes := map[string]string{
 		// User/Group escapes (sanitized — user-controlled)
-		"%{user}", sanitizePathComponent(infoMap["submituser"]),
-		"%{uid}", sanitizePathComponent(infoMap["submituid"]),
-		"%{group}", sanitizePathComponent(infoMap["submitgroup"]),
-		"%{gid}", sanitizePathComponent(infoMap["submitgid"]),
-		"%{runuser}", runuser,
-		"%{runuid}", sanitizePathComponent(infoMap["runuid"]),
-		"%{rungroup}", rungroup,
-		"%{rungid}", sanitizePathComponent(infoMap["rungid"]),
+		"user":  sanitizePathComponent(infoMap["submituser"]),
+		"uid":   sanitizePathComponent(infoMap["submituid"]),
+		"group": sanitizePathComponent(infoMap["submitgroup"]),
+		"gid":   sanitizePathComponent(infoMap["submitgid"]),
+
+		"runuser":  runuser,
+		"runuid":   sanitizePathComponent(infoMap["runuid"]),
+		"rungroup": rungroup,
+		"rungid":   sanitizePathComponent(infoMap["rungid"]),
 		// Canonical sudo names for the run-as identity (lib/iolog/iolog_path.c:
 		// fill_runas_user / fill_runas_group). Aliased to the same values so a
 		// template copied from a C sudoers config expands identically.
-		"%{runas_user}", runuser,
-		"%{runas_group}", rungroup,
-		// Host/Command escapes (sanitized — user-controlled)
-		"%{hostname}", sanitizePathComponent(infoMap["submithost"]),
-		"%{command_path}", sanitizePathComponent(infoMap["command"]),
-		"%{command}", sanitizePathComponent(filepath.Base(infoMap["command"])),
-		// Sequence and Random escapes (server-generated, safe)
-		"%{seq}", seq,
-		"%{rand}", randStr,
-		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
-		"%{year}", fmt.Sprintf("%04d", now.Year()),
-		"%{month}", fmt.Sprintf("%02d", now.Month()),
-		"%{day}", fmt.Sprintf("%02d", now.Day()),
-		"%{hour}", fmt.Sprintf("%02d", now.Hour()),
-		"%{minute}", fmt.Sprintf("%02d", now.Minute()),
-		"%{second}", fmt.Sprintf("%02d", now.Second()),
-		"%{epoch}", epochStr,
-		// Path escapes
-		"%{LIVEDIR}", cfg.LogDirectory,
-		// NOTE: literal "%%" and bare strftime "%X" codes are handled by
-		// strftimeExpand below (after brace expansion), matching C's model.
-	)
+		"runas_user":  runuser,
+		"runas_group": rungroup,
 
-	iologDir := replacer.Replace(cfg.IologDir)
-	iologFile := replacer.Replace(cfg.IologFile)
+		// Host/Command escapes (sanitized — user-controlled)
+		"hostname":     sanitizePathComponent(infoMap["submithost"]),
+		"command_path": sanitizePathComponent(infoMap["command"]),
+		"command":      sanitizePathComponent(filepath.Base(infoMap["command"])),
+
+		// Sequence and Random escapes (server-generated, safe)
+		"seq":  seq,
+		"rand": randStr,
+
+		// Time/Date escapes (server-generated, safe) — Go brace-style extensions
+		"year":   fmt.Sprintf("%04d", now.Year()),
+		"month":  fmt.Sprintf("%02d", now.Month()),
+		"day":    fmt.Sprintf("%02d", now.Day()),
+		"hour":   fmt.Sprintf("%02d", now.Hour()),
+		"minute": fmt.Sprintf("%02d", now.Minute()),
+		"second": fmt.Sprintf("%02d", now.Second()),
+		"epoch":  epochStr,
+
+		// Path escapes
+		"LIVEDIR": cfg.LogDirectory,
+	}
+
+	iologDir := expandIologTemplate(cfg.IologDir, escapes)
+	iologFile := expandIologTemplate(cfg.IologFile, escapes)
 
 	// After %{...} expansion, apply C-style strftime over the path for bare
 	// "%X" date/time codes and to collapse "%%" -> "%". C sudo runs strftime on
@@ -1641,14 +1709,26 @@ func parseTimingDelay(s string) (time.Duration, error) {
 	return time.Duration(sec)*time.Second + time.Duration(nsec)*time.Nanosecond, nil
 }
 
+// errResumePointMisaligned marks the ONE class of computeResumeOffsetsAt
+// failure a caller may fall back to append mode on: the stored timing is
+// complete and parses cleanly, the client's resume_point simply does not land
+// on a record boundary. Every other failure means the timing file could not be
+// read or understood, so the offsets it would have produced are unknown -- and
+// appending to a log whose records describe something else is not a safe
+// degradation, it is a corrupt transcript with no warning attached to the
+// bytes. Callers refuse the restart on those, as C does for every iolog_seekto
+// failure (logsrvd/logsrvd_local.c:617-620, "unable to restart log").
+var errResumePointMisaligned = errors.New("resume_point does not align with stored timing")
+
 // computeResumeOffsets replays the timing file to find the byte offset at which a
 // restart should resume so resent I/O OVERWRITES (not duplicates) everything
 // recorded after target. It mirrors C sudo's iolog_seekto: each record's delay
 // is accumulated and each stream's offset advanced by the record's byte count
 // until the cumulative elapsed time equals target. An exact match is required —
 // an overshoot or hitting EOF first means resume_point does not align with the
-// stored log (same condition C treats as an error), reported via the error so
-// the caller can fall back to append mode. A zero target resumes at the start.
+// stored log (same condition C treats as an error) and is reported wrapped in
+// errResumePointMisaligned, which is the only failure the caller may continue
+// past. A zero target resumes at the start.
 func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (int64, map[string]int64, error) {
 	streamOffsets := make(map[string]int64)
 	if target <= 0 {
@@ -1695,21 +1775,33 @@ func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (i
 			if len(fields) < 3 {
 				return 0, nil, fmt.Errorf("I/O timing record missing byte count: %q", line)
 			}
-			nbytes, err := strconv.ParseInt(fields[2], 10, 64)
+			// ParseUint, not ParseInt: a byte count is never negative, and a
+			// negative one would drive the resume offset backwards (or cancel
+			// out a later record) so the session resumes mid-transcript and
+			// overwrites bytes already stored. The running sum is checked for
+			// overflow for the same reason -- a wrapped sum is a small positive
+			// offset that silently truncates the stream. C rejects both with
+			// EOVERFLOW (upstream 2642dc5d2, ce87ba7f0); the timing file is
+			// ours, so this only bites on corruption or tampering; the caller
+			// refuses the restart rather than seeking blind.
+			nbytes, err := strconv.ParseUint(fields[2], 10, 63)
 			if err != nil {
 				return 0, nil, fmt.Errorf("bad timing byte count %q: %w", fields[2], err)
 			}
-			streamOffsets[stream] += nbytes
+			if int64(nbytes) > math.MaxInt64-streamOffsets[stream] {
+				return 0, nil, fmt.Errorf("timing byte counts for %s overflow at record %q", stream, line)
+			}
+			streamOffsets[stream] += int64(nbytes)
 		}
 
 		if elapsed >= target {
 			if elapsed == target {
 				return timingOffset, streamOffsets, nil
 			}
-			return 0, nil, fmt.Errorf("resume_point %v overshoots stored timing (nearest boundary %v)", target, elapsed)
+			return 0, nil, fmt.Errorf("%w: %v overshoots stored timing (nearest boundary %v)", errResumePointMisaligned, target, elapsed)
 		}
 	}
-	return 0, nil, fmt.Errorf("resume_point %v is beyond the end of the stored timing", target)
+	return 0, nil, fmt.Errorf("%w: %v is beyond the end of the stored timing", errResumePointMisaligned, target)
 }
 
 // openForRestartAt opens an existing session file for a restart. When seek is
@@ -1815,14 +1907,32 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	// Determine where to resume. C sudo's iolog_seekto (logsrvd/logsrv_util.c)
 	// replays the timing file to find the byte offset of resume_point in each
 	// stream, then OVERWRITES everything after it so resent I/O is not
-	// duplicated. We do the same: compute the offsets, then truncate+seek each
-	// file to its resume position. If resume_point does not align with the
+	// duplicated. We do the same: compute the offsets, then seek each file to
+	// its resume position.
+	//
+	// Two failures, two answers. A resume_point that does not align with the
 	// stored timing (overshoot or past EOF — e.g. an older client that sent
-	// per-stream commit points), fall back to append mode rather than failing
-	// the restart, logging a warning so the divergence is visible.
+	// per-stream commit points) falls back to append mode rather than failing
+	// the restart: the stored records are intact, so the worst case is a
+	// duplicated overlap region, and a warning makes the divergence visible.
+	// That fallback is itself a deliberate divergence — C fails here too.
+	//
+	// A timing file we cannot read or parse is NOT that case. Its offsets are
+	// unknown, so appending writes new records onto a transcript whose
+	// existing records describe something else, and nothing in the resulting
+	// files says so — sudoreplay is driven by exactly the file we just failed
+	// to understand. There is no degraded mode worth having, so refuse the
+	// restart as C does for every iolog_seekto failure
+	// (logsrvd/logsrvd_local.c:617-620). Refusing also leaves every stored
+	// byte untouched, since nothing is opened for writing below.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
 	rp := restartMsg.GetResumePoint()
 	resumeDur := time.Duration(rp.GetTvSec())*time.Second + time.Duration(rp.GetTvNsec())*time.Nanosecond
 	timingOffset, streamOffsets, seekErr := computeResumeOffsetsAt(root, fileTiming, resumeDur)
+	if seekErr != nil && !errors.Is(seekErr, errResumePointMisaligned) {
+		return nil, fmt.Errorf("cannot restart %s: %w", restartMsg.GetLogId(), seekErr)
+	}
 	useSeek := seekErr == nil
 	if seekErr != nil && resumeDur > 0 {
 		slog.Warn("Restart resume_point does not align with stored timing; appending instead of seeking (overlap region may be duplicated)",

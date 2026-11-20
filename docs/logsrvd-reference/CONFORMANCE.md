@@ -9,13 +9,13 @@
 | Subsystem | Reqs | MATCH | INTENTIONAL | PARTIAL | DIVERGENT | ABSENT | NA |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | [Daemon Architecture & Connection Lifecycle](01-architecture.md) | 45 | 14 | 1 | 17 | 5 | 6 | 2 |
-| [Wire Protocol & Message State Machine](02-protocol.md) | 53 | 22 | 2 | 21 | 5 | 1 | 2 |
-| [Configuration Surface & Defaults](03-configuration.md) | 68 | 19 | 14 | 10 | 7 | 13 | 5 |
+| [Wire Protocol & Message State Machine](02-protocol.md) | 54 | 23 | 2 | 21 | 5 | 1 | 2 |
+| [Configuration Surface & Defaults](03-configuration.md) | 69 | 20 | 14 | 10 | 7 | 13 | 5 |
 | [Local I/O Log Storage Format](04-local-storage.md) | 51 | 23 | 1 | 14 | 10 | 3 | 0 |
 | [Relay Mode & Store-and-Forward](05-relay.md) | 54 | 26 | 7 | 8 | 6 | 2 | 5 |
 | [TLS, Authentication & Security Posture](06-tls-and-security.md) | 41 | 12 | 2 | 15 | 3 | 8 | 1 |
 | [Producer-Side Recording & Timing](07-producer.md) | 8 | 7 | 0 | 0 | 1 | 0 | 0 |
-| **Total** | **320** | **123** | **27** | **85** | **37** | **33** | **15** |
+| **Total** | **322** | **125** | **27** | **85** | **37** | **33** | **15** |
 
 Severity of the 182 requirements that are not `MATCH`/`NA`:
 
@@ -110,7 +110,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-019` | RejectMessage requires `submit_time`, a non-empty `reason`,… | PARTIAL | low | `internal/connection/handler.go:382-385,614-667` | A content-free RejectMessage is persisted as a log.json audit record instead of being refused; audit noise only, and no shipped client sends one. |
 | `PROTO-020` | An event-only Accept (`expect_iobufs = false`) never produc… | DIVERGENT | informational | `internal/relay/session.go:581-586; internal/connection/hand…` | none observable — the extra message is written into a socket the client has stopped reading and is discarded when the client closes. |
 | `PROTO-021` | RestartMessage is valid only in `INITIAL` and requires a no… | PARTIAL | low | `internal/connection/handler.go:386-388,670-710; internal/st…` | A negative or out-of-range resume_point that C refuses instead resumes at offset 0 and overwrites forward as new data arrives — the same behaviour C's own {0,0} special case has (logsrv_uti… |
-| `PROTO-022` | A failed restart sends an `error` and closes; a successful… | DIVERGENT | low | `internal/connection/handler.go:673-676,691-694; internal/co…` | Diagnosability only, and only for sudo_sendlog -R since production sudo never sends RestartMessage. |
+| `PROTO-022` | A failed restart sends an `error` and closes; a successful… | DIVERGENT | low | `internal/connection/handler.go:673-676,691-694; internal/co…` | Diagnosability only, and only for sudo_sendlog -R since production sudo never sends RestartMessage: every handleRestart failure path returns an error and the caller sends one generic 'Inter… |
 | `PROTO-023` | Restart `log_id` decoding: 16-byte UUID prefix, path with n… | PARTIAL | low | `internal/storage/session.go:1366-1380,1508-1567,446,1035` | A C sudo_logsrvd pointed at a Go-written iolog tree refuses to restart those sessions ("unable to restart log"); sudoreplay never reads the uuid file so replay is unaffected. |
 | `PROTO-024` | A restart of a completed log is refused; completion is sign… | PARTIAL | low | `internal/storage/session.go:1710,1560-1567` | With file_permissions tightened to 0600 the completed timing file becomes group-readable (0440) instead of 0400 — a small permission widening of a file that holds only byte counts and delay… |
 | `PROTO-025` | `resume_point` must land exactly on a timing-record boundary | INTENTIONAL | low | `internal/storage/session.go:1403-1472,1574-1589` | A misaligned resume_point duplicates the overlap span in the transcript so sudoreplay replays those records twice, where C errors and drops the connection. Reachable only via sudo_sendlog -… |
@@ -142,6 +142,7 @@ Spec: [`02-protocol.md`](02-protocol.md)
 | `PROTO-051` | On shutdown, I/O-logging connections get one last commit po… | ABSENT | low | `internal/server/server.go:278-340; internal/connection/hand…` | An active I/O session is dropped with no last commit point and shutdown takes the full 30s. For a real sudo client the end result is the same either way — C's commit point is immediately fo… |
 | `PROTO-052` | `InfoMessage` values may be int64, string, string list, or… | PARTIAL | low | `internal/protocol/infomsg.go:19-39; internal/storage/sessio…` | An InfoMessage carrying an int64 list vanishes from log.json where C would record it; forward-compatibility gap only, plus a Debug-level skip where C warns "protocol error: NULL value found… |
 | `PROTO-053` | `TimeSpec.tv_sec` is int64 and `tv_nsec` is int32 | MATCH | none | `pkg/sudosrv_proto/sudo_logsrv.proto:42-45; internal/storage…` | — |
+| `PROTO-054` | `AcceptMessage`, `RejectMessage` and `AlertMessage` info va… | MATCH | none | `internal/connection/handler.go:468,956-990` | — |
 
 ### Configuration Surface & Defaults
 
@@ -217,6 +218,7 @@ Spec: [`03-configuration.md`](03-configuration.md)
 | `CONF-066` | `maxseq` clamps out-of-range values instead of rejecting th… | PARTIAL | low | `internal/storage/session.go:752-842` | Unreachable in practice at 2.18 billion sessions; refusing is the safer outcome. No knob to clamp, and nothing to clamp. |
 | `CONF-067` | Configuration values are pushed into the shared iolog/event… | NA | none | `internal/server/server.go:345-380` | The spec records this as an internal structuring concern with no external contract. Go has no shared iolog/eventlog library holding process-global state: configuration is a value passed to… |
 | `CONF-068` | A failed apply can still leave the syslog facility changed | NA | none | `internal/server/server.go:345-362` | The spec records this as an ordering artifact and states that an implementation validating up front should not be marked divergent. reload() does exactly that: LoadConfigRequired, then conf… |
+| `CONF-069` | The `submituser` prefix on `sudo`-format records is control… | MATCH | none | `internal/eventlog/eventlog.go:209 (escapeControl applied be…` | — |
 
 ### Local I/O Log Storage Format
 
@@ -229,7 +231,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-003` | `%{seq}` is not available in `iolog_dir` | DIVERGENT | low | `internal/storage/session.go:676-677` | A config with %{seq} in iolog_dir yields an XX/XX/XX hierarchy in the directory portion here and a directory literally named '%{seq}' on sudo_logsrvd. Config-portability only; no client-vis… |
 | `IOLOG-004` | Escape substitutions replace `/` with `_` | MATCH | none | `internal/storage/session.go:178-180,638-658` | — |
 | `IOLOG-005` | `%{command}` expands to the command's base name | MATCH | none | `internal/storage/session.go:658` | — |
-| `IOLOG-006` | Remaining `%` sequences are passed to `strftime(3)`; `%%` c… | PARTIAL | low | `internal/storage/session.go:208-271,683-684` | Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable - the operat… |
+| `IOLOG-006` | Remaining `%` sequences are passed to `strftime(3)`; `%%` c… | PARTIAL | low | `internal/storage/session.go:208-271,683-684` | Real but self-announcing and non-destructive: iolog_dir '/var/log/sudo-io/%F' creates a directory literally named '%F'. Logs are still written, still complete, still replayable. strftimeExp… |
 | `IOLOG-007` | Leading duplicate slashes collapse; trailing slashes are tr… | MATCH | none | `internal/storage/session.go:694` | — |
 | `IOLOG-008` | Both expanded components are rejected if they contain a `..… | MATCH | none | `internal/storage/session.go:293-300,690-692` | — |
 | `IOLOG-009` | A path ending in `XXXXXX` is created with `mkdtemp(3)` sema… | MATCH | none | `internal/storage/session.go` | — |
@@ -268,7 +270,7 @@ Spec: [`04-local-storage.md`](04-local-storage.md)
 | `IOLOG-042` | `log_id` is base64 of the 16-byte UUID concatenated with th… | PARTIAL | low | `internal/storage/session.go:315-340,350-351,1366-1380` | No amplification: an empty-path log_id resolves to log_directory itself, which then fails the uuid check; a NUL-bearing path fails the os.Stat. Only sendlog or a hand-rolled client reaches… |
 | `IOLOG-043` | Restart verifies the decoded UUID against the session's `uu… | PARTIAL | low | `internal/storage/session.go:1551-1558` | none beyond IOLOG-020's mixed-tree case. The security-relevant half (a caller cannot resume a directory whose UUID it does not already hold) is intact. |
 | `IOLOG-044` | A completed log cannot be restarted | MATCH | none | `internal/storage/session.go:1561-1567` | — |
-| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | PARTIAL | low | `internal/storage/session.go:1411-1505,1582-1624` | Only the overshoot/EOF fallback diverges: Go logs a warning and appends instead of failing the restart (1585-1589), so the overlap region is duplicated in both the stream and the timing fil… |
+| `IOLOG-045` | Uncompressed resume seeks; it does not truncate; the resume… | PARTIAL | low | `internal/storage/session.go:1721-1838,1911-1943` | Only the overshoot/EOF case diverges: a resume_point that does not land on a record boundary is wrapped in errResumePointMisaligned (1721), and NewRestartSession logs a warning and appends… |
 | `IOLOG-046` | Compressed logs are resumed by rewriting prefixes through a… | INTENTIONAL | low | `internal/storage/session.go:1569-1572` | A sendlog- or relay-originated RestartMessage against a compressed tree gets 'Internal Server Error' and a dropped connection. Unreachable from the production client. |
 | `IOLOG-047` | Restart does not rewrite `log`/`log.json`, but does finaliz… | PARTIAL | low | `internal/storage/session.go:1600-1604,1652-1666,1673-1712` | C leaves log.json byte-identical across a restart; Go does not. 'restarts' is an unknown key that eventlog_json_parse tolerates. Restart-path only. |
 | `IOLOG-048` | An aborted session leaves its files in place, writable and… | MATCH | none | `internal/storage/session.go:1720-1765; internal/connection/…` | — |
@@ -370,7 +372,7 @@ Spec: [`06-tls-and-security.md`](06-tls-and-security.md)
 | `TLS-025` | Relay TLS settings inherit from `[server]` on a per-key bas… | MATCH | none | `internal/config/config.go RelayTLS*File` | — |
 | `TLS-026` | `tls_checkhost` is not a recognised `[relay]` key, despite… | DIVERGENT | low | `internal/config/config.go:179-189` | Any misspelled or pasted-from-sudo_logsrvd.conf key ('tls_skip_verifyy', 'tls_checkhost', 'tls_cacert') is accepted with no diagnostic and has no effect, so an operator who believes a secur… |
 | `TLS-027` | The relay does not verify the upstream certificate by defau… | INTENTIONAL | low | `internal/config/config.go:83-99; internal/relay/session.go:…` | Deliberate and stricter than C: an upstream with a self-signed or private-CA certificate that sudo_logsrvd would accept is refused on every dial. Rationale at internal/config/config.go:83-9… |
-| `TLS-028` | When relay peer verification *is* enabled, the identity che… | MATCH | none | `internal/relay/session.go:965-972` | — |
+| `TLS-028` | Relay peer verification read mistyped ex_data through 1.9.1… | MATCH | none | `internal/relay/session.go:965-972` | — |
 | `TLS-029` | A TLS 1.3 upstream rejecting our client certificate surface… | ABSENT | low | `internal/relay/session.go:930-957, internal/relay/session.g…` | A persistent upstream certificate rejection is invisible to sudo — the client reports success while transcripts accumulate in relay_cache_directory. Bounded by the require_upstream opt-in,… |
 | `TLS-030` | `SSL_shutdown()` is attempted before the socket is closed,… | MATCH | none | `internal/connection/handler.go:181-183, internal/protocol/p…` | — |
 | `TLS-031` | No SNI, ALPN, session-id context, renegotiation control, or… | PARTIAL | informational | `internal/server/server.go:100-103, internal/relay/session.g…` | An SNI-routing or SNI-enforcing upstream sees a server_name it would not see from sudo_logsrvd. No protocol contract is broken and neither side depends on resumption. |

@@ -307,3 +307,66 @@ func TestConfigureReplacesPreviousSink(t *testing.T) {
 		t.Errorf("event did not reach the new destination, got %q", secondData)
 	}
 }
+
+// TestFileSinkEscapesSubmitUser pins upstream e6f482a8d. The submituser comes
+// from the client's AcceptMessage and both sinks paste it in as a bare prefix,
+// so an unescaped newline in it forges a second, complete audit record that a
+// log reader cannot tell from a real one. C escapes it with the same
+// LBUF_ESC_CNTRL that new_logline applies to every other field.
+func TestFileSinkEscapesSubmitUser(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "sudo.log")
+
+	l := &Logger{}
+	if err := l.Configure(Settings{
+		Type:     TypeLogfile,
+		Format:   FormatSudo,
+		FilePath: path,
+		FileMode: 0600,
+	}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	e := sampleEvent()
+	// A forged record appended to the real user name.
+	e.SubmitUser = "alice\nJan  1 00:00:00 : root : TTY=pts/0 ; USER=root ; COMMAND=/bin/true"
+	l.Log(e)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("one event must produce exactly one record, got %d newlines:\n%s", n, got)
+	}
+	if !strings.Contains(got, `alice#012Jan`) {
+		t.Errorf("newline in submituser must be escaped as #012, got: %q", got)
+	}
+}
+
+// TestSplitSyslogLineBudgetsEscapedUser is the other half of e6f482a8d: C
+// subtracts the length of the ESCAPED submituser from syslog_maxlen, so the
+// assembled message still fits. Escaping after the budget was computed would
+// push every part over the limit.
+func TestSplitSyslogLineBudgetsEscapedUser(t *testing.T) {
+	t.Parallel()
+	// Three control characters cost 4 bytes each once escaped.
+	user := escapeControl("bob\a\a\a")
+	if user != `bob#007#007#007` {
+		t.Fatalf("escapeControl precondition failed: %q", user)
+	}
+
+	const maxLen = 40
+	parts := splitSyslogLine(user, "aaaa bbbb cccc dddd eeee ffff gggg", maxLen)
+	if len(parts) < 2 {
+		t.Fatalf("expected the line to be split, got %d part(s): %q", len(parts), parts)
+	}
+	for i, p := range parts {
+		if len(p) > maxLen {
+			t.Errorf("part %d is %d bytes, over the %d-byte syslog limit: %q", i, len(p), maxLen, p)
+		}
+	}
+}

@@ -347,8 +347,26 @@ Consequence: the timestamp used for `strftime` escapes is the server's wall cloc
 construction time, **not** the client's `submit_time`.
 
 Consequence of the ordering: `%{...}` substitution happens *before* `strftime`, so a
-client-supplied value that itself contains a `%` conversion will be interpreted by
-`strftime`. The `/`→`_` rewrite (IOLOG-004) does not neutralise `%`.
+substituted value must not reach `strftime` as a conversion. Through sudo 1.9.18 it did,
+and the `/`→`_` rewrite (IOLOG-004) does not neutralise `%`: a client-supplied
+`submituser` of `%D` expanded to `10/22/26`, putting back the `/` that IOLOG-004 had just
+removed.
+
+Upstream `dd3e52b14` closed this. Every `%` in a substituted value is doubled
+(`escape_percent()`, `lib/iolog/iolog_path.c:40-70`), and a template's own `%%` is now
+copied through the scan untouched instead of being collapsed during it, so the collapse
+to a single `%` happens exactly once at the end — in the `strftime` pass when `strfit`
+is set, or in an explicit collapse loop when it is not. A conforming implementation MUST
+treat every substituted value as a literal.
+
+Two consequences of doing the `%{...}` substitution in a *single* pass, both of which the
+scan loop above depends on and neither of which survives a naive multi-pattern
+search-and-replace:
+
+- `%%` MUST consume both bytes, so `%%{user}` is a literal `%` followed by the ordinary
+  characters `{user}` — **not** a `%` followed by the `%{user}` escape.
+- An unrecognised `%{name}`, and a `%{` with no closing brace, leave the `%` literal and
+  let the braces be copied as ordinary characters. `strfit` is not set in either case.
 
 ### IOLOG-007 — Leading duplicate slashes collapse; trailing slashes are trimmed
 
@@ -931,12 +949,14 @@ If no `passprompt_regex` appears in the configuration, the server MUST install t
 default pattern `"[Pp]assword[: ]*"` (`PASSPROMPT_REGEX`). Multiple `passprompt_regex`
 lines accumulate into a list, all of which are tried.
 
-Implementation detail worth *not* copying: the filter handle returned by
-`logsrvd_conf_iolog_passprompt_regex()` is a single process-wide object owned by the
-configuration, and `is_filtered` lives inside it. Concurrent sessions therefore share one
-masking state — a ttyout buffer on connection A can disarm masking that connection B had
-armed. A reimplementation with per-session filter state is strictly more correct and
-produces logs that differ from the C server only in adversarial/concurrent cases.
+Implementation detail, now converged: through sudo 1.9.18 the filter handle returned by
+`logsrvd_conf_iolog_passprompt_regex()` was a single process-wide object owned by the
+configuration, with `is_filtered` inside it. Concurrent sessions therefore shared one
+masking state — a ttyout buffer on connection A could disarm masking that connection B
+had armed, logging B's password in the clear. Upstream `bcecbce99` moved the flag out to
+the caller: `iolog_pwfilt_run()` takes a `bool *is_filtered`, backed by per-connection
+`closure->pwfilt_active`. The pattern list stays shared (it is read-only); only the
+masking state is per session, which is the model this server already used.
 
 ### IOLOG-042 — `log_id` is base64 of the 16-byte UUID concatenated with the relative path
 
@@ -1014,6 +1034,14 @@ For an uncompressed log the server MUST:
 5. Issue `iolog_seek(&timing, 0, SEEK_CUR)` before writing, because ISO C requires a seek
    or flush between reading and writing the same `FILE*`
    (`logsrvd/logsrvd_local.c:588-592`).
+
+Every failure in that loop is fatal, not just the two resume-point mismatches. The
+`default:` arm of the `iolog_read_timing_record` switch goes straight to `bad`
+(`logsrvd/logsrv_util.c:144-153`), so an unreadable timing file, a malformed record, an
+unparseable marker or delay and a missing or out-of-range byte count all return `false`,
+which `store_restart_local` reports to the client as `"unable to restart log"`
+(`logsrvd/logsrvd_local.c:617-620`). There is no append-mode fallback anywhere in C: a
+restart either seeks to an exact offset or does not happen.
 
 No file is truncated. Writes resume at the seeked offsets and overwrite forward; any
 bytes in a stream file beyond the resume point that the resumed session does not

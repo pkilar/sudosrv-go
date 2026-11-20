@@ -58,7 +58,8 @@ python3 docs/logsrvd-reference/generate-conformance.py
 ## Where conformance stands
 
 All 320 requirements were re-verified against the current tree and every non-`MATCH`
-verdict independently challenged: **121 `MATCH`**, 27 `INTENTIONAL`, 87 `PARTIAL`,
+verdict independently challenged. Two requirements have since been appended (`PROTO-054`,
+`CONF-069`), for 322 in total: **125 `MATCH`**, 27 `INTENTIONAL`, 85 `PARTIAL`,
 37 `DIVERGENT`, 33 `ABSENT`, 15 `NA`.
 
 **Nothing is graded `medium`, `high` or `breaking`.** Every requirement that named a defect
@@ -78,6 +79,49 @@ Two structural facts bound everything else:
 `PARTIAL` at 87 is the largest non-`MATCH` bucket, and that is expected rather than
 alarming: most are a supported main path plus an unimplemented option or edge case. Read
 the severity, not the verdict.
+
+## Upstream deltas reviewed since the pinned revision
+
+The provenance table above is the revision the documents were **derived** against, and it
+stays there until a full re-derivation pass happens. This section records targeted reviews
+of upstream changes made since then, so the gap is visible rather than silent.
+
+### `36f712825` → `d58e85d86` (2026-07-19 → 2026-11-16)
+
+91 upstream commits, of which 22 touch `logsrvd/`, `lib/iolog/`, `lib/eventlog/` or the
+protocol documentation. Each was read and checked against this server. Four were ported:
+
+| Upstream | What | Landed as |
+|---|---|---|
+| `e6f482a8d` | `submituser` was not control-char escaped in the syslog/logfile prefix — a newline in it forges a second audit record | `CONF-069` (new) |
+| `dd3e52b14` | `%{...}` values were re-read by the `strftime` pass, so a client-chosen `submituser` of `%H` became the hour | `IOLOG-006` (text + verdict) |
+| `5e3b8b04a` | `AcceptMessage`/`RejectMessage`/`AlertMessage` info values gained documented length and ID bounds | `PROTO-054` (new) |
+| `2642dc5d2`, `ce87ba7f0` | timing-file byte counts could be negative or overflow the per-stream sum, sending a resume seek into the middle of a stored transcript | `IOLOG-006`-adjacent hardening in `computeResumeOffsetsAt` |
+
+Four more changed requirement *text* without changing this server's behaviour, because
+they fixed C-side bugs this implementation never had:
+
+| Upstream | Requirement | Effect here |
+|---|---|---|
+| `bcecbce99` | `IOLOG-041` | C moved password-filter state out of a process-global handle into the per-connection closure — the model used here from the start |
+| `fcc315fa7` | `PROTO-022` | `handle_restart()` now returns false and the caller schedules the error; observable behaviour unchanged |
+| `1633d1178` | `TLS-028` | the relay ex_data type confusion is fixed upstream; no analogue here, which has no custom verify callback |
+| `8fe928fb9`, `d58e85d86` | `TLS-017` | C now forward-confirms the PTR name before trusting it; `tls_checkhost` is unimplemented here, so this is a prerequisite if it is ever added |
+
+The remaining 14 are C-only artifacts with no behavioural counterpart: `-Wconversion` and
+`-Wsign-compare` casts (`513e27f74`, `ca07f7407`), use-after-free and missing-comma fixes
+(`5a9c1302a`, `39b5af01a`), buffer-shift underflow in a helper that only exists in the C
+fix (`265e10a74`), and fixes to `iolog_copy`/`journal_restart`/`iolog_rewrite` paths whose
+Go equivalents either do not copy or already append (`075229d0e`, `c47546f09`,
+`1e5c89de0`, `5c4fb4cc6`).
+
+Porting `dd3e52b14` also closed a pre-existing divergence of this server's own. The
+`%{...}` pass used `strings.Replacer`, which matches its patterns anywhere in the subject
+and so read the second `%` of a literal `%%` as the start of an escape: with
+`iolog_file = "%%{user}"` and a client named `alice`, the Replacer produced `%alice`, and
+the `strftime` pass then read `%a` as the abbreviated weekday and emitted `Thulice`.
+`expandIologTemplate` replaces it with a single left-to-right scan modelled directly on
+C's loop, which cannot re-read what it has written. See `IOLOG-006`.
 
 ## Requirement IDs are a contract
 
