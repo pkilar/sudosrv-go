@@ -1709,14 +1709,26 @@ func parseTimingDelay(s string) (time.Duration, error) {
 	return time.Duration(sec)*time.Second + time.Duration(nsec)*time.Nanosecond, nil
 }
 
+// errResumePointMisaligned marks the ONE class of computeResumeOffsetsAt
+// failure a caller may fall back to append mode on: the stored timing is
+// complete and parses cleanly, the client's resume_point simply does not land
+// on a record boundary. Every other failure means the timing file could not be
+// read or understood, so the offsets it would have produced are unknown -- and
+// appending to a log whose records describe something else is not a safe
+// degradation, it is a corrupt transcript with no warning attached to the
+// bytes. Callers refuse the restart on those, as C does for every iolog_seekto
+// failure (logsrvd/logsrvd_local.c:617-620, "unable to restart log").
+var errResumePointMisaligned = errors.New("resume_point does not align with stored timing")
+
 // computeResumeOffsets replays the timing file to find the byte offset at which a
 // restart should resume so resent I/O OVERWRITES (not duplicates) everything
 // recorded after target. It mirrors C sudo's iolog_seekto: each record's delay
 // is accumulated and each stream's offset advanced by the record's byte count
 // until the cumulative elapsed time equals target. An exact match is required —
 // an overshoot or hitting EOF first means resume_point does not align with the
-// stored log (same condition C treats as an error), reported via the error so
-// the caller can fall back to append mode. A zero target resumes at the start.
+// stored log (same condition C treats as an error) and is reported wrapped in
+// errResumePointMisaligned, which is the only failure the caller may continue
+// past. A zero target resumes at the start.
 func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (int64, map[string]int64, error) {
 	streamOffsets := make(map[string]int64)
 	if target <= 0 {
@@ -1770,8 +1782,8 @@ func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (i
 			// overflow for the same reason -- a wrapped sum is a small positive
 			// offset that silently truncates the stream. C rejects both with
 			// EOVERFLOW (upstream 2642dc5d2, ce87ba7f0); the timing file is
-			// ours, so this only bites on corruption or tampering, but the
-			// fallback (append mode) is strictly safer than a bad seek.
+			// ours, so this only bites on corruption or tampering; the caller
+			// refuses the restart rather than seeking blind.
 			nbytes, err := strconv.ParseUint(fields[2], 10, 63)
 			if err != nil {
 				return 0, nil, fmt.Errorf("bad timing byte count %q: %w", fields[2], err)
@@ -1786,10 +1798,10 @@ func computeResumeOffsetsAt(root *os.Root, name string, target time.Duration) (i
 			if elapsed == target {
 				return timingOffset, streamOffsets, nil
 			}
-			return 0, nil, fmt.Errorf("resume_point %v overshoots stored timing (nearest boundary %v)", target, elapsed)
+			return 0, nil, fmt.Errorf("%w: %v overshoots stored timing (nearest boundary %v)", errResumePointMisaligned, target, elapsed)
 		}
 	}
-	return 0, nil, fmt.Errorf("resume_point %v is beyond the end of the stored timing", target)
+	return 0, nil, fmt.Errorf("%w: %v is beyond the end of the stored timing", errResumePointMisaligned, target)
 }
 
 // openForRestartAt opens an existing session file for a restart. When seek is
@@ -1895,14 +1907,32 @@ func NewRestartSession(restartMsg *pb.RestartMessage, cfg *config.LocalStorageCo
 	// Determine where to resume. C sudo's iolog_seekto (logsrvd/logsrv_util.c)
 	// replays the timing file to find the byte offset of resume_point in each
 	// stream, then OVERWRITES everything after it so resent I/O is not
-	// duplicated. We do the same: compute the offsets, then truncate+seek each
-	// file to its resume position. If resume_point does not align with the
+	// duplicated. We do the same: compute the offsets, then seek each file to
+	// its resume position.
+	//
+	// Two failures, two answers. A resume_point that does not align with the
 	// stored timing (overshoot or past EOF — e.g. an older client that sent
-	// per-stream commit points), fall back to append mode rather than failing
-	// the restart, logging a warning so the divergence is visible.
+	// per-stream commit points) falls back to append mode rather than failing
+	// the restart: the stored records are intact, so the worst case is a
+	// duplicated overlap region, and a warning makes the divergence visible.
+	// That fallback is itself a deliberate divergence — C fails here too.
+	//
+	// A timing file we cannot read or parse is NOT that case. Its offsets are
+	// unknown, so appending writes new records onto a transcript whose
+	// existing records describe something else, and nothing in the resulting
+	// files says so — sudoreplay is driven by exactly the file we just failed
+	// to understand. There is no degraded mode worth having, so refuse the
+	// restart as C does for every iolog_seekto failure
+	// (logsrvd/logsrvd_local.c:617-620). Refusing also leaves every stored
+	// byte untouched, since nothing is opened for writing below.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
 	rp := restartMsg.GetResumePoint()
 	resumeDur := time.Duration(rp.GetTvSec())*time.Second + time.Duration(rp.GetTvNsec())*time.Nanosecond
 	timingOffset, streamOffsets, seekErr := computeResumeOffsetsAt(root, fileTiming, resumeDur)
+	if seekErr != nil && !errors.Is(seekErr, errResumePointMisaligned) {
+		return nil, fmt.Errorf("cannot restart %s: %w", restartMsg.GetLogId(), seekErr)
+	}
 	useSeek := seekErr == nil
 	if seekErr != nil && resumeDur > 0 {
 		slog.Warn("Restart resume_point does not align with stored timing; appending instead of seeking (overlap region may be duplicated)",

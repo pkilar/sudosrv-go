@@ -5,6 +5,7 @@ package storage
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1875,6 +1876,28 @@ func TestIologEscapeParity(t *testing.T) {
 // OVERWRITES the post-resume data (matching C's iolog_seekto) when the point
 // aligns, and falls back to append (preserving the old, never-fail behavior)
 // when it does not.
+// snapshotDir reads every regular file in dir, keyed by name, so a test can
+// assert that a failed operation changed nothing.
+func snapshotDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read session dir: %v", err)
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		out[e.Name()] = string(data)
+	}
+	return out
+}
+
 func TestRestartResumeSeek(t *testing.T) {
 	newCfg := func(dir string) *config.LocalStorageConfig {
 		return &config.LocalStorageConfig{
@@ -2015,6 +2038,73 @@ func TestRestartResumeSeek(t *testing.T) {
 		if string(after) != string(before) {
 			t.Errorf("ttyout = %q, want %q unchanged: a restart that sends no data must not "+
 				"alter recorded bytes", after, before)
+		}
+	})
+
+	// A timing file that cannot be read or parsed is not a misaligned
+	// resume_point: there is no offset to seek to and no honest way to append,
+	// since the records already on disk describe something the server could
+	// not understand. Appending would leave a transcript sudoreplay walks off
+	// the end of, with nothing in the files saying why. C refuses every
+	// iolog_seekto failure (logsrvd/logsrvd_local.c:617-620, "unable to
+	// restart log") and so must this, which also means every stored byte is
+	// still there afterwards -- the point of the snapshot comparison below.
+	//
+	// Each timing file here is a VALID first record plus one corrupt second
+	// record, so the only thing wrong with it is the thing being tested; a
+	// wholesale garbage file would be refused whatever the classification.
+	//
+	// Conformance: docs/logsrvd-reference/ IOLOG-045.
+	t.Run("CorruptTimingRefusesRestartAndTouchesNothing", func(t *testing.T) {
+		const validFirst = "1 0.000000 5\n"
+		corruptions := map[string]string{
+			"malformed record":    validFirst + "1\n",
+			"bad marker":          validFirst + "x 1.000000 5\n",
+			"bad delay":           validFirst + "1 notanumber 5\n",
+			"missing byte count":  validFirst + "1 1.000000\n",
+			"negative byte count": validFirst + "1 1.000000 -40\n",
+			"byte counts overflow": validFirst +
+				"1 1.000000 9223372036854775807\n1 2.000000 9223372036854775807\n",
+		}
+
+		for name, timing := range corruptions {
+			t.Run(name, func(t *testing.T) {
+				cfg := newCfg(t.TempDir())
+				logID, sessDir := seed(t, cfg)
+				if err := os.WriteFile(filepath.Join(sessDir, "timing"), []byte(timing), 0o600); err != nil {
+					t.Fatalf("write corrupt timing: %v", err)
+				}
+
+				before := snapshotDir(t, sessDir)
+
+				s2, err := NewRestartSession(&pb.RestartMessage{
+					LogId: logID, ResumePoint: &pb.TimeSpec{TvSec: 1},
+				}, cfg)
+				if err == nil {
+					_ = s2.Close()
+					t.Fatal("NewRestartSession accepted a corrupt timing file, want a refusal")
+				}
+				// Not just "an error": a misaligned resume_point is a DIFFERENT
+				// outcome that legitimately succeeds in append mode, and this
+				// assertion would pass if corruption were ever reclassified
+				// into it.
+				if errors.Is(err, errResumePointMisaligned) {
+					t.Fatalf("corrupt timing was classified as a misaligned resume_point, "+
+						"which falls back to append instead of refusing: %v", err)
+				}
+
+				for name, want := range before {
+					got, ok := snapshotDir(t, sessDir)[name]
+					if !ok {
+						t.Errorf("%s disappeared during a refused restart", name)
+						continue
+					}
+					if got != want {
+						t.Errorf("%s changed during a refused restart: %q -> %q "+
+							"(a restart that was refused must not write a byte)", name, want, got)
+					}
+				}
+			})
 		}
 	})
 }
@@ -2284,8 +2374,8 @@ func TestIologEscapeValuesAreLiteral(t *testing.T) {
 // guards C added in 2642dc5d2 and ce87ba7f0. A negative count would walk the
 // resume offset backwards and a wrapped sum would land it near zero; either way
 // the session seeks into the middle of the stored transcript and overwrites
-// bytes that are already there. Both must be reported so the caller falls back
-// to append mode.
+// bytes that are already there. Both must be reported as corruption, which the
+// restart path refuses rather than appending past.
 func TestComputeResumeOffsetsRejectsBadByteCounts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2316,6 +2406,13 @@ func TestComputeResumeOffsetsRejectsBadByteCounts(t *testing.T) {
 			_, _, err = computeResumeOffsetsAt(root, "timing", time.Second)
 			if err == nil {
 				t.Fatal("expected an error for a timing file with an unusable byte count, got nil")
+			}
+			// Which error matters: errResumePointMisaligned is the one class
+			// the restart path continues past in append mode, so an unusable
+			// byte count must not be reported as that.
+			if errors.Is(err, errResumePointMisaligned) {
+				t.Fatalf("unusable byte count reported as a misaligned resume_point, "+
+					"which falls back to append instead of refusing: %v", err)
 			}
 		})
 	}
